@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- SPDX-License-Identifier: GPL-3.0-or-later. Copyright (C) 2026 Pedro Ayala. -->
+  <!-- Rollbook app icon (master). PNG/ICNS/ICO in assets/ are rendered from this. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#232933"/>
+      <stop offset="1" stop-color="#11141a"/>
+    </linearGradient>
+    <linearGradient id="tyre" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffa04d"/>
+      <stop offset="1" stop-color="#f2640a"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <!-- the route it rolls along: start dot, then a trail into the wheel -->
+  <path d="M70 400 C130 400 150 338 214 338" fill="none" stroke="#ff7a1a" stroke-width="22" stroke-linecap="round" opacity=".55"/>
+  <circle cx="70" cy="400" r="22" fill="#3ecf8e"/>
+  <!-- speed lines -->
+  <g stroke="#e6e9ee" stroke-width="18" stroke-linecap="round" opacity=".8">
+    <line x1="64" y1="196" x2="138" y2="196"/>
+    <line x1="92" y1="258" x2="150" y2="258"/>
+  </g>
+  <!-- wheel: urethane tyre, 5-spoke core, bearing -->
+  <circle cx="312" cy="250" r="144" fill="url(#tyre)"/>
+  <circle cx="312" cy="250" r="96" fill="#1a1e25"/>
+  <g fill="#3a4250">
+    <path id="spoke" d="M300 250 L292 166 Q312 158 332 166 L324 250 Z"/>
+    <use href="#spoke" transform="rotate(72 312 250)"/>
+    <use href="#spoke" transform="rotate(144 312 250)"/>
+    <use href="#spoke" transform="rotate(216 312 250)"/>
+    <use href="#spoke" transform="rotate(288 312 250)"/>
+  </g>
+  <circle cx="312" cy="250" r="40" fill="#e6e9ee"/>
+  <circle cx="312" cy="250" r="16" fill="#1a1e25"/>
+  <!-- tyre highlight -->
+  <path d="M206 196 A120 120 0 0 1 288 128" fill="none" stroke="#fff" stroke-width="10" stroke-linecap="round" opacity=".35"/>
+</svg>

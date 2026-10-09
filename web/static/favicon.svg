@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- SPDX-License-Identifier: GPL-3.0-or-later. Copyright (C) 2026 Pedro Ayala. -->
+  <!-- Rollbook favicon: icon.svg simplified for 16-32 px -->
+  <rect width="64" height="64" rx="14" fill="#171b21"/>
+  <g stroke="#e6e9ee" stroke-width="4" stroke-linecap="round" opacity=".85">
+    <line x1="7" y1="24" x2="16" y2="24"/>
+    <line x1="10" y1="33" x2="17" y2="33"/>
+  </g>
+  <circle cx="38" cy="32" r="21" fill="#ff7a1a"/>
+  <circle cx="38" cy="32" r="12" fill="#1a1e25"/>
+  <circle cx="38" cy="32" r="5.5" fill="#e6e9ee"/>
+</svg>

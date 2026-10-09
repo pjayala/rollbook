@@ -1,0 +1,1601 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Pedro Ayala. Rollbook is free software, see LICENSE.
+"""Rollbook: offline training log built from a Strava account export.
+
+Activity analyser for GPX/TCX/FIT files, with an optional Strava API v3 backend.
+
+GPX mode needs no account and is the default: pass a .gpx path anywhere an
+activity id is accepted.
+
+The API mode requires a paid Strava subscription (both mcp.strava.com and the
+v3 REST API are subscriber-only as of 2026), so it stays unused on a free
+account. It is kept wired up in case the account is ever upgraded.
+
+Credentials : ~/.config/rollbook/credentials.json   {"client_id": "...", "client_secret": "..."}
+Tokens      : ~/.local/share/rollbook/token.json    (auto-refreshed)
+Stream cache: ~/.local/share/rollbook/cache/<id>.json
+
+Commands
+  rollbook analyze <file.gpx|id>       distance / pauses / splits / out-back / grade
+  rollbook compare <a> <b> [...]       side-by-side summary table
+  rollbook streams <file.gpx|id>       list available data channels
+  rollbook activities [-n N] [-t TYPE] list recent activities        (API only)
+  rollbook login | whoami              OAuth setup / check           (API only)
+"""
+
+import argparse
+import hashlib
+import http.server
+import json
+import math
+import os
+import statistics
+import stat
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import webbrowser
+import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta, timezone
+
+CRED = os.path.expanduser("~/.config/rollbook/credentials.json")
+# All generated state lives under ROLLBOOK_HOME so the dataset can be relocated
+# into a project directory. Defaults to the old location for back-compat.
+HOME = os.path.abspath(
+    os.path.expanduser(os.environ.get("ROLLBOOK_HOME") or "~/.local/share/rollbook")
+)
+TOKEN = os.path.join(HOME, "token.json")
+CACHE = os.path.join(HOME, "cache")
+PORT = 35623
+REDIRECT = f"http://localhost:{PORT}/callback"
+SCOPE = "read_all,activity:read_all,profile:read_all"
+API = "https://www.strava.com/api/v3"
+STREAM_KEYS = "time,distance,latlng,altitude,heartrate,cadence,watts,velocity_smooth,moving,grade_smooth"
+
+# ---------------------------------------------------------------- credentials
+
+
+def die(msg, code=1):
+    print(f"error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def write_private(path, obj):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as fh:
+        json.dump(obj, fh, indent=2)
+    os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)  # 0600
+
+
+def creds():
+    cid = os.environ.get("STRAVA_CLIENT_ID")
+    sec = os.environ.get("STRAVA_CLIENT_SECRET")
+    if cid and sec:
+        return cid, sec
+    if not os.path.exists(CRED):
+        die(
+            f"no credentials. Create {CRED} with:\n"
+            '  {"client_id": "12345", "client_secret": "abc..."}\n'
+            "from https://www.strava.com/settings/api "
+            "(Authorization Callback Domain must be: localhost)"
+        )
+    d = json.load(open(CRED))
+    return str(d["client_id"]), d["client_secret"]
+
+
+def post_form(url, data):
+    body = urllib.parse.urlencode(data).encode()
+    req = urllib.request.Request(url, data=body, method="POST")
+    try:
+        with urllib.request.urlopen(req) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        die(f"{url} -> {e.code}: {e.read().decode()[:400]}")
+
+
+# ---------------------------------------------------------------------- auth
+
+
+def login():
+    cid, sec = creds()
+    got = {}
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            got.update({k: v[0] for k, v in q.items()})
+            ok = "code" in got
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(
+                b"<h2>Strava authorised. Close this tab.</h2>"
+                if ok
+                else b"<h2>Authorisation failed.</h2>"
+            )
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", PORT), H)
+    threading.Thread(target=srv.handle_request, daemon=True).start()
+
+    url = "https://www.strava.com/oauth/authorize?" + urllib.parse.urlencode(
+        {
+            "client_id": cid,
+            "redirect_uri": REDIRECT,
+            "response_type": "code",
+            "approval_prompt": "auto",
+            "scope": SCOPE,
+        }
+    )
+    print("opening browser:\n ", url)
+    webbrowser.open(url)
+    for _ in range(300):
+        if got:
+            break
+        time.sleep(1)
+    srv.server_close()
+    if "code" not in got:
+        die(f"no authorisation code received ({got or 'timeout'})")
+
+    tok = post_form(
+        "https://www.strava.com/oauth/token",
+        {
+            "client_id": cid,
+            "client_secret": sec,
+            "code": got["code"],
+            "grant_type": "authorization_code",
+        },
+    )
+    write_private(TOKEN, tok)
+    print(f"authorised. scope={got.get('scope')}  token -> {TOKEN}")
+
+
+def token():
+    if not os.path.exists(TOKEN):
+        die("not authorised. run: rollbook login")
+    t = json.load(open(TOKEN))
+    if t.get("expires_at", 0) - 60 > time.time():
+        return t["access_token"]
+    cid, sec = creds()
+    new = post_form(
+        "https://www.strava.com/oauth/token",
+        {
+            "client_id": cid,
+            "client_secret": sec,
+            "grant_type": "refresh_token",
+            "refresh_token": t["refresh_token"],
+        },
+    )
+    t.update(new)
+    write_private(TOKEN, t)
+    return t["access_token"]
+
+
+def get(path, **params):
+    url = f"{API}{path}"
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token()}"})
+    try:
+        with urllib.request.urlopen(req) as r:
+            for h in ("X-RateLimit-Usage", "X-RateLimit-Limit"):
+                if r.headers.get(h) and os.environ.get("ROLLBOOK_DEBUG"):
+                    print(f"  {h}: {r.headers[h]}", file=sys.stderr)
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode()[:400]
+        if e.code == 429:
+            die("rate limited (100 req/15min, 1000/day). wait and retry.")
+        die(f"GET {path} -> {e.code}: {detail}")
+
+
+# ------------------------------------------------------------------- streams
+
+
+def streams(aid, refresh=False):
+    p = os.path.join(CACHE, f"{aid}.json")
+    if os.path.exists(p) and not refresh:
+        return json.load(open(p))
+    s = get(f"/activities/{aid}/streams", keys=STREAM_KEYS, key_by_type="true")
+    os.makedirs(CACHE, exist_ok=True)
+    json.dump(s, open(p, "w"))
+    return s
+
+
+def activity(aid):
+    p = os.path.join(CACHE, f"{aid}.meta.json")
+    if os.path.exists(p):
+        return json.load(open(p))
+    a = get(f"/activities/{aid}")
+    json.dump(a, open(p, "w"))
+    return a
+
+
+# ----------------------------------------------------------------- gpx input
+
+GNS = "{http://www.topografix.com/GPX/1/1}"
+TPX = "{http://www.garmin.com/xmlschemas/TrackPointExtension/v1}"
+TCXNS = "{http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2}"
+
+
+def opener(path):
+    """Open plain or gzipped files transparently, in binary mode."""
+    if path.endswith(".gz"):
+        import gzip
+
+        return gzip.open(path, "rb")
+    return open(path, "rb")
+
+
+def parse_xml(path):
+    """Parse XML tolerating leading whitespace/BOM before the declaration,
+    which some Strava-exported TCX files carry."""
+    with opener(path) as fh:
+        raw = fh.read()
+    return ET.fromstring(raw.lstrip(b"\xef\xbb\xbf \t\r\n"))
+
+
+def parse_time(s):
+    s = s.strip().replace("Z", "+00:00")
+    dt = datetime.fromisoformat(s)
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def pts_to_streams(pts, meta_name, meta_type, path):
+    """pts: list of (dt, lat|None, lon|None, ele, hr, cad, dist|None, speed|None).
+
+    Partial GPS is preserved: devices routinely emit samples before the first
+    fix (FIT writes 0x7FFFFFFF, TCX omits <Position>), so the channel is kept
+    whenever *any* sample has a fix and gaps are carried as None.
+
+    Activities with neither GPS, odometer nor speed (indoor / HR-only) are still
+    kept: they carry time, elevation and heart rate.
+    """
+    if len(pts) < 2:
+        die(f"{path}: fewer than 2 timestamped samples")
+    pts.sort(key=lambda r: r[0])
+    t0 = pts[0][0]
+    s = {"time": {"data": [int((p[0] - t0).total_seconds()) for p in pts]}}
+    if any(p[1] is not None and p[2] is not None for p in pts):
+        s["latlng"] = {
+            "data": [
+                [p[1], p[2]] if p[1] is not None and p[2] is not None else [None, None]
+                for p in pts
+            ]
+        }
+    if any(p[6] is not None for p in pts):
+        # carry the device's own odometer when present; monotonic-clamp it
+        d, last = [], 0.0
+        for p in pts:
+            last = p[6] if p[6] is not None and p[6] >= last else last
+            d.append(last)
+        s["distance"] = {"data": d}
+    if any(p[7] is not None for p in pts):
+        s["velocity_smooth"] = {"data": [p[7] for p in pts]}
+    s["altitude"] = {"data": [p[3] for p in pts]}
+    if any(p[4] for p in pts):
+        s["heartrate"] = {"data": [p[4] for p in pts]}
+    if any(p[5] for p in pts):
+        s["cadence"] = {"data": [p[5] for p in pts]}
+    meta = {
+        "name": meta_name or os.path.basename(path),
+        "type": meta_type or "unknown",
+        "start_date_local": t0.isoformat(),
+        "source": path,
+    }
+    return meta, s
+
+
+def gpx_load(path):
+    root = parse_xml(path)
+    name = root.find(f".//{GNS}name")
+    typ = root.find(f".//{GNS}type")
+    pts, skipped = [], 0
+    for p in root.iter(f"{GNS}trkpt"):
+        tm = p.find(f"{GNS}time")
+        if tm is None:
+            continue
+        lat, lon = p.get("lat"), p.get("lon")
+        if lat is None or lon is None:
+            skipped += 1  # GPS-less sample inside a GPS track
+            continue
+        ele = p.find(f"{GNS}ele")
+        hr = p.find(f".//{TPX}hr")
+        cad = p.find(f".//{TPX}cad")
+        pts.append(
+            (
+                parse_time(tm.text),
+                float(lat),
+                float(lon),
+                float(ele.text) if ele is not None and ele.text else 0.0,
+                int(hr.text) if hr is not None and hr.text else 0,
+                int(cad.text) if cad is not None and cad.text else 0,
+                None,
+                None,
+            )
+        )
+    return pts_to_streams(
+        pts,
+        name.text if name is not None else None,
+        typ.text if typ is not None else None,
+        path,
+    )
+
+
+def tcx_load(path):
+    root = parse_xml(path)
+    act = root.find(f".//{TCXNS}Activity")
+    typ = act.get("Sport") if act is not None else None
+    pts = []
+    for tp in root.iter(f"{TCXNS}Trackpoint"):
+        tm = tp.find(f"{TCXNS}Time")
+        if tm is None or not tm.text:
+            continue
+        pos = tp.find(f"{TCXNS}Position")
+        lat = lon = None
+        if pos is not None:
+            la = pos.find(f"{TCXNS}LatitudeDegrees")
+            lo = pos.find(f"{TCXNS}LongitudeDegrees")
+            if la is not None and lo is not None and la.text and lo.text:
+                lat, lon = float(la.text), float(lo.text)
+
+        def num(tag, parent=tp):
+            e = parent.find(f"{TCXNS}{tag}")
+            try:
+                return float(e.text) if e is not None and e.text else None
+            except ValueError:
+                return None
+
+        hrn = tp.find(f"{TCXNS}HeartRateBpm")
+        hr = 0
+        if hrn is not None:
+            v = hrn.find(f"{TCXNS}Value")
+            hr = int(v.text) if v is not None and v.text else 0
+        pts.append(
+            (
+                parse_time(tm.text),
+                lat,
+                lon,
+                num("AltitudeMeters") or 0.0,
+                hr,
+                int(num("Cadence") or 0),
+                num("DistanceMeters"),
+                None,
+            )
+        )
+    return pts_to_streams(pts, os.path.basename(path), typ, path)
+
+
+
+
+# ----------------------------------------------------------------- fit input
+# Minimal FIT decoder: enough to pull `record` messages (msg 20) and the
+# `sport` message (12). Handles normal + compressed-timestamp headers,
+# developer fields (skipped), and both endiannesses.
+
+FIT_EPOCH = datetime(1989, 12, 31, tzinfo=timezone.utc)
+_BASE = {  # base_type -> (struct char, size, invalid)
+    0x00: ("B", 1, 0xFF),
+    0x01: ("b", 1, 0x7F),
+    0x02: ("B", 1, 0xFF),
+    0x83: ("h", 2, 0x7FFF),
+    0x84: ("H", 2, 0xFFFF),
+    0x85: ("i", 4, 0x7FFFFFFF),
+    0x86: ("I", 4, 0xFFFFFFFF),
+    0x07: ("s", 1, 0x00),
+    0x88: ("f", 4, None),
+    0x89: ("d", 8, None),
+    0x0A: ("B", 1, 0x00),
+    0x8B: ("H", 2, 0x0000),
+    0x8C: ("I", 4, 0x00000000),
+    0x8E: ("q", 8, 0x7FFFFFFFFFFFFFFF),
+    0x8F: ("Q", 8, 0xFFFFFFFFFFFFFFFF),
+    0x90: ("Q", 8, 0x0000000000000000),
+}
+SEMI = 180.0 / 2**31  # semicircles -> degrees
+
+
+def fit_load(path):
+    import struct
+
+    with opener(path) as fh:
+        buf = fh.read()
+    if len(buf) < 14 or buf[8:12] != b".FIT":
+        die(f"{path}: not a FIT file (missing .FIT signature)")
+    hdr = buf[0]
+    data_size = struct.unpack("<I", buf[4:8])[0]
+    pos, end = hdr, min(len(buf), hdr + data_size)
+
+    defs, recs, sport, session_sport = {}, [], None, None
+    while pos < end:
+        rh = buf[pos]
+        pos += 1
+        if rh & 0x80:  # compressed timestamp header
+            local = (rh >> 5) & 0x03
+            is_def, has_dev = False, False
+        else:
+            local = rh & 0x0F
+            is_def = bool(rh & 0x40)
+            has_dev = bool(rh & 0x20)
+
+        if is_def:
+            pos += 1  # reserved
+            arch = buf[pos]
+            pos += 1
+            e = "<" if arch == 0 else ">"
+            gmsg = struct.unpack(e + "H", buf[pos : pos + 2])[0]
+            pos += 2
+            nf = buf[pos]
+            pos += 1
+            fields = []
+            for _ in range(nf):
+                fnum, size, btype = buf[pos], buf[pos + 1], buf[pos + 2]
+                pos += 3
+                fields.append((fnum, size, btype))
+            dev = []
+            if has_dev:
+                nd = buf[pos]
+                pos += 1
+                for _ in range(nd):
+                    dev.append((buf[pos], buf[pos + 1], buf[pos + 2]))
+                    pos += 3
+            defs[local] = (gmsg, e, fields, dev)
+            continue
+
+        if local not in defs:
+            die(f"{path}: data record for undefined local type {local}")
+        gmsg, e, fields, dev = defs[local]
+        vals = {}
+        for fnum, size, btype in fields:
+            raw = buf[pos : pos + size]
+            pos += size
+            spec = _BASE.get(btype)
+            if spec is None:
+                continue
+            ch, isz, invalid = spec
+            if ch == "s":
+                vals[fnum] = raw.split(b"\x00")[0].decode("utf-8", "replace")
+                continue
+            n = size // isz
+            if n < 1:
+                continue
+            try:
+                got = struct.unpack(e + ch * n, raw[: isz * n])
+            except struct.error:
+                continue
+            v = got[0]
+            if invalid is not None and v == invalid:
+                v = None
+            vals[fnum] = v
+        for _, size, _ in dev:  # developer fields: consume, ignore
+            pos += size
+
+        if gmsg == 20:  # record
+            recs.append(vals)
+        elif gmsg == 12 and sport is None:  # sport
+            sport = vals
+        elif gmsg == 18 and session_sport is None:  # session: sport is field 5
+            session_sport = vals.get(5)
+
+    if not recs:
+        die(f"{path}: FIT contained no record messages")
+
+    SPORTS = {
+        0: "generic", 1: "running", 2: "cycling", 3: "transition",
+        4: "fitness_equipment", 5: "swimming", 11: "walking",
+        15: "rowing", 17: "hiking", 30: "inline_skating", 43: "skating",
+    }
+    pts = []
+    for r in recs:
+        ts = r.get(253)
+        if ts is None:
+            continue
+        lat, lon = r.get(0), r.get(1)
+        pts.append(
+            (
+                FIT_EPOCH + timedelta(seconds=ts),
+                lat * SEMI if lat is not None else None,
+                lon * SEMI if lon is not None else None,
+                (r[2] / 5.0 - 500.0) if r.get(2) is not None else 0.0,  # altitude
+                r.get(3) or 0,  # heart_rate
+                r.get(4) or 0,  # cadence
+                (r[5] / 100.0) if r.get(5) is not None else None,  # distance
+                (r[6] / 1000.0) if r.get(6) is not None else None,  # speed m/s
+            )
+        )
+    name = os.path.basename(path)
+    # "Export Original" files (e.g. HUAWEI) often have no sport message, only
+    # the session's sport field
+    typ = SPORTS.get(sport.get(0) if sport else session_sport, "unknown")
+    return pts_to_streams(pts, name, typ, path)
+
+
+LOADERS = ((".gpx", gpx_load), (".tcx", tcx_load), (".fit", fit_load))
+
+
+def load_file(path):
+    base = path[:-3] if path.endswith(".gz") else path
+    for ext, fn in LOADERS:
+        if base.lower().endswith(ext):
+            return fn(path)
+    die(f"{path}: unsupported format (want .gpx/.tcx/.fit, optionally .gz)")
+
+
+def resolve(ref, refresh=False):
+    """Accept a track file (gpx/tcx/fit, plain or .gz) or a Strava activity id."""
+    if os.path.exists(ref):
+        return load_file(ref)
+    if any(e in ref.lower() for e in (".gpx", ".tcx", ".fit")):
+        die(f"no such file: {ref}")
+    if not ref.isdigit():
+        die(f"not a file or numeric activity id: {ref}")
+    return activity(ref), streams(ref, refresh=refresh)
+
+
+
+# ------------------------------------------------------------------ analysis
+
+R = 6371000.0
+THR = 0.5  # m/s, below this counts as paused
+MAX_MS = 30.0  # m/s (108 km/h): instantaneous ceiling, catches GPS glitches
+GAP_S = 60.0  # a sample gap longer than this is "sustained", judged more strictly
+GAP_MAX_MS = 12.0  # m/s (43 km/h): sustained speed above this over a long gap
+#                    means the recording was stopped and resumed after transport,
+#                    not that the activity covered the distance. Sparse "smart
+#                    recording" gaps at running/skating speed stay counted.
+SPIKE_RESYNC = 5  # consecutive rejects before accepting the new position as real
+
+
+def haversine(a, b):
+    la1, lo1 = math.radians(a[0]), math.radians(a[1])
+    la2, lo2 = math.radians(b[0]), math.radians(b[1])
+    h = (
+        math.sin((la2 - la1) / 2) ** 2
+        + math.cos(la1) * math.cos(la2) * math.sin((lo2 - lo1) / 2) ** 2
+    )
+    return 2 * R * math.asin(math.sqrt(h))
+
+
+def _valid_ll(p):
+    if not p or p[0] is None or p[1] is None:
+        return False
+    if abs(p[0]) < 1e-7 and abs(p[1]) < 1e-7:
+        return False  # null island
+    return -90 <= p[0] <= 90 and -180 <= p[1] <= 180
+
+
+def cumulative_gps(t, ll):
+    """Cumulative distance from GPS, rejecting teleports and recording gaps.
+
+    Two rejection rules, matching how Strava treats the same data:
+      * implied speed > MAX_MS                 -> GPS glitch, sample discarded
+      * gap > GAP_S at more than GAP_MAX_MS    -> recording was stopped and
+        resumed after transport, so the jump earns no distance
+
+    After SPIKE_RESYNC consecutive rejects the device is assumed to have
+    genuinely re-acquired, so we resync to it without crediting the jump.
+    """
+    n = len(ll)
+    dist = [0.0] * n
+    acc, last, bad = 0.0, None, 0
+    for i in range(n):
+        p = ll[i]
+        if last is None:
+            if _valid_ll(p):
+                last = i
+            dist[i] = acc
+            continue
+        dt = t[i] - t[last]
+        d = haversine(ll[last], p) if _valid_ll(p) else None
+        ok = d is not None
+        if ok and dt > 0:
+            v = d / dt
+            if v > MAX_MS or (dt > GAP_S and v > GAP_MAX_MS):
+                ok = False
+        if ok:
+            # spread distance over samples without a fix since the last good
+            # point, instead of crediting it all to one step (a 134 s fix loss
+            # once showed up as a 149 km/h burst and a bogus best-30 s)
+            for k in range(last + 1, i):
+                dist[k] = acc + d * (t[k] - t[last]) / dt
+            acc += d
+            last, bad = i, 0
+        else:
+            bad += 1
+            if bad >= SPIKE_RESYNC and _valid_ll(p):
+                last, bad = i, 0
+            elif d is not None and dt > GAP_S:
+                last, bad = i, 0  # resync immediately across a stopped recording
+        dist[i] = acc
+    return dist
+
+
+def hm(s):
+    s = int(s or 0)
+    return f"{s // 60}:{s % 60:02d}"
+
+
+def cumulative_speed(t, v):
+    """Integrate a speed channel into cumulative distance (trapezoid)."""
+    dist, acc = [0.0], 0.0
+    for i in range(1, len(t)):
+        dt = t[i] - t[i - 1]
+        a, b = v[i - 1], v[i]
+        if dt > 0 and a is not None and b is not None:
+            acc += (a + b) / 2 * dt
+        dist.append(acc)
+    return dist
+
+
+def series(s):
+    """Return t, cumulative distance, ele, hr, latlng, has_distance.
+
+    Distance source preference, measured against Strava's own figures over 1740
+    activities: the device odometer agrees within 1% for 96% of them versus 91%
+    for filtered GPS, so the odometer wins when present. But some exported
+    odometers are stuck or truncated, so if one reports less than half of what
+    the GPS track shows, GPS wins. Failing both, an integrated speed channel is
+    used (some FIT files carry speed but no distance and no fix).
+    """
+    t = s["time"]["data"]
+    n = len(t)
+    ll = s["latlng"]["data"] if "latlng" in s else None
+    dev = s["distance"]["data"] if "distance" in s else None
+    vel = s["velocity_smooth"]["data"] if "velocity_smooth" in s else None
+    has_dist = True
+    gps = cumulative_gps(t, ll) if ll else None
+    if dev and gps and gps[-1] > 0 and dev[-1] < 0.5 * gps[-1]:
+        dist = gps  # odometer stuck or truncated
+    elif dev:
+        dist = dev
+    elif gps:
+        dist = gps
+    elif vel:
+        dist = cumulative_speed(t, vel)
+    else:
+        dist, has_dist = [0.0] * n, False  # indoor / HR-only workout
+    ele = s["altitude"]["data"] if "altitude" in s else [0.0] * n
+    hr = s["heartrate"]["data"] if "heartrate" in s else [None] * n
+    return t, dist, ele, hr, ll, has_dist
+
+
+def smooth(v, w=15):
+    return [statistics.mean(v[max(0, i - w) : i + w + 1]) for i in range(len(v))]
+
+
+def core(s):
+    t, dist, ele, hr, ll, has_dist = series(s)
+    n = len(t)
+    elapsed = t[-1] - t[0]
+    moving = 0.0
+    for i in range(n - 1):
+        dt = t[i + 1] - t[i]
+        dd = dist[i + 1] - dist[i]
+        if dt > 0 and dd / dt >= THR:
+            moving += dt
+    sm = smooth(ele)
+    up = sum(max(0.0, sm[i + 1] - sm[i]) for i in range(n - 1))
+    dn = sum(max(0.0, sm[i] - sm[i + 1]) for i in range(n - 1))
+    best30 = 0.0
+    for i in range(n - 30):
+        dt = t[i + 30] - t[i]
+        if dt > 0:
+            best30 = max(best30, (dist[i + 30] - dist[i]) / dt * 3.6)
+    hrs = [x for x in hr if x]
+    return {
+        "km": dist[-1] / 1000 if has_dist else None,
+        "elapsed": elapsed,
+        "moving": moving if has_dist else None,
+        "pause": elapsed - moving if has_dist else None,
+        "kmh_elapsed": dist[-1] / 1000 / (elapsed / 3600) if has_dist and elapsed else None,
+        "kmh_moving": dist[-1] / 1000 / (moving / 3600) if has_dist and moving else None,
+        "best30": best30 if has_dist else None,
+        "ele_min": min(ele),
+        "ele_max": max(ele),
+        "up": up,
+        "dn": dn,
+        "hr_avg": statistics.mean(hrs) if hrs else 0,
+        "hr_max": max(hrs) if hrs else 0,
+        "has_distance": has_dist,
+        "_t": t,
+        "_d": dist,
+        "_sm": sm,
+        "_hr": hr,
+        "_ll": ll,
+    }
+
+
+def splits(c):
+    if not c["has_distance"]:
+        return []
+    t, d, hr = c["_t"], c["_d"], c["_hr"]
+    out, cum, lt, lm, hrs = [], 0.0, 0.0, 0.0, []
+    for i in range(len(t) - 1):
+        dt = t[i + 1] - t[i]
+        dd = d[i + 1] - d[i]
+        if dt <= 0:
+            continue
+        if hr[i]:
+            hrs.append(hr[i])
+        rem = dd
+        while cum + rem >= 1000:
+            f = (1000 - cum) / dd if dd else 0
+            lt += dt * f
+            if dd / dt >= THR:
+                lm += dt * f
+            out.append((lt, lm, statistics.mean(hrs) if hrs else 0))
+            cum, lt, lm, hrs, rem = 0.0, 0.0, 0.0, [], rem - (1000 - cum)
+        f = rem / dd if dd else 1
+        lt += dt * f
+        if dd / dt >= THR:
+            lm += dt * f
+        cum += rem
+    return out
+
+
+def outback(c):
+    ll, t, d, sm = c["_ll"], c["_t"], c["_d"], c["_sm"]
+    if not ll:
+        return None
+    valid = [i for i in range(len(ll)) if _valid_ll(ll[i])]
+    if len(valid) < 20:
+        return None
+    origin = ll[valid[0]]
+    far = max(valid, key=lambda i: haversine(origin, ll[i]))
+    if far < valid[0] + 10 or far > valid[-1] - 10:
+        return None
+
+    def leg(i0, i1):
+        mv = 0.0
+        for i in range(i0, i1):
+            dt = t[i + 1] - t[i]
+            dd = d[i + 1] - d[i]
+            if dt > 0 and dd / dt >= THR:
+                mv += dt
+        dist = d[i1] - d[i0]
+        up = sum(max(0.0, sm[i + 1] - sm[i]) for i in range(i0, i1))
+        dn = sum(max(0.0, sm[i] - sm[i + 1]) for i in range(i0, i1))
+        return {
+            "km": dist / 1000,
+            "elapsed": t[i1] - t[i0],
+            "moving": mv,
+            "kmh": dist / 1000 / (mv / 3600) if mv else 0,
+            "up": up,
+            "dn": dn,
+            "net": sm[i1] - sm[i0],
+            "grade": (sm[i1] - sm[i0]) / dist * 100 if dist else 0,
+        }
+
+    return {
+        "turn_km": d[far] / 1000,
+        "crow_km": haversine(origin, ll[far]) / 1000,
+        "out": leg(0, far),
+        "back": leg(far, len(ll) - 1),
+    }
+
+
+# ------------------------------------------------------------------ commands
+
+
+def cmd_whoami(a):
+    m = get("/athlete")
+    print(
+        f"{m.get('firstname')} {m.get('lastname')} (id {m.get('id')}) "
+        f"{m.get('city') or ''} {m.get('country') or ''} "
+        f"weight={m.get('weight')}kg premium={m.get('premium')}"
+    )
+
+
+def cmd_activities(a):
+    rows, page = [], 1
+    while len(rows) < a.n:
+        batch = get(
+            "/athlete/activities", per_page=min(200, a.n - len(rows)), page=page
+        )
+        if not batch:
+            break
+        rows += batch
+        page += 1
+    if a.type:
+        rows = [r for r in rows if a.type.lower() in r["type"].lower()]
+    print(f"{'id':<12} {'date':<17} {'type':<16} {'km':>7} {'moving':>8} {'km/h':>6} {'hr':>4}  name")
+    for r in rows[: a.n]:
+        mt = r.get("moving_time") or 0
+        km = r.get("distance", 0) / 1000
+        print(
+            f"{r['id']:<12} {r['start_date_local'][:16]:<17} {r['type'][:16]:<16} "
+            f"{km:>7.2f} {hm(mt):>8} {km / (mt / 3600) if mt else 0:>6.2f} "
+            f"{r.get('average_heartrate') or 0:>4.0f}  {r['name'][:40]}"
+        )
+    print(f"\n{len(rows[: a.n])} activities")
+
+
+def cmd_streams(a):
+    meta, s = resolve(a.id, refresh=a.refresh)
+    print(f"{meta['name']}: " + ", ".join(f"{k}({len(v['data'])})" for k, v in s.items()))
+
+
+def cmd_analyze(a):
+    meta, s = resolve(a.id, refresh=a.refresh)
+    c = core(s)
+    print(f"== {meta['name']}  [{meta['type']}]  {meta['start_date_local'][:16]}")
+    if not c["has_distance"]:
+        print(f"   no GPS and no distance channel (indoor / HR-only workout)")
+        print(f"   elapsed {hm(c['elapsed'])} | HR avg {c['hr_avg']:.0f} max {c['hr_max']:.0f}")
+        return
+    print(
+        f"   {c['km']:.3f} km | elapsed {hm(c['elapsed'])} | moving {hm(c['moving'])} "
+        f"| pause {hm(c['pause'])}"
+    )
+    print(
+        f"   avg elapsed {c['kmh_elapsed'] or 0:.2f} km/h | avg moving {c['kmh_moving'] or 0:.2f} km/h "
+        f"| best 30s {c['best30']:.2f} km/h"
+    )
+    print(
+        f"   ele {c['ele_min']:.0f}-{c['ele_max']:.0f} m | +{c['up']:.0f} -{c['dn']:.0f} m"
+        f" | HR avg {c['hr_avg']:.0f} max {c['hr_max']:.0f}"
+    )
+    print(f"\n   km |  moving  | km/h  | pause | HR")
+    for i, (lt, lm, h) in enumerate(splits(c), 1):
+        print(
+            f"   {i:>2} | {hm(lm):>8} | {3600 / lm if lm else 0:>5.2f} "
+            f"| {lt - lm:>4.0f}s | {h:>3.0f}"
+        )
+    ob = outback(c)
+    if ob:
+        print(f"\n   out/back  (turnaround at {ob['turn_km']:.2f} km, {ob['crow_km']:.2f} km crow-fly)")
+        for k in ("out", "back"):
+            l = ob[k]
+            print(
+                f"   {k.upper():<5} {l['km']:.3f} km | moving {hm(l['moving'])} | "
+                f"{l['kmh']:.2f} km/h | +{l['up']:.0f} -{l['dn']:.0f} m | "
+                f"net {l['net']:+.0f} m | grade {l['grade']:+.2f}%"
+            )
+
+
+def cmd_compare(a):
+    data = []
+    for ref in a.ids:
+        meta, s = resolve(ref, refresh=a.refresh)
+        data.append((meta, core(s)))
+    fields = [
+        ("date", lambda m, c: m["start_date_local"][:10]),
+        ("type", lambda m, c: m["type"][:14]),
+        ("km", lambda m, c: f"{c['km']:.2f}" if c["km"] is not None else "-"),
+        ("elapsed", lambda m, c: hm(c["elapsed"])),
+        ("moving", lambda m, c: hm(c["moving"]) if c["moving"] is not None else "-"),
+        ("pause", lambda m, c: hm(c["pause"]) if c["pause"] is not None else "-"),
+        ("km/h mov", lambda m, c: f"{c['kmh_moving']:.2f}" if c["kmh_moving"] else "-"),
+        ("best 30s", lambda m, c: f"{c['best30']:.2f}" if c["best30"] else "-"),
+        ("HR avg", lambda m, c: f"{c['hr_avg']:.0f}"),
+        ("HR max", lambda m, c: f"{c['hr_max']:.0f}"),
+        ("ascent", lambda m, c: f"+{c['up']:.0f}"),
+        ("km/h per bpm", lambda m, c: f"{c['kmh_moving'] / c['hr_avg']:.4f}" if c["hr_avg"] and c["kmh_moving"] else "-"),
+    ]
+    w = max(len(m["name"][:18]) for m, _ in data) + 2
+    print(f"{'':<14}" + "".join(f"{m['name'][:18]:<{w}}" for m, _ in data))
+    for label, fn in fields:
+        print(f"{label:<14}" + "".join(f"{fn(m, c):<{w}}" for m, c in data))
+
+
+# ------------------------------------------------------------ bulk archive
+
+ARCHIVES = os.path.join(CACHE, "archives")
+METRICS = os.path.join(CACHE, "metrics.json")
+TRACK_EXT = (".gpx", ".tcx", ".fit", ".gpx.gz", ".tcx.gz", ".fit.gz")
+
+
+def archive_root(path):
+    """Return a directory for an archive, extracting the zip on first use."""
+    path = os.path.expanduser(path)
+    if os.path.isdir(path):
+        return path
+    if not os.path.exists(path):
+        die(f"no such archive: {path}")
+    if not path.lower().endswith(".zip"):
+        die(f"{path}: expected a directory or .zip")
+    import zipfile
+
+    dest = os.path.join(ARCHIVES, os.path.splitext(os.path.basename(path))[0])
+    marker = os.path.join(dest, ".extracted")
+    if not os.path.exists(marker):
+        os.makedirs(dest, exist_ok=True)
+        print(f"extracting {os.path.basename(path)} -> {dest}", file=sys.stderr)
+        with zipfile.ZipFile(path) as z:
+            z.extractall(dest)
+        open(marker, "w").close()
+    return dest
+
+
+def archive_entries(path, type_filter=None, since=None, until=None):
+    """List (date, name, type, filepath) for every track file in the archive."""
+    root = archive_root(path)
+    tracks = {}
+    for dirpath, _, files in os.walk(root):
+        for f in files:
+            if f.lower().endswith(TRACK_EXT):
+                full = os.path.join(dirpath, f)
+                tracks[os.path.relpath(full, root).replace(os.sep, "/")] = full
+    if not tracks:
+        die(f"{root}: no .gpx/.tcx/.fit files found")
+
+    entries, seen = [], set()
+    csv_rows = read_activities_csv(root)
+    for fn, rec in csv_rows.items():
+        full = tracks.get(fn) or tracks.get(fn.split("/")[-1])
+        if not full:
+            continue  # csv row without a media file (manual entry)
+        entries.append(
+            {
+                "date": rec["raw_date"] or "",
+                "name": rec["name"] or "",
+                "type": rec["type"] or "",
+                "id": rec["id"],
+                "s_distance_m": rec.get("s_distance_m"),
+                "path": full,
+            }
+        )
+        seen.add(full)
+    for rel, full in sorted(tracks.items()):
+        if full not in seen:
+            entries.append(
+                {"date": "", "name": os.path.basename(rel), "type": "", "id": "",
+                 "s_distance_m": None, "path": full}
+            )
+
+    if type_filter:
+        tf = type_filter.lower()
+        entries = [e for e in entries if tf in (e["type"] or "").lower() or tf in (e["name"] or "").lower()]
+    out = []
+    for e in entries:
+        m = metrics_for(e)
+        if since and m["date"] and m["date"] < since:
+            continue
+        if until and m["date"] and m["date"] > until:
+            continue
+        out.append((e, m))
+    out.sort(key=lambda em: em[1]["date"] or "")
+    return out
+
+
+def _mcache():
+    if os.path.exists(METRICS):
+        try:
+            return json.load(open(METRICS))
+        except Exception:
+            return {}
+    return {}
+
+
+_MC = None
+
+
+def metrics_for(entry):
+    """Summary metrics for one archive entry, memoised on path+mtime+size."""
+    global _MC
+    if _MC is None:
+        _MC = _mcache()
+    p = entry["path"]
+    st = os.stat(p)
+    key = f"{p}|{int(st.st_mtime)}|{st.st_size}"
+    if key in _MC:
+        return _MC[key]
+    try:
+        meta, s = load_file(p)
+        c = core(s)
+        m = {k: v for k, v in c.items() if not k.startswith("_")}
+        m["date"] = meta["start_date_local"][:10]  # ISO; the CSV's is localised
+        m["type"] = entry["type"] or meta["type"]
+        m["name"] = entry["name"] or meta["name"]
+        m["ok"] = True
+        m["has_distance"] = c["has_distance"]
+        # match the DB: Strava's own distance wins, moving time stays ours
+        km_s = entry.get("s_distance_m")
+        if km_s:
+            m["km_calc"], m["km"] = c["km"], km_s / 1000.0
+            if m["moving"]:
+                m["kmh_moving"] = m["km"] / (m["moving"] / 3600)
+    except SystemExit:
+        m = {"ok": False, "date": "", "type": entry["type"],
+             "name": entry["name"], "km": 0, "moving": 0, "kmh_moving": 0,
+             "hr_avg": 0, "hr_max": 0, "up": 0, "pause": 0, "elapsed": 0,
+             "best30": 0, "kmh_elapsed": 0, "ele_min": 0, "ele_max": 0, "dn": 0}
+    except Exception as e:
+        m = {"ok": False, "err": str(e)[:80], "date": "",
+             "type": entry["type"], "name": entry["name"], "km": 0, "moving": 0,
+             "kmh_moving": 0, "hr_avg": 0, "hr_max": 0, "up": 0, "pause": 0,
+             "elapsed": 0, "best30": 0, "kmh_elapsed": 0, "ele_min": 0,
+             "ele_max": 0, "dn": 0}
+    _MC[key] = m
+    os.makedirs(CACHE, exist_ok=True)
+    json.dump(_MC, open(METRICS, "w"))
+    return m
+
+
+def cmd_list(a):
+    rows = archive_entries(a.archive, a.type, a.since, a.until)
+    print(f"{'date':<11} {'type':<16} {'km':>7} {'moving':>8} {'km/h':>6} {'HR':>4}  name")
+    for e, m in rows:
+        if not m.get("ok"):
+            flag = "  [unreadable]"
+        elif m.get("km") is None:
+            flag = "  [no distance]"
+        else:
+            flag = ""
+        print(
+            f"{m['date']:<11} {(m['type'] or '?')[:16]:<16} {(m['km'] or 0):>7.2f} "
+            f"{hm(m['moving'] or 0):>8} {(m['kmh_moving'] or 0):>6.2f} {m['hr_avg']:>4.0f}  "
+            f"{(m['name'] or '')[:38]}{flag}"
+        )
+    ok = [m for _, m in rows if m.get("ok")]
+    bad = len(rows) - len(ok)
+    print(f"\n{len(ok)} activities, {sum(m['km'] or 0 for m in ok):.1f} km total"
+          + (f", {bad} unreadable" if bad else ""))
+
+
+def cmd_trend(a):
+    rows = [(e, m) for e, m in archive_entries(a.archive, a.type, a.since, a.until)
+            if m.get("ok") and m.get("km")]
+    if not rows:
+        die("no readable activities matched")
+    buckets = {}
+    for _, m in rows:
+        d = datetime.fromisoformat(m["date"])
+        if a.by == "week":
+            y, w, _ = d.isocalendar()
+            k = f"{y}-W{w:02d}"
+        elif a.by == "month":
+            k = m["date"][:7]
+        else:
+            k = m["date"][:4]
+        buckets.setdefault(k, []).append(m)
+
+    print(f"{a.by:<9} {'n':>3} {'km':>8} {'moving':>9} {'km/h':>6} {'HR':>4} {'km/h/bpm':>9} {'ascent':>7}")
+    prev = None
+    for k in sorted(buckets):
+        g = buckets[k]
+        km = sum(m["km"] or 0 for m in g)
+        mv = sum(m["moving"] or 0 for m in g)
+        kmh = km / (mv / 3600) if mv else 0
+        hrs = [m["hr_avg"] for m in g if m["hr_avg"]]
+        hr = statistics.mean(hrs) if hrs else 0
+        eff = kmh / hr if hr else 0
+        arrow = ""
+        if prev and prev[0]:
+            arrow = f"  {'+' if kmh >= prev[0] else ''}{kmh - prev[0]:.2f} km/h"
+            if eff and prev[1]:
+                arrow += f", eff {'+' if eff >= prev[1] else ''}{(eff - prev[1]) / prev[1] * 100:.1f}%"
+        print(
+            f"{k:<9} {len(g):>3} {km:>8.2f} {hm(mv):>9} {kmh:>6.2f} {hr:>4.0f} "
+            f"{eff:>9.4f} {sum(m['up'] for m in g):>7.0f}{arrow}"
+        )
+        prev = (kmh, eff)
+
+    best = max(rows, key=lambda em: em[1]["kmh_moving"] or 0)[1]
+    longest = max(rows, key=lambda em: em[1]["km"] or 0)[1]
+    print(f"\nfastest : {best['date']}  {best['kmh_moving']:.2f} km/h  ({best['km']:.2f} km, HR {best['hr_avg']:.0f})")
+    print(f"longest : {longest['date']}  {longest['km']:.2f} km  ({longest['kmh_moving']:.2f} km/h, HR {longest['hr_avg']:.0f})")
+
+
+# ---------------------------------------------------------------- sqlite db
+
+DB = os.path.join(HOME, "rollbook.db")
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS activities (
+  id            INTEGER PRIMARY KEY,
+  date          TEXT,          -- ISO local date, YYYY-MM-DD
+  datetime      TEXT,          -- ISO local timestamp
+  year          INTEGER,
+  month         TEXT,          -- YYYY-MM
+  isoweek       TEXT,          -- YYYY-Wnn
+  dow           INTEGER,       -- 1=Mon .. 7=Sun
+  name          TEXT,
+  type          TEXT,
+  description   TEXT,
+  device        TEXT,
+  gear          TEXT,
+  filename      TEXT,
+  format        TEXT,          -- gpx / tcx / fit
+  -- Strava's own summary numbers, straight from activities.csv
+  s_elapsed_s   REAL, s_moving_s REAL, s_distance_m REAL,
+  s_avg_speed   REAL, s_max_speed REAL,
+  s_elev_gain   REAL, s_elev_loss REAL, s_elev_low REAL, s_elev_high REAL,
+  s_avg_hr      REAL, s_max_hr REAL, s_avg_cad REAL, s_max_cad REAL,
+  s_avg_watts   REAL, s_max_watts REAL, s_calories REAL,
+  s_rel_effort  REAL, s_avg_temp REAL,
+  -- km and ascent_m prefer Strava's own figure and fall back to the track;
+  -- *_calc are always recomputed here, km_diff_pct is the disagreement
+  km            REAL, km_calc REAL, km_diff_pct REAL,
+  ascent_m      REAL, ascent_calc REAL,
+  elapsed_s     REAL, moving_s REAL, pause_s REAL,
+  kmh_moving    REAL, kmh_elapsed REAL, best30_kmh REAL,
+  descent_m     REAL, ele_min REAL, ele_max REAL,
+  hr_avg        REAL, hr_max REAL,
+  samples       INTEGER, has_gps INTEGER, parse_error TEXT
+);
+CREATE TABLE IF NOT EXISTS splits (
+  activity_id INTEGER, km INTEGER,
+  moving_s REAL, elapsed_s REAL, pause_s REAL, kmh REAL, hr REAL,
+  PRIMARY KEY (activity_id, km)
+);
+CREATE TABLE IF NOT EXISTS samples (
+  activity_id INTEGER, t INTEGER,
+  lat REAL, lon REAL, ele REAL, hr INTEGER, cad INTEGER, dist_m REAL
+);
+CREATE INDEX IF NOT EXISTS ix_act_date ON activities(date);
+CREATE INDEX IF NOT EXISTS ix_act_type ON activities(type);
+CREATE INDEX IF NOT EXISTS ix_split_act ON splits(activity_id);
+CREATE INDEX IF NOT EXISTS ix_sample_act ON samples(activity_id, t);
+CREATE VIEW IF NOT EXISTS v_activities AS
+  SELECT id, date, type, name, device,
+         ROUND(km, 2) AS km,
+         CAST(moving_s / 60 AS INT) || ':' ||
+           SUBSTR('0' || CAST(moving_s % 60 AS INT), -2) AS moving,
+         ROUND(kmh_moving, 2) AS kmh,
+         ROUND(pause_s / 60.0, 1) AS pause_min,
+         ROUND(hr_avg) AS hr, ROUND(ascent_m) AS ascent,
+         ROUND(kmh_moving / NULLIF(hr_avg, 0), 4) AS kmh_per_bpm
+  FROM activities WHERE parse_error IS NULL;
+"""
+
+CSV_NUM = {
+    "s_elapsed_s": "Elapsed Time", "s_moving_s": "Moving Time",
+    "s_distance_m": "Distance", "s_avg_speed": "Average Speed",
+    "s_max_speed": "Max Speed", "s_elev_gain": "Elevation Gain",
+    "s_elev_loss": "Elevation Loss", "s_elev_low": "Elevation Low",
+    "s_elev_high": "Elevation High", "s_avg_hr": "Average Heart Rate",
+    "s_max_hr": "Max Heart Rate", "s_avg_cad": "Average Cadence",
+    "s_max_cad": "Max Cadence", "s_avg_watts": "Average Watts",
+    "s_max_watts": "Max Watts", "s_calories": "Calories",
+    "s_rel_effort": "Relative Effort", "s_avg_temp": "Average Temperature",
+}
+
+
+def _num(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _device(desc):
+    import re
+
+    if not desc:
+        return None
+    m = re.search(
+        r"(HUAWEI[A-Za-z0-9 \-]*|Garmin[A-Za-z0-9 \-]*|Wahoo[A-Za-z0-9 \-]*|"
+        r"COROS[A-Za-z0-9 \-]*|Polar[A-Za-z0-9 \-]*|Suunto[A-Za-z0-9 \-]*|"
+        r"Amazfit[A-Za-z0-9 \-]*|Zwift|Rouvy|Strava)",
+        desc,
+    )
+    return m.group(1).strip() if m else None
+
+
+def read_activities_csv(root):
+    """Parse activities.csv. Duplicate headers resolved to the LAST occurrence,
+    which is the detailed block (metres / m-s, not km / rounded)."""
+    import csv as _csv
+
+    p = os.path.join(root, "activities.csv")
+    if not os.path.exists(p):
+        return {}
+    with open(p, newline="", encoding="utf-8-sig", errors="replace") as fh:
+        rd = _csv.reader(fh)
+        hdr = next(rd)
+        idx = {h.strip(): i for i, h in enumerate(hdr)}  # dup -> last wins
+
+        def cell(row, key):
+            i = idx.get(key)
+            if i is None or i >= len(row):
+                return None
+            v = row[i].strip()
+            return v or None
+
+        out = {}
+        for row in rd:
+            fn = cell(row, "Filename")
+            if not fn:
+                continue
+            desc = cell(row, "Activity Description")
+            rec = {
+                "id": _num(cell(row, "Activity ID")),
+                "raw_date": cell(row, "Activity Date"),
+                "name": cell(row, "Activity Name"),
+                "type": cell(row, "Activity Type"),
+                "description": desc,
+                "device": _device(desc),
+                "gear": cell(row, "Activity Gear"),
+                "filename": fn,
+            }
+            for col, key in CSV_NUM.items():
+                rec[col] = _num(cell(row, key))
+            out[fn] = rec
+    return out
+
+
+def cmd_db_build(a):
+    import sqlite3
+
+    root = archive_root(a.archive)
+    # A directory without activities.csv is not an export root. Building from
+    # one (e.g. a parent folder) once re-imported every activity a second time
+    # under a longer path, with no Strava metadata and FIT sport names as type.
+    if not os.path.exists(os.path.join(root, "activities.csv")):
+        die(f"{root}: no activities.csv here, not a Strava export root "
+            f"(pass the export .zip or the directory that contains activities.csv)")
+    csv_rows = read_activities_csv(root)
+    print(f"activities.csv: {len(csv_rows)} rows with a media file")
+
+    tracks = {}
+    for dirpath, _, files in os.walk(root):
+        for f in files:
+            if f.lower().endswith(TRACK_EXT):
+                full = os.path.join(dirpath, f)
+                tracks[os.path.relpath(full, root).replace(os.sep, "/")] = full
+    print(f"track files on disk: {len(tracks)}")
+
+    work = []
+    for rel, full in sorted(tracks.items()):
+        work.append((rel, full, csv_rows.get(rel) or csv_rows.get(os.path.basename(rel))))
+    if a.limit:
+        work = work[: a.limit]
+
+    os.makedirs(os.path.dirname(DB), exist_ok=True)
+    if a.fresh and os.path.exists(DB):
+        os.remove(DB)
+    db = sqlite3.connect(DB)
+    db.executescript(SCHEMA)
+    db.execute("PRAGMA journal_mode=WAL")
+    db.execute("PRAGMA synchronous=OFF")
+
+    done = {r[0] for r in db.execute("SELECT filename FROM activities")}
+    todo = [w for w in work if w[0] not in done] if not a.fresh else work
+    print(f"importing {len(todo)} activities ({len(work) - len(todo)} already present)"
+          + ("" if a.samples else "; --no-samples: skipping per-second rows"))
+
+    ok = bad = skipped = 0
+    for n, (rel, full, csv) in enumerate(todo, 1):
+        fmt = rel.lower().replace(".gz", "").rsplit(".", 1)[-1]
+        aid = (int(csv["id"]) if csv and csv.get("id")
+               else int(hashlib.sha1(rel.encode()).hexdigest()[:12], 16) % (10**12))
+        row = {
+            "id": aid, "filename": rel, "format": fmt,
+            "name": (csv or {}).get("name"), "type": (csv or {}).get("type"),
+            "description": (csv or {}).get("description"),
+            "device": (csv or {}).get("device"), "gear": (csv or {}).get("gear"),
+        }
+        for col in CSV_NUM:
+            row[col] = (csv or {}).get(col)
+
+        try:
+            meta, s = load_file(full)
+            c = core(s)
+            t0 = datetime.fromisoformat(meta["start_date_local"])
+            iso = t0.isocalendar()
+            row.update({
+                "datetime": t0.isoformat(), "date": t0.date().isoformat(),
+                "year": t0.year, "month": t0.strftime("%Y-%m"),
+                "isoweek": f"{iso[0]}-W{iso[1]:02d}", "dow": iso[2],
+                "name": row["name"] or meta["name"],
+                "type": row["type"] or meta["type"],
+                "km_calc": c["km"], "elapsed_s": c["elapsed"], "moving_s": c["moving"],
+                "pause_s": c["pause"], "best30_kmh": c["best30"],
+                "descent_m": c["dn"],
+                "ele_min": c["ele_min"], "ele_max": c["ele_max"],
+                "hr_avg": c["hr_avg"] or None, "hr_max": c["hr_max"] or None,
+                "samples": len(c["_t"]),
+                "has_gps": 1 if c["_ll"] and any(_valid_ll(p) for p in c["_ll"]) else 0,
+                "parse_error": None,
+            })
+            # Same session from another source (a single "Export Original"
+            # file vs. the activity inside a full export): same start within
+            # 2 min and distance within 5%. The copy with Strava's metadata
+            # (activities.csv numbers) wins; otherwise the newcomer is skipped.
+            dup = db.execute(
+                "SELECT id, filename, s_distance_m IS NOT NULL FROM activities "
+                "WHERE id != ? AND parse_error IS NULL AND ABS(julianday(datetime) - julianday(?)) * 86400 < 120 "
+                "AND (km_calc IS NULL OR ? IS NULL OR ABS(km_calc - ?) <= 0.05 * MAX(km_calc, ?, 0.1))",
+                (aid, row["datetime"], c["km"], c["km"], c["km"])).fetchone()
+            if dup:
+                if row.get("s_distance_m") is not None and not dup[2]:
+                    for tbl, col in (("samples", "activity_id"), ("splits", "activity_id"), ("activities", "id")):
+                        db.execute(f"DELETE FROM {tbl} WHERE {col}=?", (dup[0],))
+                    print(f"  {rel}: replaces {dup[1]} (same session, now with export metadata)", file=sys.stderr)
+                else:
+                    print(f"  {rel}: skipped, same session as {dup[1]}", file=sys.stderr)
+                    skipped += 1
+                    continue
+            # Strava's own summary wins when present: its distance is corrected
+            # and its elevation comes from a terrain model, whereas FIT carries
+            # raw barometric altitude. Moving/pause/splits are only ours.
+            km_s = row.get("s_distance_m")
+            row["km"] = km_s / 1000.0 if km_s else c["km"]
+            row["ascent_m"] = (
+                row["s_elev_gain"] if row.get("s_elev_gain") is not None else c["up"]
+            )
+            if c["km"] and km_s:
+                row["km_diff_pct"] = round(100.0 * (c["km"] * 1000 - km_s) / km_s, 2)
+            if row["km"] and c["moving"]:
+                row["kmh_moving"] = row["km"] / (c["moving"] / 3600)
+            if row["km"] and c["elapsed"]:
+                row["kmh_elapsed"] = row["km"] / (c["elapsed"] / 3600)
+            cols = ",".join(row)
+            db.execute(
+                f"INSERT OR REPLACE INTO activities ({cols}) "
+                f"VALUES ({','.join('?' * len(row))})",
+                list(row.values()),
+            )
+            db.execute("DELETE FROM splits WHERE activity_id=?", (aid,))
+            db.executemany(
+                "INSERT INTO splits VALUES (?,?,?,?,?,?,?)",
+                [
+                    (aid, i, lm, lt, lt - lm, 3600 / lm if lm else None, h or None)
+                    for i, (lt, lm, h) in enumerate(splits(c), 1)
+                ],
+            )
+            if a.samples:
+                t, d, ll = c["_t"], c["_d"], c["_ll"]
+                hr = s.get("heartrate", {}).get("data") or [None] * len(t)
+                cad = s.get("cadence", {}).get("data") or [None] * len(t)
+                ele = s["altitude"]["data"]
+                db.execute("DELETE FROM samples WHERE activity_id=?", (aid,))
+                db.executemany(
+                    "INSERT INTO samples VALUES (?,?,?,?,?,?,?,?)",
+                    [
+                        (aid, t[i], ll[i][0] if ll else None, ll[i][1] if ll else None,
+                         ele[i], hr[i] or None, cad[i] or None, d[i])
+                        for i in range(len(t))
+                    ],
+                )
+            ok += 1
+        except SystemExit as e:
+            row["parse_error"] = "unreadable"
+            row.setdefault("date", None)
+            cols = ",".join(row)
+            db.execute(
+                f"INSERT OR REPLACE INTO activities ({cols}) VALUES ({','.join('?' * len(row))})",
+                list(row.values()),
+            )
+            bad += 1
+        except Exception as e:
+            row["parse_error"] = str(e)[:120]
+            cols = ",".join(row)
+            db.execute(
+                f"INSERT OR REPLACE INTO activities ({cols}) VALUES ({','.join('?' * len(row))})",
+                list(row.values()),
+            )
+            bad += 1
+        if n % 10 == 0 or n == len(todo):
+            db.commit()
+            print(f"  {n}/{len(todo)}  ok={ok} failed={bad} duplicates={skipped}", file=sys.stderr)
+
+    db.commit()
+    db.execute("ANALYZE")
+    db.commit()
+    nact = db.execute("SELECT COUNT(*) FROM activities").fetchone()[0]
+    nsmp = db.execute("SELECT COUNT(*) FROM samples").fetchone()[0]
+    db.close()
+    print(f"\n{DB}\n  activities={nact}  samples={nsmp}  "
+          f"size={os.path.getsize(DB) / 1e6:.0f} MB  (ok={ok} failed={bad} duplicates={skipped})")
+    # --fresh wipes the DB, including single files imported from the dashboard
+    # (data/imports), which aren't part of any export: bring them back too
+    imports = os.path.join(HOME, "imports")
+    if (a.fresh and os.path.exists(os.path.join(imports, "activities.csv"))
+            and os.path.abspath(root) != os.path.abspath(imports)):
+        print(f"\nre-importing single files from {imports}")
+        cmd_db_build(argparse.Namespace(**{**vars(a), "archive": imports, "fresh": False, "limit": None}))
+
+
+def cmd_db_query(a):
+    import sqlite3
+
+    if not os.path.exists(DB):
+        die(f"no database yet. run: rollbook db build <archive.zip>")
+    sql = " ".join(a.sql)
+    db = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+    try:
+        cur = db.execute(sql)
+    except sqlite3.Error as e:
+        die(f"sql: {e}")
+    rows = cur.fetchall()
+    if not cur.description:
+        print("(no rows)")
+        return
+    heads = [d[0] for d in cur.description]
+    if a.csv:
+        import csv as _csv
+
+        w = _csv.writer(sys.stdout)
+        w.writerow(heads)
+        w.writerows(rows)
+        return
+    cells = [[("" if v is None else str(v)) for v in r] for r in rows]
+    w = [max(len(h), *(len(c[i]) for c in cells)) if cells else len(h)
+         for i, h in enumerate(heads)]
+    print("  ".join(h.ljust(w[i]) for i, h in enumerate(heads)))
+    print("  ".join("-" * w[i] for i in range(len(heads))))
+    for c in cells:
+        print("  ".join(c[i].ljust(w[i]) for i in range(len(heads))))
+    print(f"\n{len(rows)} rows")
+
+
+def cmd_db_schema(a):
+    import sqlite3
+
+    if not os.path.exists(DB):
+        die("no database yet. run: rollbook db build <archive.zip>")
+    db = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+    for name, kind, sql in db.execute(
+        "SELECT name, type, sql FROM sqlite_master "
+        "WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' ORDER BY type, name"
+    ):
+        n = db.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0]
+        print(f"\n-- {kind} {name}  ({n} rows)\n{sql};")
+
+
+def cmd_db_enrich(a):
+    """Add best-sustained-effort columns, computed from the samples table.
+
+    Peak speed over a fixed time window is the only speed metric here that is
+    immune both to how much the athlete stopped (unlike elapsed speed) and to
+    the pause threshold and sample spacing (unlike moving speed), so it is the
+    right basis for comparing form across years and devices.
+    """
+    import sqlite3
+
+    if not os.path.exists(DB):
+        die("no database yet. run: rollbook db build <archive.zip>")
+    windows = [int(w) for w in a.windows.split(",")]
+    db = sqlite3.connect(DB)
+    cols = {r[1] for r in db.execute("PRAGMA table_info(activities)")}
+    for w in windows:
+        c = f"best{w}min_kmh"
+        if c not in cols:
+            db.execute(f"ALTER TABLE activities ADD COLUMN {c} REAL")
+    db.commit()
+
+    where = " AND a.best10min_kmh IS NULL" if a.missing else ""
+    ids = [r[0] for r in db.execute(
+        "SELECT a.id FROM activities a WHERE EXISTS "
+        "(SELECT 1 FROM samples s WHERE s.activity_id=a.id)" + where)]
+    print(f"computing best {a.windows} min efforts for {len(ids)} activities")
+    n = 0
+    for aid in ids:
+        rows = db.execute(
+            "SELECT t, dist_m FROM samples WHERE activity_id=? ORDER BY t", (aid,)
+        ).fetchall()
+        if len(rows) < 3:
+            continue
+        # align the sample odometer with the authoritative distance
+        km, km_calc = db.execute(
+            "SELECT km, km_calc FROM activities WHERE id=?", (aid,)
+        ).fetchone()
+        scale = (km / km_calc) if (km and km_calc and km_calc > 0) else 1.0
+        t = [r[0] for r in rows]
+        d = [(r[1] or 0.0) * scale for r in rows]
+        sets = {}
+        for w in windows:
+            span, best, lo = w * 60, 0.0, 0
+            for hi in range(len(t)):
+                while t[hi] - t[lo] > span:
+                    lo += 1
+                dt = t[hi] - t[lo]
+                if dt >= span * 0.9:  # require near-full window
+                    best = max(best, (d[hi] - d[lo]) / dt * 3.6)
+            sets[f"best{w}min_kmh"] = best or None
+        db.execute(
+            f"UPDATE activities SET {','.join(f'{k}=?' for k in sets)} WHERE id=?",
+            list(sets.values()) + [aid],
+        )
+        n += 1
+        if n % 200 == 0:
+            db.commit()
+            print(f"  {n}/{len(ids)}", file=sys.stderr)
+    db.commit()
+    db.close()
+    print(f"done, {n} activities updated")
+
+
+def cmd_web(a):
+    """Localhost dashboard; implementation lives in web/server.py."""
+    if not os.path.exists(DB):
+        die("no database yet. run: rollbook db build <archive.zip>")
+    webdir = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "web")
+    sys.path.insert(0, os.path.abspath(webdir))
+    import server
+
+    server.serve(DB, os.path.join(CACHE, "web_metrics.json"), a.port, not a.no_open, a.offline)
+
+
+def cmd_app(a):
+    """Dashboard in its own window; implementation lives in web/app.py."""
+    if not os.path.exists(DB):
+        die("no database yet. run: rollbook db build <archive.zip>")
+    webdir = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "web")
+    sys.path.insert(0, os.path.abspath(webdir))
+    import app
+
+    app.run(DB, os.path.join(CACHE, "web_metrics.json"), a.port, a.offline, a.mode)
+
+
+def main():
+    # Windows consoles default to a legacy code page; never die on a "→"
+    for f in (sys.stdout, sys.stderr):
+        if hasattr(f, "reconfigure"):
+            f.reconfigure(errors="replace")
+    p = argparse.ArgumentParser(prog="rollbook")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("login").set_defaults(fn=lambda a: login())
+    sub.add_parser("whoami").set_defaults(fn=cmd_whoami)
+    q = sub.add_parser("activities")
+    q.add_argument("-n", type=int, default=30)
+    q.add_argument("-t", "--type")
+    q.set_defaults(fn=cmd_activities)
+    for name, fn in (("streams", cmd_streams), ("analyze", cmd_analyze)):
+        s = sub.add_parser(name)
+        s.add_argument("id")
+        s.add_argument("--refresh", action="store_true")
+        s.set_defaults(fn=fn)
+    c = sub.add_parser("compare")
+    c.add_argument("ids", nargs="+")
+    c.add_argument("--refresh", action="store_true")
+    c.set_defaults(fn=cmd_compare)
+
+    for name, fn in (("list", cmd_list), ("trend", cmd_trend)):
+        b = sub.add_parser(name, help="operate on a bulk export (zip or dir)")
+        b.add_argument("archive")
+        b.add_argument("-t", "--type", help="substring match on activity type/name")
+        b.add_argument("--since", help="YYYY-MM-DD")
+        b.add_argument("--until", help="YYYY-MM-DD")
+        if name == "trend":
+            b.add_argument("--by", choices=("week", "month", "year"), default="month")
+        b.set_defaults(fn=fn)
+
+    d = sub.add_parser("db", help="local SQLite database")
+    dsub = d.add_subparsers(dest="dbcmd", required=True)
+    bld = dsub.add_parser("build")
+    bld.add_argument("archive")
+    bld.add_argument("--fresh", action="store_true", help="drop and rebuild")
+    bld.add_argument("--limit", type=int, help="only first N files (smoke test)")
+    bld.add_argument("--no-samples", dest="samples", action="store_false",
+                     help="skip the per-second samples table")
+    bld.set_defaults(samples=True, fn=cmd_db_build)
+    qq = dsub.add_parser("query")
+    qq.add_argument("sql", nargs="+")
+    qq.add_argument("--csv", action="store_true")
+    qq.set_defaults(fn=cmd_db_query)
+    dsub.add_parser("schema").set_defaults(fn=cmd_db_schema)
+    en = dsub.add_parser("enrich")
+    en.add_argument("--windows", default="5,10,20", help="minutes, comma separated")
+    en.add_argument("--missing", action="store_true",
+                    help="only activities without best-effort values yet (after an incremental build)")
+    en.set_defaults(fn=cmd_db_enrich)
+
+    w = sub.add_parser("web", help="localhost dashboard on 127.0.0.1")
+    w.add_argument("--port", type=int, default=8765)
+    w.add_argument("--no-open", action="store_true", help="don't launch a browser")
+    w.add_argument("--offline", action="store_true",
+                   help="never fetch map tiles, serve only already-cached ones")
+    w.set_defaults(fn=cmd_web)
+
+    ap = sub.add_parser("app", help="dashboard in its own desktop window")
+    ap.add_argument("--mode", choices=("auto", "webview", "chrome", "browser"), default="auto",
+                    help="auto: pywebview if installed, else Chrome/Edge app mode, else a browser tab")
+    ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--offline", action="store_true", help="serve only already-cached map tiles")
+    ap.set_defaults(fn=cmd_app)
+
+    a = p.parse_args()
+    a.fn(a)
+
+
+if __name__ == "__main__":
+    main()

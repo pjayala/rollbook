@@ -1,0 +1,62 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later. Copyright (C) 2026 Pedro Ayala. Rollbook is free software, see LICENSE. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rollbook</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
+<link rel="apple-touch-icon" href="/icon-256.png">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="histnav"><button class="btn small" id="nav-back" title="Back (Alt+← / ⌘[)" disabled>←</button><button class="btn small" id="nav-fwd" title="Forward (Alt+→ / ⌘])" disabled>→</button></div>
+  <a class="brand" href="#/"><img src="/icon.svg" alt="" width="22" height="22">Rollbook</a>
+  <nav>
+    <a href="#/" data-nav="progress">Progress</a>
+    <a href="#/sessions" data-nav="sessions">Sessions</a>
+    <a href="#/map" data-nav="map">Map</a>
+    <a href="#/segments" data-nav="segments">Segments</a>
+  </nav>
+  <div class="controls">
+    <label>Sport <select id="type"></select></label>
+    <label>Range
+      <select id="range">
+        <option value="all">All time</option>
+        <option value="365">Last 12 months</option>
+        <option value="180">Last 6 months</option>
+        <option value="90">Last 90 days</option>
+        <option value="30">Last 30 days</option>
+      </select>
+    </label>
+  </div>
+  <span id="status" class="muted small"></span>
+  <button class="btn" id="import-btn" title="Import a Strava export or activity files">⇪ Import</button>
+</header>
+<main id="app"><p class="muted">Loading…</p></main>
+<div id="tip" class="tip" hidden></div>
+<dialog id="import-dlg">
+  <div class="dlg-head"><h2>Import</h2><button class="btn small" id="imp-close">✕</button></div>
+  <label class="drop" id="imp-drop">
+    <input type="file" id="imp-file" multiple accept=".zip,.fit,.gpx,.tcx,.gz" hidden>
+    <b>Drop files here</b> or click to choose
+    <span class="muted small">A Strava account export (<code>export_….zip</code>), single <code>.fit</code> / <code>.gpx</code> / <code>.tcx</code> files (also <code>.gz</code>) such as an activity's <b>Export Original</b>, or a zip of those</span>
+  </label>
+  <div id="imp-list"></div>
+  <div class="toolbar" id="imp-sport-row" hidden>
+    <label class="muted small">Sport for single files (the file's own sport is often wrong, e.g. HUAWEI saves skating as "cycling") <input id="imp-sport" list="imp-types" style="width:180px"></label>
+    <datalist id="imp-types"></datalist>
+  </div>
+  <div id="imp-prog" hidden><div class="pbar"><i id="imp-bar"></i></div><div id="imp-phase" class="small"></div>
+    <pre id="imp-log" class="implog"></pre></div>
+  <div class="toolbar" style="justify-content:flex-end;margin:12px 0 0">
+    <span class="muted small" style="margin-right:auto">Already-imported activities are skipped.</span>
+    <button class="btn" id="imp-go" disabled>Import</button>
+  </div>
+</dialog>
+<script src="/map.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

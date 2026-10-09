@@ -1,0 +1,16 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Pedro Ayala. Rollbook is free software, see LICENSE.
+# Project-local entry point: pins all generated state to ./data so the dataset
+# travels with the repo instead of living in ~/.local/share.
+#
+#   ./rollbook db query "SELECT ..."
+#   ./rollbook analyze samples/Outdoor_cycle.gpx
+#   ./rollbook app                       # dashboard in its own window
+#
+# Uses ./.venv's Python when present (that's where the optional pywebview
+# lives), otherwise python3. Everything else is stdlib-only.
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+py=python3
+[ -x "$here/.venv/bin/python" ] && py="$here/.venv/bin/python"
+ROLLBOOK_HOME="$here/data" exec "$py" "$here/bin/rollbook" "$@"

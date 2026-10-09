@@ -1,0 +1,21 @@
+# Generated state and bulky source data: reproducible from exports/
+# all generated state and personal data (DB, caches, favorites, imports)
+data/
+
+# Raw Strava account exports (~150 MB each). Keep locally, never commit.
+exports/*.zip
+
+# Credentials, in case API mode ever becomes usable
+credentials.json
+
+# Python bytecode
+__pycache__/
+
+# optional pywebview lives here (python3 -m venv .venv && .venv/bin/pip install pywebview)
+.venv/
+
+# activity files uploaded one by one from the dashboard (Import)
+data/imports/
+
+# personal training analysis, kept local
+NOTES.md
