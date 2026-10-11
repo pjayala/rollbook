@@ -669,8 +669,54 @@ def smooth(v, w=15):
     return [statistics.mean(v[max(0, i - w) : i + w + 1]) for i in range(len(v))]
 
 
+def clean_ele(ele, ll):
+    """Elevation with placeholder readings removed and the gaps interpolated.
+
+    Two kinds of fake values (same rules as web/server.py load_track):
+      * 0 m on samples without a GPS fix;
+      * a filler value (-1 or 0 m) making up >= 20% of samples while the real
+        readings sit > 10 m away from it. The HUAWEI GT 6 Pro writes a real
+        altitude only every ~5 s and -1 on every record in between; smoothing
+        that mix once turned a flat 26 km skate into 4332 m of climbing.
+    """
+    n = len(ele)
+    out = [None if (e == 0 and ll and not _valid_ll(ll[i])) else e for i, e in enumerate(ele)]
+    vals = [e for e in out if e is not None]
+    if len(vals) >= 50:
+        for cand in (-1.0, 0.0):
+            k = sum(1 for e in vals if e == cand)
+            rest = [e for e in vals if e != cand]
+            if k >= 0.2 * len(vals) and len(rest) >= 10 and abs(statistics.median(rest) - cand) > 10:
+                out = [None if e == cand else e for e in out]
+                break
+    idx = [i for i, e in enumerate(out) if e is not None]
+    if not idx:
+        return list(ele)
+    for a, b in zip(idx, idx[1:]):  # linear fill between real readings
+        for i in range(a + 1, b):
+            out[i] = out[a] + (out[b] - out[a]) * (i - a) / (b - a)
+    for i in range(idx[0]):
+        out[i] = out[idx[0]]
+    for i in range(idx[-1] + 1, n):
+        out[i] = out[idx[-1]]
+    return out
+
+
+def climb(v, hyst=5.0):
+    """Ascent of a smoothed profile counting only rises of >= hyst metres."""
+    up, ref = 0.0, None
+    for e in v:
+        if ref is None or e < ref:
+            ref = e
+        elif e - ref >= hyst:
+            up += e - ref
+            ref = e
+    return up
+
+
 def core(s):
     t, dist, ele, hr, ll, has_dist = series(s)
+    ele = clean_ele(ele, ll)
     n = len(t)
     elapsed = t[-1] - t[0]
     moving = 0.0
@@ -689,6 +735,7 @@ def core(s):
             best30 = max(best30, (dist[i + 30] - dist[i]) / dt * 3.6)
     hrs = [x for x in hr if x]
     return {
+        "ascent_est": climb(sm),
         "km": dist[-1] / 1000 if has_dist else None,
         "elapsed": elapsed,
         "moving": moving if has_dist else None,
@@ -1319,8 +1366,9 @@ def cmd_db_build(a):
             km_s = row.get("s_distance_m")
             row["km"] = km_s / 1000.0 if km_s else c["km"]
             row["ascent_m"] = (
-                row["s_elev_gain"] if row.get("s_elev_gain") is not None else c["up"]
+                row["s_elev_gain"] if row.get("s_elev_gain") is not None else c["ascent_est"]
             )
+            row["ascent_calc"] = c["ascent_est"]
             if c["km"] and km_s:
                 row["km_diff_pct"] = round(100.0 * (c["km"] * 1000 - km_s) / km_s, 2)
             if row["km"] and c["moving"]:

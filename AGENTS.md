@@ -281,6 +281,7 @@ reintroduce them.
 | GPS spikes | rejected above `MAX_MS`; null-island `(0,0)` dropped |
 | Stuck device odometers | odometer is preferred (96% within 1% of Strava vs 91% for GPS) *unless* it reads <50% of the GPS track |
 | Indoor/HR-only workouts | 20 treadmill sessions rejected outright if you demand a distance channel |
+| GT 6 Pro `-1 m` filler altitude between real readings | a single "Export Original" file (no Strava ascent to fall back on) got 4332 m of climbing on a flat 26 km skate. `clean_ele` drops the filler and interpolates; the fallback ascent is a 5 m-hysteresis climb of the smoothed profile (median 1.09× Strava's on 133 skates) |
 | FIT raw barometric altitude | +799 m of "climbing" on a flat 18 km skate. Hence `ascent_m` prefers Strava's terrain-model value |
 
 Accuracy achieved: recomputed distance is within 1% of Strava's own figure for
