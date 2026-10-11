@@ -111,9 +111,14 @@ svg.cal rect:hover { stroke: #fff; stroke-width: 1.5; }
 tr.best td { color: var(--accent); }
 tr.sel td { background: #2b3440; }
 tr.muted td { color: var(--muted); font-family: inherit; font-size: 12px; }
-.selbox { margin-top: 8px; padding: 6px 10px; background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; font-size: 13px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
-.selbox .btn { margin-left: auto; }
-.subhead { margin: 10px 0 0; display: flex; gap: 10px; align-items: baseline; font-size: 13px; }
+.selhost { position: relative; }
+/* floats over the panel's top-right corner: showing / clearing a selection never moves the charts */
+.selbox { position: absolute; top: 10px; right: 12px; z-index: 5; min-width: 210px; padding: 8px 10px; font-size: 12px;
+  background: #0f1216ee; border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 6px 20px #0008; }
+.selbox .row { display: flex; justify-content: space-between; gap: 14px; padding: 1px 0; }
+.selbox .row span:last-child { font-family: var(--mono); }
+.selhead { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.selhead .btn { margin-left: auto; padding: 0 6px; }
 .selbox[hidden] { display: none; }
 #import-btn { margin-left: 4px; }
 dialog#import-dlg { background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; width: min(640px, 92vw); }

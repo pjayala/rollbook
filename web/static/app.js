@@ -1229,11 +1229,10 @@ async function viewSession(id) {
     ])}
     <div class="grid g2">
       <div class="panel"><h2>Route <span class="muted">coloured by speed · drag / scroll to explore · hover the chart to follow along</span></h2><div id="map"></div></div>
-      <div class="panel"><h2>Speed${hasHr ? ", heart rate" : ""}${hasEle ? " &amp; elevation" : ""}</h2>
+      <div class="panel selhost"><div id="speed-sel" class="selbox" hidden></div><h2>Speed${hasHr ? ", heart rate" : ""}${hasEle ? " &amp; elevation" : ""}</h2>
         <div class="toolbar"><div class="seg" id="xmode"><button data-x="km" class="on">distance</button><button data-x="t">time</button></div></div>
         <div id="c-speed"></div>
         ${hasEle ? `<div class="subhead"><b>Elevation</b> <span class="muted small" id="ele-sum"></span></div><div id="c-ele"></div>` : ""}
-        <div id="speed-sel" class="selbox" hidden></div>
         <div class="note">Drag across the chart to select a stretch; click to select that km.</div></div>
     </div>
     ${L ? `<div class="panel"><h2>Laps <span class="muted">${L.laps.length} × ${f2(L.lap_km)} km circuit · click a lap to show it on the map</span></h2>
@@ -1282,12 +1281,13 @@ async function viewSession(id) {
     }
     const km = ser[i1][1] - ser[i0][1], el = ser[i1][0] - ser[i0][0], v = mv ? km / (mv / 3600) : null;
     box.hidden = false;
-    box.innerHTML = `<b>Selected</b> <span class="num">${f2(ser[i0][1])}–${f2(ser[i1][1])} km</span> · <span class="num">${dur(el, el >= 3600)}</span>` +
-      (mv < el - 2 ? ` <span class="muted">(moving ${dur(mv, mv >= 3600)})</span>` : "") +
-      ` · <span class="num">${f2(v)} km/h</span> · <span class="num">${pace(v)}/km</span>` + (hrT ? ` · HR <span class="num">${f0(hrS / hrT)}</span>` : "") +
-      (ele ? (() => { const { net, g } = netGrade(i0, i1); return isNum(net) ? ` · elev <span class="num">${fnet(net)}</span>${isNum(g) ? ` <span class="muted">(${fgrade(g)})</span>` : ""}` : ""; })() : "") +
-      (isNum(v) && isNum(avg) ? ` · <span class="${v >= avg ? "up" : "down"}">${pct((v / avg - 1) * 100)}</span> vs avg` : "") +
-      ` <button class="btn small" id="sel-clear">✕ clear</button>`;
+    const row = (k, val) => `<div class="row"><span>${k}</span><span>${val}</span></div>`;
+    const eg = ele ? netGrade(i0, i1) : {};
+    box.innerHTML = `<div class="selhead"><b>Selected</b> <span class="num muted">${f2(ser[i0][1])}–${f2(ser[i1][1])} km</span><button class="btn small" id="sel-clear" title="clear selection">✕</button></div>` +
+      row("time", dur(el, el >= 3600) + (mv < el - 2 ? ` <span class="muted">(moving ${dur(mv, mv >= 3600)})</span>` : "")) +
+      row("speed", `${f2(v)} km/h` + (isNum(v) && isNum(avg) ? ` <span class="${v >= avg ? "up" : "down"}">${pct((v / avg - 1) * 100)}</span>` : "")) +
+      row("pace", `${pace(v)}/km`) + (hrT ? row("HR", `${f0(hrS / hrT)} bpm`) : "") +
+      (isNum(eg.net) ? row("elev", `${fnet(eg.net)}${isNum(eg.g) ? ` <span class="muted">(${fgrade(eg.g)})</span>` : ""}`) : "");
     $("#sel-clear").onclick = () => { clearRowSel(); hl.highlightBy(null); };
   };
   hl.highlightBy = (col, lo, hi, fit) => { sel = lo == null ? null : { col, lo, hi }; mapHighlightBy(col, lo, hi, fit); paintSel(); };
