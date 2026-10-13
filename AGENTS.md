@@ -249,6 +249,11 @@ changing `derive()`.
   `names_pending > 0`. Custom names still win.
   "Opposite direction" pairs are matched in the browser by ≥ 70% path overlap
   and a heading difference > 130°.
+* **Enlarge (⤢)** on every panel with a chart or map: the panel goes
+  full-window (Esc / ✕ / backdrop closes) and its charts are redrawn taller;
+  `chart()` keeps its options on the host (`_redraw`) and returns a facade
+  that delegates to the latest render, so references like `speedChart` and an
+  active selection band survive the redraw. Maps just follow the new size.
 * **Back / forward** (← → left of the logo, Alt+←/→, ⌘[ / ⌘], mouse side
   buttons): pages are `#/…` hash routes, so navigation is normal browser
   history; each entry is numbered in `history.state` to enable/disable the

@@ -78,7 +78,7 @@ svg .xhair { stroke: var(--muted); stroke-dasharray: 3 3; }
 .legend i.sw-dot { border-radius: 50%; }
 .legend i.sw-line { width: 16px; height: 0; border-radius: 0; vertical-align: 3px; }
 
-.tip { position: fixed; pointer-events: none; z-index: 50; background: #000d; border: 1px solid var(--line);
+.tip { position: fixed; pointer-events: none; z-index: 120; background: #000d; border: 1px solid var(--line);
   border-radius: 6px; padding: 6px 9px; font-size: 12px; max-width: 320px; }
 .tip b { color: var(--fg); }
 .tip .row { display: flex; justify-content: space-between; gap: 14px; }
@@ -142,3 +142,13 @@ body.dragging::after { content: "Drop to import"; position: fixed; inset: 0; z-i
 h1 .star { font-size: 22px; vertical-align: 1px; }
 .histnav { display: inline-flex; gap: 4px; margin-right: -10px; }
 .histnav .btn { min-width: 30px; font-size: 14px; }
+.panel { position: relative; }
+.expand-btn { position: absolute; top: 10px; right: 12px; z-index: 6; opacity: .55; padding: 2px 7px; }
+.panel:hover > .expand-btn, .expand-btn:focus { opacity: 1; }
+.selhost .selbox { top: 42px; }
+.expand-backdrop { position: fixed; inset: 0; z-index: 90; background: #000b; }
+.panel.expanded { position: fixed; inset: 24px; z-index: 100; overflow: auto; margin: 0 !important; box-shadow: 0 10px 40px #000c; }
+.panel.expanded > .expand-btn { opacity: 1; }
+.panel.expanded .map, .panel.expanded .bigmap { height: calc(100vh - 170px); }
+.panel.expanded .scroll { max-height: none !important; }
+body.has-expanded { overflow: hidden; }

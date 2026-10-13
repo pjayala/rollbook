@@ -107,9 +107,13 @@ function timeTicks(lo, hi) {
  *  opt.series[] {name, color, kind:'line'|'dot'|'bar'|'area', data:[{x,y,ref}], axis:'y'|'y2', stack, width, r, opacity, legend:false}
  *  opt.tip(x, hits) -> html   opt.onClick(ref)   opt.onHover(x|null)
  */
-function chart(host, opt) {
+function chart(host, opt, heightOverride) {
   host.innerHTML = "";
-  const H = opt.height || 260, W = Math.max(320, host.clientWidth || 600);
+  // remember how to redraw at another size (expanded panel view)
+  host._chartOpt = opt;
+  host._redraw = h => { chart(host, host._chartOpt, h); const b = host._facade && host._facade._band; if (b && host._impl) host._impl.setBand(...b); };
+  ensureExpander(host);
+  const H = heightOverride || opt.height || 260, W = Math.max(320, host.clientWidth || 600);
   const m = { l: 46, r: opt.y2 || opt.padRight ? 46 : 14, t: 18, b: 24 };
   const iw = W - m.l - m.r, ih = H - m.t - m.b;
   const ser = opt.series.filter(s => s.data && s.data.length);
@@ -288,7 +292,15 @@ function chart(host, opt) {
     const p = main && nearest(main.d, x), sc = main && Y[main.s.axis || "y"];
     if (p && sc) { hot.setAttribute("cx", X(p.x)); hot.setAttribute("cy", sc.f(p.y1)); hot.setAttribute("visibility", "visible"); }
   }
-  return { X, svg, setBand, cursor };
+  // callers keep the returned object; it delegates to the latest render so
+  // it stays valid after an expand/collapse redraw
+  host._impl = { X, svg, setBand, cursor };
+  if (!host._facade) host._facade = {
+    setBand(...a) { host._facade._band = a[0] == null ? null : a; host._impl.setBand(...a); },
+    cursor: x => host._impl.cursor(x),
+    get svg() { return host._impl.svg; }, get X() { return host._impl.X; },
+  };
+  return host._facade;
 }
 
 // ------------------------------------------------------------------ session map (tiles + speed-coloured track)
@@ -1512,6 +1524,47 @@ function navButtons() {
   $("#nav-fwd").disabled = Nav.i >= Nav.max;
 }
 
+// ------------------------------------------------------------------ expand a widget
+// ⤢ on every panel with a chart or map: the panel goes full-window and its
+// charts are redrawn taller (maps resize themselves). Esc / ✕ / backdrop closes.
+function ensureExpander(el) {
+  const panel = el.closest && el.closest(".panel");
+  if (!panel || panel.querySelector(":scope > .expand-btn")) return;
+  const b = document.createElement("button");
+  b.className = "btn small expand-btn"; b.type = "button"; b.textContent = "⤢"; b.title = "enlarge";
+  b.onclick = e => { e.stopPropagation(); panel.classList.contains("expanded") ? collapsePanel() : expandPanel(panel); };
+  panel.prepend(b);
+}
+let expanded = null;
+function redrawCharts(panel, grow, natural) {
+  const hosts = [...panel.querySelectorAll("*")].filter(h => h._redraw);
+  if (!grow) { hosts.forEach(h => h._redraw()); return; }
+  const base = hosts.reduce((t, h) => t + (h._chartOpt.height || 260), 0) || 1;
+  // non-chart content (titles, legends, notes) measured at normal size
+  const other = natural - hosts.reduce((t, h) => t + (h._chartOpt.height || 260), 0);
+  const f = Math.max(1, Math.min(3.5, (innerHeight - 60 - other) / base));
+  hosts.forEach(h => h._redraw(Math.round((h._chartOpt.height || 260) * f)));
+}
+function expandPanel(panel) {
+  collapsePanel();
+  const natural = panel.offsetHeight;
+  const bd = document.createElement("div"); bd.className = "expand-backdrop"; bd.onclick = collapsePanel;
+  document.body.appendChild(bd);
+  panel.classList.add("expanded"); document.body.classList.add("has-expanded");
+  panel.querySelector(":scope > .expand-btn").textContent = "✕";
+  expanded = { panel, bd };
+  hideTip(); redrawCharts(panel, true, natural);
+}
+function collapsePanel() {
+  if (!expanded) return;
+  const { panel, bd } = expanded; expanded = null;
+  bd.remove(); panel.classList.remove("expanded"); document.body.classList.remove("has-expanded");
+  const b = panel.querySelector(":scope > .expand-btn"); if (b) b.textContent = "⤢";
+  hideTip(); redrawCharts(panel, false);
+}
+addEventListener("keydown", e => { if (e.key === "Escape" && expanded) { e.preventDefault(); collapsePanel(); } });
+addEventListener("hashchange", () => { if (expanded) { expanded.bd.remove(); document.body.classList.remove("has-expanded"); expanded = null; } });
+
 async function route() {
   const h = location.hash.replace(/^#\/?/, "");
   const [page, arg] = h.split("/");
@@ -1529,6 +1582,7 @@ async function route() {
     else if (lastRoute !== h) scrollTo(0, 0);
     Nav.pop = false;
     lastRoute = h;
+    document.querySelectorAll("#app .smap").forEach(ensureExpander);
   } catch (e) {
     $("#app").innerHTML = `<p class="down">Error: ${esc(e.message)}</p>`;
     console.error(e);
