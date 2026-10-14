@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Unit and end-to-end tests (stdlib unittest, no network)
+        run: python -m unittest discover -s tests -t tests -v
+      - name: CLI smoke test on the regression fixtures
+        run: python bin/rollbook analyze samples/Outdoor_cycle.gpx
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: JavaScript syntax check
+        run: for f in web/static/*.js; do node --check "$f"; done

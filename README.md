@@ -2,6 +2,8 @@
 
 <h1 align="center">Rollbook</h1>
 
+<p align="center"><a href="https://github.com/pjayala/rollbook/actions/workflows/tests.yml"><img src="https://github.com/pjayala/rollbook/actions/workflows/tests.yml/badge.svg" alt="tests"></a></p>
+
 <p align="center">An offline training dashboard for your Strava data.<br>
 Progress, heatmaps, laps, automatic segments with leaderboards, and wind-neutral speed. It runs on your own machine.</p>
 
@@ -182,6 +184,21 @@ to trust for what, how laps, segments and wind-neutral speed are computed,
 and a list of data-quality traps in real-world GPX/TCX/FIT files that the
 importer handles. Examples include big-endian FIT files, GPS lost under a
 bridge, filler altitude readings and stuck odometers.
+
+## Development
+
+Tests use only the standard library and never touch the network or your
+`./data`:
+
+```sh
+python3 -m unittest discover -s tests -t tests
+```
+
+They cover the parsers (GPX, gzipped files, synthetic little- and big-endian
+FIT), the regression fixtures in `samples/`, GPS and elevation clean-up,
+laps, segments, the wind and slope model, and an end-to-end build plus the
+dashboard API and its CSRF checks. GitHub Actions runs them on every push and
+pull request on Linux, macOS and Windows with Python 3.9 and 3.13.
 
 ## License
 

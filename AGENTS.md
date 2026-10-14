@@ -45,6 +45,7 @@ data/rollbook.db          SQLite: 1866 activities, 4.07M samples   (gitignored)
 data/cache/archives/    extracted Strava export                  (gitignored)
 exports/*.zip           raw Strava account exports, by request date (gitignored)
 LICENSE                 GPL-3.0 text
+tests/                  unittest suite (parsing, logic, end-to-end API); run in CI
 samples/*.gpx           two hand-checked rides used as regression fixtures
 web/server.py           `rollbook web`: stdlib HTTP server + JSON API, read-only DB
 web/segments.py         auto-generated segments + effort matching
@@ -311,6 +312,15 @@ reintroduce them.
 Accuracy achieved: recomputed distance is within 1% of Strava's own figure for
 **96%** of activities. The residual outliers are 3 genuinely bad tracks (a pool
 swim, two 30-second-sampling skates) — find them via `km_diff_pct`.
+
+## Tests
+
+`python3 -m unittest discover -s tests -t tests` (stdlib only, ~2 s, no
+network; `tests/helpers.py` points `ROLLBOOK_HOME` at a temp dir). CI:
+`.github/workflows/tests.yml` on every push / PR, ubuntu/macos/windows ×
+Python 3.9 and 3.13, plus `node --check` on the JS. `tests/helpers.py` also
+writes synthetic FIT files (either endianness, optional sport/session
+messages), so add a test there when a new device quirk turns up.
 
 ## Regression fixtures
 

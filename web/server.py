@@ -867,6 +867,17 @@ def make_handler(db_path, M, tiles):
             origin = self.headers.get("Origin")
             return origin is None or origin in tuple("http://" + o for o in ours)
 
+        def _reject(self, code, body, ctype="application/json"):
+            """Refuse a POST without breaking the connection: read (and drop) a
+            small request body first, otherwise close instead of keeping alive."""
+            n = int(self.headers.get("Content-Length") or 0)
+            if 0 < n <= 32 * 1024 * 1024:
+                while n > 0:
+                    n -= len(self.rfile.read(min(n, 1 << 20)) or b"x" * n)
+            else:
+                self.close_connection = True
+            return self.send(code, body, ctype)
+
         def do_POST(self):
             u = urllib.parse.urlparse(self.path)
             q = {k: v[-1] for k, v in urllib.parse.parse_qs(u.query).items()}
@@ -874,7 +885,7 @@ def make_handler(db_path, M, tiles):
                 # the app window's page sends it from pagehide (a beacon, so no
                 # custom header possible; Origin is always set for beacons)
                 if not self._same_origin() or not self.headers.get("Origin"):
-                    return self.send(403, "forbidden", "text/plain")
+                    return self._reject(403, "forbidden", "text/plain")
                 self.send(204, b"", "text/plain")
                 cb = getattr(self.server, "on_bye", None)
                 if cb:
@@ -882,7 +893,7 @@ def make_handler(db_path, M, tiles):
                 return
             if u.path == "/api/favorites":
                 if not self._same_origin() or self.headers.get("X-Rollbook") != "1":
-                    return self.json({"error": "forbidden"}, 403)
+                    return self._reject(403, json.dumps({"error": "forbidden"}))
                 try:
                     n = int(self.headers.get("Content-Length") or 0)
                     b = json.loads(self.rfile.read(min(n, 65536)) or b"{}")
@@ -893,7 +904,7 @@ def make_handler(db_path, M, tiles):
                 # custom header: a cross-site page can't send it without a CORS
                 # preflight, which this server never approves
                 if not self._same_origin() or self.headers.get("X-Rollbook") != "1":
-                    return self.json({"error": "forbidden"}, 403)
+                    return self._reject(403, json.dumps({"error": "forbidden"}))
                 try:
                     if u.path == "/api/import/upload":
                         n = int(self.headers.get("Content-Length") or 0)
@@ -905,7 +916,7 @@ def make_handler(db_path, M, tiles):
                 except Exception as e:
                     code, body = 500, {"error": f"{type(e).__name__}: {e}"}
                 return self.json(body, code)
-            self.send(404, "not found", "text/plain")
+            self._reject(404, "not found", "text/plain")
 
         def route_api(self, p, q):
             db = dbc()
