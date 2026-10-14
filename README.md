@@ -52,6 +52,11 @@ GPS: runs, rides, walks, skates, plus indoor rides from ROUVY or MyWhoosh.
   session. On out-and-back routes, the gap between the two legs is split into
   wind, slope and "other", giving a conditions-adjusted speed. Plus speed vs
   temperature.
+- **Calories:** Rollbook's own per-sport estimate, from measured power for
+  indoor rides, the ACSM equations for running and walking, and
+  speed-based METs for skating and outdoor rides. Watches and Strava differ
+  wildly on this. A **Profile** screen holds your weight, height, birth year
+  and heart-rate limits.
 - **Race predictor**, **favorites (☆)** for sessions and segments, and
   back/forward navigation.
 - **Import** from the UI: drop in a full Strava export `.zip` or single

@@ -49,6 +49,7 @@ tests/                  unittest suite (parsing, logic, end-to-end API); run in 
 samples/*.gpx           two hand-checked rides used as regression fixtures
 web/server.py           `rollbook web`: stdlib HTTP server + JSON API, read-only DB
 web/segments.py         auto-generated segments + effort matching
+web/profile.py          athlete profile (data/profile.json) + per-sport calorie models
 web/weather.py          historical weather per outdoor session (Open-Meteo, cached)
 web/geonames.py         segment place names (Nominatim reverse geocoding, cached)
 web/importer.py         Import dialog backend: uploads + background db build / enrich
@@ -194,6 +195,18 @@ changing `derive()`.
   (turnaround ≥ 50% of half the distance, finish within 1 km of start).
   `asym_pct` = out vs back moving speed; the home route's −0.15% grade alone
   gives 0–5%, more than that is wind.
+* **Calories** (`web/profile.py`): Rollbook's own estimate everywhere;
+  Strava's/the watch's `s_calories` is shown only as a reference (without HR,
+  Strava's skate figure is ~2× the measured rate). Per sport: indoor rides
+  `avg watts × time ÷ 24%` (outdoor rides' `s_avg_watts` is Strava's
+  *estimate*, not used); run/walk/hike ACSM equations (speed + uphill grade
+  from `ascent_m`); inline skate / outdoor ride Compendium MET by speed;
+  others a fixed MET; Keytel HR formula as a cross-check when birth year
+  and sex are set. Weight is the current profile weight for every session.
+  The **Profile** screen (`#/profile`) edits name, sex, birth year, height,
+  weight, resting/max HR; first prefilled from the export's `profile.csv`.
+  A profile max HR overrides the recorded one for zones. BMR is
+  Mifflin–St Jeor.
 * **Weather / conditions** (`web/weather.py`, `conditions()` in server.py):
   Open-Meteo hourly temperature, 10 m wind and gusts per 0.1° cell and UTC
   day (archive API, forecast API `past_days` for the last week), cached in

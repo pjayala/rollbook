@@ -12,6 +12,7 @@ activity id and invalidated when the sample count or METRICS_VERSION changes.
 """
 
 import geonames
+import profile as athlete
 import gzip
 import json
 import re
@@ -553,6 +554,10 @@ def api_activities(db, q, M):
         c = r["cond"] or {}
         r["temp"], r["wind"] = c.get("temp"), c.get("ws")
         r["adj_neutral"] = c.get("adjusted")
+    prof = PROFILE.get()
+    for r in rows:
+        k = athlete.calories(r, prof) or {}
+        r["kcal"], r["kcal_src"] = k.get("kcal"), k.get("source")
     return rows
 
 
@@ -596,6 +601,7 @@ def api_activity(db, q, M, aid):
     if act.get("type") and act["type"] not in FITS:
         api_activities(db, {"type": act["type"]}, M)  # fits this sport's wind coefficient
     act["cond"] = conditions(act, m)
+    act["cal"] = athlete.calories(act, PROFILE.get())
     act["splits"] = splits
     act["series_cols"] = ["t", "km", "kmh", "hr", "ele", "lat", "lon"]
     act["series"] = series
@@ -619,6 +625,7 @@ IMPORTER = None  # importer.Importer, set in start()
 FAVS = None  # Favorites, set in start()
 GEO = None  # geonames.Geonames, set in start()
 WX = None  # weather.Weather, set in start()
+PROFILE = None  # athlete.Profile, set in start()
 
 
 class Favorites:
@@ -763,6 +770,9 @@ def api_status(db, q, M):
 
 
 def api_hrmax(db, q, M):
+    p = PROFILE.get() if PROFILE else {}
+    if p.get("hr_max"):
+        return {"hrmax": p["hr_max"], "source": "profile"}
     r = db.execute(
         "SELECT MAX(hr_max) FROM activities WHERE date >= date('now','-365 days') AND hr_max < 230"
     ).fetchone()[0]
@@ -891,6 +901,14 @@ def make_handler(db_path, M, tiles):
                 if cb:
                     cb()
                 return
+            if u.path == "/api/profile":
+                if not self._same_origin() or self.headers.get("X-Rollbook") != "1":
+                    return self._reject(403, json.dumps({"error": "forbidden"}))
+                try:
+                    n = int(self.headers.get("Content-Length") or 0)
+                    return self.json(clean(PROFILE.set(json.loads(self.rfile.read(min(n, 65536)) or b"{}"))))
+                except (ValueError, TypeError, AttributeError) as e:
+                    return self.json({"error": str(e)}, 400)
             if u.path == "/api/favorites":
                 if not self._same_origin() or self.headers.get("X-Rollbook") != "1":
                     return self._reject(403, json.dumps({"error": "forbidden"}))
@@ -927,6 +945,8 @@ def make_handler(db_path, M, tiles):
                 return self.json(clean(simple[p](db, q, M)))
             if p == "favorites":
                 return self.json(FAVS.get())
+            if p == "profile":
+                return self.json(clean(PROFILE.get()))
             if p == "import":
                 return self.json(clean(IMPORTER.status()))
             if p.startswith("activity/"):
@@ -976,13 +996,14 @@ def clean(o):
 
 def start(db_path, cache_path, port=8765, offline=False):
     """Bind and return (httpd, metrics, url); caller runs httpd.serve_forever()."""
-    global SEGS, IMPORTER, FAVS, GEO, WX
+    global SEGS, IMPORTER, FAVS, GEO, WX, PROFILE
     import importer
     import segments  # imports this module; must come after it is fully loaded
 
     M = Metrics(db_path, cache_path)
     SEGS = segments.SegmentStore(db_path, M, os.path.join(os.path.dirname(cache_path), "web_segments.json"))
     IMPORTER = importer.Importer(db_path, M)
+    PROFILE = athlete.Profile(os.path.dirname(os.path.abspath(db_path)))
     FAVS = Favorites(os.path.join(os.path.dirname(os.path.abspath(db_path)), "favorites.json"))
     threading.Thread(target=M.warm, daemon=True).start()
     tiles = TileCache(os.path.join(os.path.dirname(cache_path), "tiles"), offline)

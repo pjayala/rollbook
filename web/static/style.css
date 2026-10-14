@@ -155,3 +155,10 @@ body.has-expanded { overflow: hidden; }
 .warrow { display: inline-block; font-weight: 700; color: var(--accent2); }
 .gapbar { display: flex; gap: 2px; margin-top: 10px; height: 20px; border-radius: 4px; overflow: hidden; font-size: 11px; }
 .gapbar span { display: flex; align-items: center; justify-content: center; color: #111; white-space: nowrap; overflow: hidden; min-width: 0; }
+#profile-btn { text-decoration: none; margin-left: 4px; }
+#profile-btn.warn { border-color: var(--warn); color: var(--warn); }
+.pform { display: grid; gap: 10px; max-width: 460px; }
+.pfield { display: grid; grid-template-columns: 150px 1fr; align-items: center; gap: 4px 12px; }
+.pfield > span { color: var(--muted); font-size: 13px; }
+.pfield small { grid-column: 2; }
+.pfield input, .pfield select { width: 100%; }
