@@ -6,6 +6,7 @@ import csv
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -15,6 +16,7 @@ import urllib.request
 
 from helpers import SAMPLES, TOOL, tmpdir
 
+import edits
 import server
 
 IDS = {"Outdoor_cycle.gpx": 1001, "The_come_back.gpx": 1002}
@@ -169,6 +171,122 @@ class Api(Build):
         self.assertEqual(code, 200)
         self.assertIn("1001", self.get("/api/favorites")["sessions"])
         self.assertEqual(self.post("/api/favorites", b'{"kind":"x","id":"1","on":true}', h)[0], 400)
+
+    def edit(self, body, headers=None):
+        h = {"X-Rollbook": "1", "Content-Type": "application/json"} if headers is None else headers
+        code, raw = self.post("/api/edit", json.dumps(body).encode(), h)
+        return code, json.loads(raw) if raw.startswith(b"{") else raw
+
+    def test_edit_needs_header_and_same_origin(self):
+        body = {"id": "1001", "name": "x"}
+        self.assertEqual(self.edit(body, {"Content-Type": "application/json"})[0], 403)
+        self.assertEqual(self.edit(body, {"X-Rollbook": "1", "Origin": "https://evil.example"})[0], 403)
+        self.assertEqual(self.edit(body, {"X-Rollbook": "1", "Host": "evil.example"})[0], 403)
+        self.assertEqual(self.get("/api/activity/1001")["name"], "Outdoor cycle")
+        self.assertEqual(self.edit({"id": "99"})[0], 404)
+        self.assertEqual(self.edit({"id": "../1"})[0], 400)
+        self.assertEqual(self.edit({"id": "1001", "name": "a" * 201})[0], 400)
+        self.assertEqual(self.edit({"id": "1001", "type": 5})[0], 400)
+        self.assertEqual(self.edit({"id": "1001", "delete": True, "remove_file": True})[0], 400)  # not an import
+        self.assertFalse(self.get("/api/activity/1001")["hidden"])
+
+    def test_edit_rename_sport_hide_restore(self):
+        try:
+            code, r = self.edit({"id": "1002", "name": "  Come  back ", "type": "Ride"})
+            self.assertEqual(code, 200, r)
+            self.assertEqual(r["edit"]["name"], "Come back")
+            s = self.get("/api/activity/1002")
+            self.assertEqual((s["name"], s["type"], s["orig_type"]), ("Come back", "Ride", "Inline Skate"))
+            self.assertEqual([a["id"] for a in self.get("/api/activities?type=Ride")], [1002])
+            self.assertEqual([a["id"] for a in self.get("/api/activities?type=Inline%20Skate")], [1001])
+            self.assertEqual({t["type"]: t["n"] for t in self.get("/api/types")}, {"Inline Skate": 1, "Ride": 1})
+
+            self.assertEqual(self.edit({"id": "1002", "hidden": True})[0], 200)
+            self.assertEqual(self.get("/api/activities?type=Ride"), [])
+            self.assertEqual([t["type"] for t in self.get("/api/types")], ["Inline Skate"])
+            listed = self.get("/api/activities?type=Ride&hidden=1")
+            self.assertEqual([(a["id"], a["hidden"]) for a in listed], [(1002, 1)])
+            self.assertTrue(self.get("/api/activity/1002")["hidden"])  # still viewable, to restore it
+
+            self.assertEqual(self.edit({"id": "1002", "delete": True})[0], 200)
+            self.assertTrue(self.get("/api/activity/1002")["deleted"])
+            self.assertEqual(self.edit({"id": "1002", "restore": True})[0], 200)
+            self.assertEqual(len(self.get("/api/activities?type=Ride")), 1)
+            with open(os.path.join(self.home, "edits.json")) as f:
+                self.assertEqual(json.load(f)["sessions"]["1002"]["type"], "Ride")
+        finally:  # back to the original: empty / original values drop the override
+            self.edit({"id": "1002", "name": "", "type": "Inline Skate", "restore": True})
+        self.assertNotIn("1002", self.get("/api/edits")["sessions"])
+        self.assertEqual(self.get("/api/activity/1002")["name"], "The come back")
+
+
+class EditsStore(unittest.TestCase):
+    """web/edits.py on its own: the SQL overlay, rebuild survival, deleting imports."""
+
+    def setUp(self):
+        self.home = tmpdir(self)
+
+    def ro(self, e):
+        db = sqlite3.connect(f"file:{os.path.join(self.home, 'rollbook.db')}?mode=ro", uri=True)
+        e.sync(db)
+        self.addCleanup(db.close)
+        return db
+
+    def test_survives_fresh_rebuild(self):
+        export = os.path.join(self.home, "export")
+        make_export(export)
+        self.assertEqual(run(self.home, "db", "build", export).returncode, 0)
+        e = edits.Edits(self.home)
+        db = self.ro(e)
+        e.update(db, 1001, {"name": "Riverside", "type": "Ride"})
+        e.update(db, 1002, {"hidden": True})
+        db.close()  # Windows can't delete an open DB file
+        r = run(self.home, "db", "build", "--fresh", export)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        e = edits.Edits(self.home)  # as a restarted server would
+        db = self.ro(e)
+        self.assertEqual(db.execute("SELECT id, name, type FROM activities").fetchall(), [(1001, "Riverside", "Ride")])
+        self.assertEqual(db.execute("SELECT name, type FROM main.activities WHERE id=1001").fetchone(),
+                         ("Outdoor cycle", "Inline Skate"))
+        self.assertEqual(db.execute("SELECT COUNT(*) FROM activities_all WHERE hidden").fetchone(), (1,))
+
+    def test_sync_follows_later_edits(self):
+        export = os.path.join(self.home, "export")
+        make_export(export)
+        run(self.home, "db", "build", "--no-samples", export)
+        e = edits.Edits(self.home)
+        db = self.ro(e)
+        self.assertEqual(db.execute("SELECT COUNT(*) FROM activities").fetchone(), (2,))
+        e.update(db, 1001, {"hidden": True})
+        e.sync(db)
+        self.assertEqual(db.execute("SELECT COUNT(*) FROM activities").fetchone(), (1,))
+
+    def test_delete_removes_import_file_and_reimport_restores(self):
+        imp = os.path.join(self.home, "imports")
+        os.makedirs(os.path.join(imp, "activities"))
+        for n in ("a.gpx", "b.gpx"):
+            shutil.copy(os.path.join(SAMPLES, "Outdoor_cycle.gpx" if n == "a.gpx" else "The_come_back.gpx"),
+                        os.path.join(imp, "activities", n))
+        with open(os.path.join(imp, "activities.csv"), "w", newline="") as f:
+            csv.writer(f).writerows([["Activity ID", "Activity Date", "Activity Name", "Activity Type", "Filename"],
+                                     ["", "", "a", "Inline Skate", "activities/a.gpx"],
+                                     ["", "", "b", "Inline Skate", "activities/b.gpx"]])
+        self.assertEqual(run(self.home, "db", "build", "--no-samples", imp).returncode, 0)
+        aid = edits.import_id("activities/a.gpx")
+        e = edits.Edits(self.home)
+        db = self.ro(e)
+        self.assertIsNotNone(e.import_file(aid, "activities/a.gpx"))
+        self.assertIsNone(e.import_file(aid + 1, "activities/a.gpx"))  # id must match the path
+        self.assertIsNone(e.import_file(edits.import_id("../x.gpx"), "../x.gpx"))
+        ed, _ = e.update(db, aid, {"delete": True, "remove_file": True})
+        self.assertTrue(ed["deleted"] and ed["file_removed"])
+        self.assertFalse(os.path.exists(os.path.join(imp, "activities", "a.gpx")))
+        with open(os.path.join(imp, "activities.csv")) as f:
+            self.assertEqual([r[-1] for r in csv.reader(f)], ["Filename", "activities/b.gpx"])
+        e.sync(db)
+        self.assertEqual(db.execute("SELECT name FROM activities").fetchall(), [("b",)])
+        e.forget_removed("activities/a.gpx")  # what the importer calls on re-upload
+        self.assertEqual(e.get(aid), {})
 
 
 if __name__ == "__main__":

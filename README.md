@@ -61,6 +61,8 @@ GPS: runs, rides, walks, skates, plus indoor rides from ROUVY or MyWhoosh.
   back/forward navigation.
 - **Import** from the UI: drop in a full Strava export `.zip` or single
   `.fit/.gpx/.tcx` files ("Export Original"). Duplicates are detected.
+- **Edit sessions** (✎ on a session): rename, fix the sport, hide from stats
+  or delete. Edits are stored next to the database and survive rebuilds.
 - **Desktop window** (`rollbook app`) or a normal browser tab
   (`rollbook web`).
 
