@@ -59,6 +59,7 @@ class Importer:
         self.lock = threading.Lock()
         self.pending = []  # paths to build: export zips, and/or the imports dir
         self.job: dict = {"state": "idle"}
+        self.on_store = None  # called with "activities/<name>" for each newly stored file
 
     # ---------------------------------------------------------------- upload
 
@@ -160,6 +161,8 @@ class Importer:
             if new:
                 w.writerow(CSV_HEAD)
             w.writerow(["", "", title, (sport or "").strip()[:40], f"activities/{name}"])
+        if self.on_store:  # e.g. un-delete a session whose file was removed earlier
+            self.on_store(f"activities/{name}")
         with self.lock:
             if self.imports not in self.pending:
                 self.pending.append(self.imports)

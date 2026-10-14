@@ -53,6 +53,7 @@ web/profile.py          athlete profile (data/profile.json) + per-sport calorie 
 web/weather.py          historical weather per outdoor session (Open-Meteo, cached)
 web/geonames.py         segment place names (Nominatim reverse geocoding, cached)
 web/importer.py         Import dialog backend: uploads + background db build / enrich
+web/edits.py            session edits (data/edits.json) as a TEMP view overlay on the read-only DB
 web/app.py              `rollbook app`: desktop window (pywebview / Chrome-Edge --app / browser)
 web/static/             index.html / app.js / map.js / style.css, vanilla JS + SVG/canvas, no CDN
 web/static/icon.svg     app icon master; favicon.svg is its 16-32 px simplification
@@ -298,6 +299,23 @@ changing `derive()`.
   segments store sport/start/end/length; when regenerated segments get new
   ids, `loadSegs` re-attaches the star (and a custom name) to the segment
   whose ends are within 80 m and length within 10%.
+* **Session edits** (✎ edit on the session page; `web/edits.py`): name,
+  sport, hidden, deleted, stored as overrides in `data/edits.json` keyed by
+  activity id (Strava's, or the SHA-1-of-path id of an import — both stable,
+  so edits survive `db build --fresh`). Each server connection gets a TEMP
+  table and a TEMP view named `activities` that **shadows**
+  `main.activities` (name/type overridden, hidden rows dropped), so every
+  query — lists, sport counts, tracks, segments, HR max, wind fit — sees the
+  edits with no further changes; `activities_all` keeps hidden rows plus
+  `hidden`/`deleted`/`orig_name`/`orig_type` for the session page and
+  `GET /api/activities?hidden=1` ("show hidden"). `EDITS.sync()` refreshes a
+  connection's overlay when the edit version changes (once per request).
+  `POST /api/edit` needs `X-Rollbook: 1` + same origin like the other
+  POSTs. Delete = hide; for a single-file import it can also remove the file
+  from `data/imports/activities/` and its `activities.csv` row (the DB row
+  stays, restorable, until a fresh build); re-uploading that file un-deletes.
+  A sport change drops the session's metrics cache entry. The CLI
+  (`db query`, `v_activities`) shows the raw, unedited DB.
 * **Circuits** (progress page) group sessions whose lap *centre* is within
   max(60 m, 25% of lap length) and lap length within 12% — the gate itself
   moves between sessions, the centre doesn't.

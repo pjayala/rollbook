@@ -402,9 +402,11 @@ function sessionMap(host, series, opt = {}) {
 // ------------------------------------------------------------------ state
 
 const S = { segs: {}, tracks: {}, mapView: {}, types: [], type: localStorage.type || "Inline Skate", range: localStorage.range || "all", acts: {}, hrmax: null, sort: { k: "date", dir: -1 }, q: "" };
-async function loadActs(type) {
-  if (!S.acts[type]) S.acts[type] = (await api("activities?type=" + encodeURIComponent(type))).map(a => ({ ...a, _d: dateOf(a), _t: +dateOf(a) }));
-  return S.acts[type];
+/** Sessions of one sport; withHidden also lists hidden / deleted ones (flagged a.hidden / a.deleted). */
+async function loadActs(type, withHidden) {
+  const key = withHidden ? type + "\u0000hidden" : type;
+  if (!S.acts[key]) S.acts[key] = (await api("activities?type=" + encodeURIComponent(type) + (withHidden ? "&hidden=1" : ""))).map(a => ({ ...a, _d: dateOf(a), _t: +dateOf(a) }));
+  return S.acts[key];
 }
 function inRange(acts) {
   if (S.range === "all") return acts;
@@ -1224,9 +1226,11 @@ async function sessionSegments(a, map) {
 }
 
 async function viewSessions() {
-  const acts = inRange(await loadActs(S.type));
+  const showHidden = localStorage.showHidden === "1";
+  const acts = inRange(await loadActs(S.type, showHidden));
   const cols = [
-    ["fav", "★", a => starSlot("sessions", a.id)], ["date", "date", a => `${fdate(a._d)}`, "l"], ["name", "name", a => esc(a.name), "l"], ["km", "km", a => fkm(a.km)],
+    ["fav", "★", a => starSlot("sessions", a.id)], ["date", "date", a => `${fdate(a._d)}`, "l"],
+    ["name", "name", a => esc(a.name) + (a.hidden ? ` <span class="pill">${a.deleted ? "deleted" : "hidden"}</span>` : ""), "l"], ["km", "km", a => fkm(a.km)],
     ["elapsed_s", "elapsed", a => dur(a.elapsed_s, true)], ["moving_s", "moving", a => dur(a.moving_s, true)], ["pause_s", "paused", a => dur(a.pause_s)],
     ["kmh_moving", "avg km/h", a => f2(a.kmh_moving)], ["pace", "pace /km", a => pace(a.kmh_moving)], ["best10min_kmh", "best 10", a => f2(a.best10min_kmh)],
     ["b60", "best 60", a => f2(a.b60)], ["wind_neutral", "wind-neutral", a => f2(a.wind_neutral)], ["asym_pct", "out vs back", a => pct(a.asym_pct)],
@@ -1239,7 +1243,8 @@ async function viewSessions() {
   app.innerHTML = `<div class="head"><div><h1>${esc(S.type)} sessions</h1><div class="muted" id="cnt"></div></div></div>
     <div class="panel"><div class="toolbar"><input id="q" placeholder="filter: name, date, route…" value="${esc(S.q)}" style="width:260px">
       <label class="muted small">min km <input id="mink" type="number" value="${localStorage.minKm || 0}" style="width:70px"></label>
-      <label class="muted small"><input type="checkbox" id="favonly" ${localStorage.favOnly === "1" ? "checked" : ""}> ★ favorites only</label></div>
+      <label class="muted small"><input type="checkbox" id="favonly" ${localStorage.favOnly === "1" ? "checked" : ""}> ★ favorites only</label>
+      <label class="muted small" title="hidden and deleted sessions never count towards stats, maps or segments"><input type="checkbox" id="showhidden" ${showHidden ? "checked" : ""}> show hidden</label></div>
       <div class="scroll"><table id="tbl"></table></div></div>`;
   const draw = () => {
     const q = S.q.toLowerCase(), mink = +($("#mink").value || 0);
@@ -1248,9 +1253,10 @@ async function viewSessions() {
     const favOnly = $("#favonly").checked;
     const rows = acts.filter(a => (a.km || 0) >= mink && (!favOnly || isFav("sessions", a.id)) && (!q || `${a.name} ${a.date} ${a.route} ${a.device}`.toLowerCase().includes(q)))
       .sort((a, b) => { const x = val(a), y = val(b); if (x == null) return 1; if (y == null) return -1; return (x > y ? 1 : x < y ? -1 : 0) * dir; });
-    $("#cnt").textContent = `${rows.length} of ${acts.length} sessions · ${fkm(rows.reduce((s, a) => s + (a.km || 0), 0))} km`;
+    const nh = rows.filter(a => a.hidden).length;
+    $("#cnt").textContent = `${rows.length} of ${acts.length} sessions · ${fkm(rows.reduce((s, a) => s + (a.hidden ? 0 : a.km || 0), 0))} km` + (nh ? ` · ${nh} hidden` : "");
     $("#tbl").innerHTML = `<thead><tr>${cols.map(([k, n, , c]) => `<th class="sort ${c || ""} ${S.sort.k === k ? (S.sort.dir > 0 ? "asc" : "desc") : ""}" data-k="${k}">${n}</th>`).join("")}</tr></thead><tbody>` +
-      rows.map(a => `<tr class="click" data-id="${a.id}">${cols.map(([, , f, c]) => `<td class="${c || ""}">${f(a)}</td>`).join("")}</tr>`).join("") + `</tbody>`;
+      rows.map(a => `<tr class="click${a.hidden ? " hiddenrow" : ""}" data-id="${a.id}">${cols.map(([, , f, c]) => `<td class="${c || ""}">${f(a)}</td>`).join("")}</tr>`).join("") + `</tbody>`;
     $("#tbl").querySelectorAll("th").forEach(th => th.onclick = () => { const k = th.dataset.k; S.sort = { k, dir: S.sort.k === k ? -S.sort.dir : -1 }; draw(); });
     $("#tbl").querySelectorAll("tr[data-id]").forEach(tr => tr.onclick = () => go(tr.dataset.id));
     mountStars($("#tbl"), null, () => favOnly && draw());
@@ -1258,6 +1264,7 @@ async function viewSessions() {
   $("#q").oninput = e => { S.q = e.target.value; draw(); };
   $("#mink").oninput = e => { localStorage.minKm = e.target.value; draw(); };
   $("#favonly").onchange = e => { localStorage.favOnly = e.target.checked ? "1" : "0"; draw(); };
+  $("#showhidden").onchange = e => { localStorage.showHidden = e.target.checked ? "1" : "0"; viewSessions(); };
   draw();
 }
 
@@ -1317,7 +1324,7 @@ async function viewSession(id) {
   const a = await api("activity/" + id);
   const m = a.metrics || {};
   const peers = await loadActs(a.type);
-  const i = peers.findIndex(p => p.id === a.id), prev = peers[i - 1], next = peers[i + 1];
+  const i = peers.findIndex(p => p.id === a.id), prev = i >= 0 ? peers[i - 1] : null, next = i >= 0 ? peers[i + 1] : null;
   const d = new Date(a.datetime || a.date);
   const ser = a.series || [];
   const hasHr = ser.some(r => r[3]), hasEle = ser.some(r => r[4] != null), hasGps = ser.some(r => r[5] != null);
@@ -1328,10 +1335,13 @@ async function viewSession(id) {
       <div><h1>${starSlot("sessions", a.id)} ${esc(a.name)} <span class="muted small">${esc(a.type)}</span></h1>
         <div class="muted">${fdate(d)} · ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")} · ${esc(a.device || "")} · ${routePill(m.route)}</div></div>
       <div class="nav">
+        <button class="btn" id="edit" title="rename, change sport, hide or delete">✎ edit</button>
         <button class="btn" id="prev" ${prev ? "" : "disabled"}>← previous</button>
         <button class="btn" id="next" ${next ? "" : "disabled"}>next →</button>
       </div>
     </div>
+    ${a.hidden ? `<div class="panel hiddenbar"><span>${a.deleted ? `<b>Deleted.</b> ${a.edit && a.edit.file_removed ? "Its imported file was removed; the session stays restorable until the next fresh rebuild." : ""}` : "<b>Hidden.</b>"}
+      Left out of stats, lists, maps and segments.</span><button class="btn" id="restore">Restore</button></div>` : ""}
     ${cards([
       { k: "Distance", v: fkm(a.km) + " km", s: isNum(a.km_diff_pct) && Math.abs(a.km_diff_pct) > 1 ? `track differs ${pct(a.km_diff_pct)}` : "" },
       { k: "Elapsed", v: dur(a.elapsed_s, true) }, { k: "Moving", v: dur(a.moving_s, true) },
@@ -1375,6 +1385,10 @@ async function viewSession(id) {
       <div class="panel"><h2>Same route, other sessions</h2><div class="scroll" id="t-same"></div></div>
     </div>`;
   mountStars(app.querySelector(".head"));
+  $("#edit").onclick = () => openEdit(a);
+  if ($("#restore")) $("#restore").onclick = async () => {
+    try { await postEdit({ id: String(a.id), restore: true }); await refreshData(); } catch (err) { alert("Could not restore: " + err.message); }
+  };
   $("#prev").onclick = () => prev && go(prev.id);
   $("#next").onclick = () => next && go(next.id);
 
@@ -1801,8 +1815,9 @@ async function runImport() {
     Imp.busy = false; drawImportList(state);
   }
 }
-/** Drop every client cache and redraw, after the DB changed underneath us. */
-async function refreshData() {
+/** Drop every client cache and redraw, after the DB (or its edits) changed underneath us.
+ * With `dest`, navigate there instead of redrawing the current page. */
+async function refreshData(dest) {
   S.acts = {}; S.tracks = {}; S.segs = {}; S.mapView = {};
   [S.types, { hrmax: S.hrmax }, S.favs] = await Promise.all([api("types"), api("hrmax"), api("favorites")]);
   S.hrmax = S.hrmax || 185;
@@ -1811,7 +1826,51 @@ async function refreshData() {
   sel.value = S.types.some(t => t.type === cur) ? cur : S.types[0]?.type;
   S.type = sel.value;
   pollStatus();
-  route();
+  if (dest && location.hash !== dest) location.hash = dest;  // hashchange routes
+  else route();
+}
+
+// ------------------------------------------------------------------ edits
+
+// Stored server-side as overrides (data/edits.json), applied to every query and
+// kept across `db build --fresh`; the DB itself stays read-only.
+async function postEdit(body) {
+  const r = await fetch("/api/edit", { method: "POST", headers: { "X-Rollbook": "1", "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.status);
+  return j;
+}
+function openEdit(a) {
+  const dlg = $("#edit-dlg"), msg = $("#ed-msg"), e = a.edit || {};
+  $("#ed-name").value = a.name || ""; $("#ed-name").placeholder = a.orig_name || "";
+  $("#ed-type").value = a.type || ""; $("#ed-type").placeholder = a.orig_type || "";
+  $("#ed-name-orig").textContent = e.name ? `original: ${a.orig_name || "–"} (clear to restore)` : "";
+  $("#ed-type-orig").textContent = e.type ? `original: ${a.orig_type || "–"} (clear to restore)` : "e.g. HUAWEI records skating as cycling";
+  $("#ed-types").innerHTML = S.types.map(t => `<option value="${esc(t.type)}">`).join("");
+  $("#ed-hidden").checked = !!a.hidden;
+  $("#ed-rmrow").hidden = !a.import_file; $("#ed-rmfile").checked = false;
+  $("#ed-delete").disabled = !!a.deleted;
+  msg.textContent = "";
+  const save = async (body, dest) => {
+    msg.className = "small muted"; msg.textContent = "saving…";
+    try {
+      const j = await postEdit({ id: String(a.id), ...body });
+      dlg.close();
+      const type = (j.edit && j.edit.type) || a.orig_type;
+      if (type && type !== S.type && !j.edit.hidden) S.type = localStorage.type = type;  // follow the session to its sport
+      await refreshData(dest);
+    } catch (err) { msg.className = "small down"; msg.textContent = "✕ " + err.message; }
+  };
+  $("#ed-form").onsubmit = ev => { ev.preventDefault(); save({ name: $("#ed-name").value, type: $("#ed-type").value, hidden: $("#ed-hidden").checked }); };
+  $("#ed-delete").onclick = () => {
+    const rm = $("#ed-rmfile").checked;
+    if (!confirm(`Delete "${a.name}"?\n\n` + (rm ? "Its imported file is removed from data/imports for good; the session can still be restored until the next fresh rebuild."
+      : "It disappears from stats, lists, maps and segments. Restore it from Sessions → show hidden."))) return;
+    save({ delete: true, remove_file: rm }, "#/sessions");
+  };
+  $("#ed-close").onclick = () => dlg.close();
+  dlg.showModal();
+  $("#ed-name").focus();
 }
 function initImport() {
   $("#import-btn").onclick = () => openImport();

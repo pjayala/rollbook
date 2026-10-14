@@ -11,6 +11,7 @@ the samples table and cached in $ROLLBOOK_HOME/cache/web_metrics.json, keyed by
 activity id and invalidated when the sample count or METRICS_VERSION changes.
 """
 
+import edits
 import geonames
 import profile as athlete
 import gzip
@@ -139,7 +140,7 @@ def _ele_placeholder(rows):
 
 
 def load_track(db, aid):
-    km, km_calc = db.execute("SELECT km, km_calc FROM activities WHERE id=?", (aid,)).fetchone()
+    km, km_calc = db.execute("SELECT km, km_calc FROM activities_all WHERE id=?", (aid,)).fetchone()
     scale = (km / km_calc) if (km and km_calc and km_calc > 0) else 1.0
     rows = db.execute(
         "SELECT t, lat, lon, ele, hr, cad, dist_m FROM samples WHERE activity_id=? ORDER BY t",
@@ -379,7 +380,7 @@ def derive(db, aid):
             hist[int(hr)] = hist.get(int(hr), 0) + dt
     out["hr_hist"] = hist
 
-    typ = db.execute("SELECT type FROM activities WHERE id=?", (aid,)).fetchone()[0] or ""
+    typ = db.execute("SELECT type FROM activities_all WHERE id=?", (aid,)).fetchone()[0] or ""
     if typ.startswith("Virtual"):  # simulated GPS, no wind, gradients are fake
         out["route"] = "virtual"
         return out
@@ -506,6 +507,7 @@ class Metrics:
 def connect(path):
     db = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False)
     db.row_factory = sqlite3.Row
+    EDITS.sync(db)  # `activities` is now the edited view, see web/edits.py
     return db
 
 
@@ -519,7 +521,10 @@ def api_types(db, q, M):
 
 def api_activities(db, q, M):
     typ = q.get("type")
-    sql = f"SELECT {LIST_COLS} FROM activities WHERE parse_error IS NULL"
+    # hidden=1 also lists hidden / deleted sessions (flagged), so they can be restored
+    sql = f"SELECT {LIST_COLS}, hidden, deleted FROM activities_all WHERE parse_error IS NULL"
+    if q.get("hidden") != "1":
+        sql += " AND NOT hidden"
     args = []
     if typ:
         sql += " AND type=?"
@@ -545,7 +550,7 @@ def api_activities(db, q, M):
         r["cond"] = conditions(r, m)
     # refit the wind coefficient on this sport's data, then recompute with it
     if typ:
-        k = fit_wind(typ, rows, ms)
+        k = fit_wind(typ, [r for r in rows if not r["hidden"]], ms)
         if k is not None and abs(k - FITS.get(typ, -1)) > 1e-6:
             FITS[typ] = k
             for r in rows:
@@ -562,10 +567,12 @@ def api_activities(db, q, M):
 
 
 def api_activity(db, q, M, aid):
-    row = db.execute("SELECT * FROM activities WHERE id=?", (aid,)).fetchone()
+    row = db.execute("SELECT * FROM activities_all WHERE id=?", (aid,)).fetchone()
     if not row:
         return None
     act = dict(row)
+    act["edit"] = EDITS.get(aid)
+    act["import_file"] = EDITS.import_file(aid, act.get("filename")) is not None
     m = M.get_many(db, [(aid, act["samples"])])[aid]
     splits = [dict(r) for r in db.execute(
         "SELECT km, moving_s, elapsed_s, pause_s, kmh, hr FROM splits WHERE activity_id=? ORDER BY km",
@@ -626,6 +633,7 @@ FAVS = None  # Favorites, set in start()
 GEO = None  # geonames.Geonames, set in start()
 WX = None  # weather.Weather, set in start()
 PROFILE = None  # athlete.Profile, set in start()
+EDITS = edits.Edits(None)  # in-memory until start() points it at $ROLLBOOK_HOME/edits.json
 
 
 class Favorites:
@@ -822,6 +830,7 @@ def make_handler(db_path, M, tiles):
     def dbc():
         if not hasattr(local, "db"):
             local.db = connect(db_path)
+        EDITS.sync(local.db)  # picks up edits made since this thread's last request
         return local.db
 
     class H(BaseHTTPRequestHandler):
@@ -909,6 +918,25 @@ def make_handler(db_path, M, tiles):
                     return self.json(clean(PROFILE.set(json.loads(self.rfile.read(min(n, 65536)) or b"{}"))))
                 except (ValueError, TypeError, AttributeError) as e:
                     return self.json({"error": str(e)}, 400)
+            if u.path == "/api/edit":
+                if not self._same_origin() or self.headers.get("X-Rollbook") != "1":
+                    return self._reject(403, json.dumps({"error": "forbidden"}))
+                try:
+                    n = int(self.headers.get("Content-Length") or 0)
+                    b = json.loads(self.rfile.read(min(n, 65536)) or b"{}")
+                    aid = b.get("id") if isinstance(b, dict) else None
+                    if not re.fullmatch(r"\d{1,20}", str(aid)):
+                        raise ValueError("bad id")
+                    e, type_changed = EDITS.update(dbc(), int(aid), b)
+                    if type_changed:  # derive() treats Virtual sessions differently
+                        with M.lock:
+                            M.data.pop(str(aid), None)
+                            M.dirty += 1
+                    return self.json({"id": int(aid), "edit": e, "edits": EDITS.all()})
+                except KeyError:
+                    return self.json({"error": "no such activity"}, 404)
+                except (ValueError, TypeError, OSError) as e:
+                    return self.json({"error": str(e)}, 400)
             if u.path == "/api/favorites":
                 if not self._same_origin() or self.headers.get("X-Rollbook") != "1":
                     return self._reject(403, json.dumps({"error": "forbidden"}))
@@ -945,6 +973,8 @@ def make_handler(db_path, M, tiles):
                 return self.json(clean(simple[p](db, q, M)))
             if p == "favorites":
                 return self.json(FAVS.get())
+            if p == "edits":
+                return self.json(EDITS.all())
             if p == "profile":
                 return self.json(clean(PROFILE.get()))
             if p == "import":
@@ -996,13 +1026,15 @@ def clean(o):
 
 def start(db_path, cache_path, port=8765, offline=False):
     """Bind and return (httpd, metrics, url); caller runs httpd.serve_forever()."""
-    global SEGS, IMPORTER, FAVS, GEO, WX, PROFILE
+    global SEGS, IMPORTER, FAVS, GEO, WX, PROFILE, EDITS
     import importer
     import segments  # imports this module; must come after it is fully loaded
 
+    EDITS = edits.Edits(os.path.dirname(os.path.abspath(db_path)))
     M = Metrics(db_path, cache_path)
     SEGS = segments.SegmentStore(db_path, M, os.path.join(os.path.dirname(cache_path), "web_segments.json"))
     IMPORTER = importer.Importer(db_path, M)
+    IMPORTER.on_store = EDITS.forget_removed
     PROFILE = athlete.Profile(os.path.dirname(os.path.abspath(db_path)))
     FAVS = Favorites(os.path.join(os.path.dirname(os.path.abspath(db_path)), "favorites.json"))
     threading.Thread(target=M.warm, daemon=True).start()

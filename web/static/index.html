@@ -57,6 +57,21 @@
     <button class="btn" id="imp-go" disabled>Import</button>
   </div>
 </dialog>
+<dialog id="edit-dlg">
+  <div class="dlg-head"><h2>Edit session</h2><button class="btn small" id="ed-close">✕</button></div>
+  <form id="ed-form" class="pform">
+    <label class="pfield"><span>Name</span><input id="ed-name" type="text" maxlength="200"><small class="muted" id="ed-name-orig"></small></label>
+    <label class="pfield"><span>Sport</span><input id="ed-type" type="text" maxlength="40" list="ed-types"><small class="muted" id="ed-type-orig"></small></label>
+    <datalist id="ed-types"></datalist>
+    <label class="pfield"><span>Hidden</span><span><input type="checkbox" id="ed-hidden"> leave out of stats, lists, maps and segments</span></label>
+    <div class="toolbar"><button class="btn" type="submit">Save</button><span id="ed-msg" class="small"></span></div>
+  </form>
+  <div class="danger-zone">
+    <div class="small"><b>Delete</b> <span class="muted">hides the session everywhere; edits are kept in <code>data/edits.json</code> and survive rebuilds.</span></div>
+    <label class="small" id="ed-rmrow" hidden><input type="checkbox" id="ed-rmfile"> also remove the imported file from <code>data/imports</code></label>
+    <div><button class="btn danger" id="ed-delete" type="button">Delete session</button></div>
+  </div>
+</dialog>
 <script src="/map.js"></script>
 <script src="/app.js"></script>
 </body>
