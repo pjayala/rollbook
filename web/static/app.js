@@ -449,6 +449,8 @@ async function viewProgress() {
       <div class="panel"><h2>Form: best 10-min speed <span class="muted">click a dot to open the session</span></h2><div id="c-form"></div>
         <div class="note">Wind-neutral = mean of the best 10 min on the out leg and on the back leg, so tail/head wind cancels. Only for out-and-back routes. Lines are rolling medians of 8 sessions.</div></div>
       <div class="panel"><h2>Volume per month</h2><div id="c-vol"></div></div>
+      <div class="panel"><h2>Energy per month <span class="muted">kcal, Rollbook's per-sport estimate</span></h2><div id="c-kcal"></div>
+        <div class="note" id="kcal-note"></div></div>
       <div class="panel"><h2>Endurance: best sustained speed <span class="muted">30 / 60 min windows</span></h2><div id="c-endu"></div></div>
       <div class="panel"><h2>Average moving speed per session</h2><div id="c-avg"></div>
         <div class="note">Not comparable across 2025-08: the watch sample rate dropped then and inflates moving speed. Use best-10 for long-term form.</div></div>
@@ -495,6 +497,7 @@ async function viewProgress() {
     m.b10 = Math.max(...m.a.map(a => a.best10min_kmh || 0)) || null; m.b10med = median(m.a.map(a => a.best10min_kmh));
     m.wn = median(m.a.map(a => a.wind_neutral)); m.kmh = m.mv ? m.km / (m.mv / 3600) : null;
     m.hr = median(m.a.map(a => a.hr_avg)); m.zones = ZONES.map(() => 0);
+    m.kcal = m.a.reduce((t, a) => t + (a.kcal || 0), 0);
     for (const a of m.a) zoneSecs(a.hr_hist, S.hrmax).forEach((s, i) => m.zones[i] += s);
   }
   chart($("#c-vol"), {
@@ -503,6 +506,15 @@ async function viewProgress() {
       { name: "sessions", kind: "line", color: "#ff7a1a", axis: "y2", data: mons.map(m => ({ x: m.x, y: m.n })) }],
     tip: x => { const m = mons.find(m => m.x === x); return m ? `<b>${fmon(new Date(m.x))}</b><div class="row"><span>distance</span><span>${fkm(m.km)} km</span></div><div class="row"><span>sessions</span><span>${m.n}</span></div><div class="row"><span>moving</span><span>${hours(m.mv)}</span></div>` : ""; }
   });
+  if (mons.some(m => m.kcal)) {
+    chart($("#c-kcal"), {
+      x: { type: "time" }, y: { zero: true, fmt: v => v >= 1000 ? (v / 1000).toFixed(0) + "k" : v.toFixed(0), label: "kcal" },
+      series: [{ name: "kcal", kind: "bar", color: "#ff7a1a", data: mons.map(m => ({ x: m.x, y: m.kcal })) }], legend: false,
+      tip: x => { const m = mons.find(m => m.x === x); return m ? `<b>${fmon(new Date(m.x))}</b><div class="row"><span>energy</span><span>${f0(m.kcal)} kcal</span></div><div class="row"><span>per session</span><span>${f0(m.kcal / m.n)}</span></div><div class="row"><span>per hour</span><span>${m.mv ? f0(m.kcal / (m.mv / 3600)) : "–"}</span></div>` : ""; },
+    });
+    const tot = acts.reduce((t, a) => t + (a.kcal || 0), 0), src = [...new Set(acts.map(a => (a.kcal_src || "").split(" ")[0]).filter(Boolean))];
+    $("#kcal-note").innerHTML = `${f0(tot)} kcal in this range (${f0(tot / 7700)} kg of fat-equivalent). Method: ${esc(src.join(", "))}, from your <a href="#/profile">profile</a> weight.`;
+  } else $("#c-kcal").innerHTML = `<p class="muted">Enter your weight in the <a href="#/profile">profile</a> to estimate calories.</p>`;
   chart($("#c-endu"), {
     x: { type: "time" }, y: { fmt: v => v.toFixed(0), label: "km/h" }, tip: tipAct, onClick: go,
     series: [{ name: "best 30 min", kind: "dot", color: "#3fb6ff", data: P("b30", acts.filter(a => a.b30 > 5)) },
@@ -553,8 +565,8 @@ async function viewProgress() {
     ["Fastest avg (≥10 km)", "kmh_moving", "km/h", acts.filter(a => a.km >= 10)], ["Longest", "km", "km"], ["Longest moving time", "moving_s", ""], ["Most climbing", "ascent_m", "m"]];
   $("#t-rec").innerHTML = `<table><thead><tr><th>record</th><th>value</th><th class="l">date</th><th>km</th><th class="l">route</th></tr></thead><tbody>` +
     recs.map(([n, k, u, xs]) => { const a = best(k, xs); if (!a) return ""; return `<tr class="click" data-id="${a.id}"><td class="l">${n}</td><td>${k === "moving_s" ? dur(a[k], true) : f2(a[k])} ${u}</td><td class="l">${fdate(a._d)}</td><td>${fkm(a.km)}</td><td class="l">${routePill(a.route)}</td></tr>`; }).join("") + `</tbody></table>`;
-  $("#t-mon").innerHTML = `<table><thead><tr><th>month</th><th>n</th><th>km</th><th>moving</th><th>km/h</th><th>best10 max</th><th>best10 med</th><th>wind-neutral</th><th>HR</th></tr></thead><tbody>` +
-    mons.slice().reverse().map(m => `<tr><td class="l">${fmon(new Date(m.x))}</td><td>${m.n}</td><td>${fkm(m.km)}</td><td>${hours(m.mv)}</td><td>${f1(m.kmh)}</td><td>${f2(m.b10)}</td><td>${f2(m.b10med)}</td><td>${f2(m.wn)}</td><td>${f0(m.hr)}</td></tr>`).join("") + `</tbody></table>`;
+  $("#t-mon").innerHTML = `<table><thead><tr><th>month</th><th>n</th><th>km</th><th>moving</th><th>km/h</th><th>best10 max</th><th>best10 med</th><th>wind-neutral</th><th>HR</th><th>kcal</th></tr></thead><tbody>` +
+    mons.slice().reverse().map(m => `<tr><td class="l">${fmon(new Date(m.x))}</td><td>${m.n}</td><td>${fkm(m.km)}</td><td>${hours(m.mv)}</td><td>${f1(m.kmh)}</td><td>${f2(m.b10)}</td><td>${f2(m.b10med)}</td><td>${f2(m.wn)}</td><td>${f0(m.hr)}</td><td>${m.kcal ? f0(m.kcal) : "–"}</td></tr>`).join("") + `</tbody></table>`;
   app.querySelectorAll("tr[data-id]").forEach(tr => tr.onclick = () => go(tr.dataset.id));
   predictor($("#p-pred"), all);
   calendar($("#cal"), acts);
@@ -824,6 +836,73 @@ const fdeg = d => isNum(d) ? COMPASS[Math.round(((d % 360) + 360) % 360 / 45) % 
 const windArrow = wd => isNum(wd) ? `<span class="warrow" style="transform:rotate(${(wd + 180) % 360}deg)">↑</span>` : "";
 const fwind = c => c && isNum(c.ws) ? `${f0(c.ws)} km/h ${windArrow(c.wd)} from ${fdeg(c.wd)}` : "–";
 const fsigned = (v, u = "%") => isNum(v) ? (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(1) + u : "–";
+
+// ------------------------------------------------------------------ profile
+
+async function viewProfile() {
+  const app = $("#app");
+  const p = await api("profile");
+  const yr = new Date().getFullYear();
+  const field = (k, label, attrs, help = "") => `<label class="pfield"><span>${label}</span><input id="pf-${k}" ${attrs} value="${esc(p[k] ?? "")}">${help ? `<small class="muted">${help}</small>` : ""}</label>`;
+  app.innerHTML = `
+    <div class="head"><div><h1>Profile</h1><div class="muted">Used for calories, heart-rate zones and resting energy. Stored only on this computer (<code>data/profile.json</code>).</div></div></div>
+    <div class="grid g2">
+      <div class="panel"><h2>You</h2>
+        <form id="pform" class="pform">
+          ${field("name", "Name", `type="text" maxlength="80" autocomplete="name"`)}
+          <label class="pfield"><span>Sex</span><select id="pf-sex"><option value="">–</option><option value="male">male</option><option value="female">female</option><option value="other">other</option></select>
+            <small class="muted">used by the heart-rate and resting-energy formulas</small></label>
+          ${field("birth_year", "Birth year", `type="number" min="1900" max="${yr}" step="1"`, "heart-rate calories, resting energy")}
+          ${field("height_cm", "Height (cm)", `type="number" min="100" max="250" step="0.5"`, "resting energy and BMI")}
+          ${field("weight_kg", "Weight (kg)", `type="number" min="25" max="300" step="0.1"`, "<b>needed for calories</b>")}
+          ${field("hr_rest", "Resting HR (bpm)", `type="number" min="25" max="120" step="1"`, "optional")}
+          ${field("hr_max", "Max HR (bpm)", `type="number" min="100" max="240" step="1"`, `optional, otherwise the highest recorded in the last 12 months (${S.hrmax ?? "?"} bpm) is used for zones`)}
+          <div class="toolbar"><button class="btn" type="submit" id="psave">Save</button><span id="pmsg" class="small"></span></div>
+        </form>
+        ${p.from_export ? `<div class="note">Prefilled from your Strava export's profile. Check it and save.</div>` : ""}
+      </div>
+      <div class="panel"><h2>Derived</h2><div id="pderived"></div>
+        <h2 style="margin-top:18px">How calories are estimated</h2>
+        <table class="small"><tbody>
+          <tr><td class="l">Indoor ride with power</td><td class="l">watts × time ÷ 24% muscle efficiency (the most accurate)</td></tr>
+          <tr><td class="l">Run, walk, hike</td><td class="l">ACSM oxygen-cost equations from speed and uphill grade × weight</td></tr>
+          <tr><td class="l">Inline skate, outdoor ride</td><td class="l">MET by speed (Compendium of Physical Activities) × weight × time</td></tr>
+          <tr><td class="l">Other</td><td class="l">a fixed MET per activity × weight × time</td></tr>
+          <tr><td class="l">Heart-rate cross-check</td><td class="l">Keytel 2005 from avg HR, weight, age and sex (needs the birth year)</td></tr>
+        </tbody></table>
+        <div class="note">Strava's and the watches' own calorie numbers aren't used: without heart rate, Strava's estimate for skating is about twice the measured rate. All figures are gross (they include what you'd burn at rest during that time) and use your current weight for every session.</div>
+      </div>
+    </div>`;
+  $("#pf-sex").value = p.sex || "";
+  const derived = q => {
+    const rows = [["Age", q.age ? `${q.age}` : "–"], ["BMI", isNum(q.bmi) ? q.bmi.toFixed(1) : "–"],
+      ["Resting energy (BMR)", isNum(q.bmr) ? `${f0(q.bmr)} kcal/day <span class="muted">(Mifflin–St Jeor)</span>` : `<span class="muted">needs sex, birth year, height and weight</span>`],
+      ["Max HR for zones", q.hr_max ? `${q.hr_max} bpm (profile)` : `${S.hrmax ?? "?"} bpm (recorded)`]];
+    $("#pderived").innerHTML = `<table><tbody>${rows.map(([k, v]) => `<tr><td class="l">${k}</td><td class="l">${v}</td></tr>`).join("")}</tbody></table>`;
+  };
+  derived(p);
+  $("#pform").onsubmit = async e => {
+    e.preventDefault();
+    const body = {};
+    for (const k of ["name", "sex", "birth_year", "height_cm", "weight_kg", "hr_rest", "hr_max"]) body[k] = $("#pf-" + k).value.trim();
+    const msg = $("#pmsg"); msg.className = "small muted"; msg.textContent = "saving…";
+    try {
+      const r = await fetch("/api/profile", { method: "POST", headers: { "X-Rollbook": "1", "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || r.status);
+      msg.className = "small up"; msg.textContent = "✓ saved; calories and zones updated";
+      S.acts = {};  // recompute calories in every view
+      ({ hrmax: S.hrmax } = await api("hrmax"));
+      derived(j); setProfileBtn(j);
+    } catch (err) { msg.className = "small down"; msg.textContent = "✕ " + err.message; }
+  };
+}
+function setProfileBtn(p) {
+  const b = $("#profile-btn"); if (!b) return;
+  b.textContent = p && p.name ? p.name.split(" ")[0] : "Profile";
+  b.classList.toggle("warn", !(p && p.weight_kg));
+  b.title = p && p.weight_kg ? "Your profile" : "Add your weight to estimate calories";
+}
 
 // ------------------------------------------------------------------ favorites
 
@@ -1153,7 +1232,7 @@ async function viewSessions() {
     ["b60", "best 60", a => f2(a.b60)], ["wind_neutral", "wind-neutral", a => f2(a.wind_neutral)], ["asym_pct", "out vs back", a => pct(a.asym_pct)],
     ["laps_n", "laps", a => a.laps_n ? `${a.laps_n} × ${f2(a.lap_km)}` : ""], ["best_lap_s", "best lap", a => a.best_lap_s ? dur(a.best_lap_s) : ""],
     ["temp", "°C", a => f0(a.temp)], ["wind", "wind", a => a.cond && isNum(a.cond.ws) ? `${f0(a.cond.ws)} ${windArrow(a.cond.wd)}` : ""],
-    ["adj_neutral", "adjusted", a => f2(a.adj_neutral)],
+    ["adj_neutral", "adjusted", a => f2(a.adj_neutral)], ["kcal", "kcal", a => f0(a.kcal)],
     ["hr_avg", "HR", a => f0(a.hr_avg)], ["ascent_m", "ascent", a => f0(a.ascent_m)], ["route", "route", a => routePill(a.route), "l"],
   ];
   const app = $("#app");
@@ -1269,7 +1348,8 @@ async function viewSession(id) {
       { k: "Ascent", v: f0(a.ascent_m) + " m" },
       ...(a.cond && isNum(a.cond.temp) ? [{ k: "Weather", v: `${f0(a.cond.temp)}°C`, s: `wind ${fwind(a.cond)}${isNum(a.cond.gust) ? ` · gusts ${f0(a.cond.gust)}` : ""}` }] : a.cond && a.cond.pending ? [{ k: "Weather", v: "…", s: "loading" }] : []),
       ...(a.cond && isNum(a.cond.adjusted) ? [{ k: "Conditions-adjusted 10 min", v: f2(a.cond.adjusted), s: "wind and slope removed per leg", hl: 1 }] : []),
-      ...(a.s_calories ? [{ k: "Calories", v: f0(a.s_calories) }] : []),
+      ...(a.cal ? [{ k: "Calories", v: `${f0(a.cal.kcal)} kcal`, s: `${esc(a.cal.source)}${isNum(a.cal.hr_kcal) ? ` · HR ${f0(a.cal.hr_kcal)}` : ""}${a.s_calories ? ` · Strava ${f0(a.s_calories)}` : ""}` }]
+        : a.s_calories ? [{ k: "Calories", v: f0(a.s_calories), s: `Strava · <a href="#/profile">add your weight</a>` }] : []),
     ])}
     <div class="grid g2">
       <div class="panel"><h2>Route <span class="muted">coloured by speed · drag / scroll to explore · hover the chart to follow along</span></h2><div id="map"></div></div>
@@ -1613,6 +1693,7 @@ async function route() {
     else if (page === "map") await viewMap();
     else if (page === "segments") await viewSegments();
     else if (page === "segment" && arg) await viewSegment(arg);
+    else if (page === "profile") await viewProfile();
     else await viewProgress();
     const y = history.state && history.state.y;
     if (Nav.pop && y) requestAnimationFrame(() => scrollTo(0, y));  // back/forward: where you were
@@ -1766,6 +1847,7 @@ async function boot() {
   addEventListener("hashchange", route);
   let rt; addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(() => { if (!/^#\/(map|segment)/.test(location.hash)) route(); }, 200); });
   initImport();
+  api("profile").then(setProfileBtn).catch(() => { });
   pollStatus();
   route();
 }

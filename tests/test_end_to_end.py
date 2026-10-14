@@ -151,6 +151,18 @@ class Api(Build):
         self.assertEqual(self.post("/api/bye", b"", {"Origin": "https://evil.example"})[0], 403)
         self.assertEqual(self.post("/api/bye", b"", {"Origin": f"http://127.0.0.1:{self.port}"})[0], 204)
 
+    def test_profile_api(self):
+        h = {"X-Rollbook": "1", "Content-Type": "application/json"}
+        self.assertEqual(self.post("/api/profile", b'{"weight_kg": 70}')[0], 403)
+        code, body = self.post("/api/profile", b'{"weight_kg": 70, "sex": "male", "birth_year": 1985}', h)
+        self.assertEqual(code, 200, body)
+        self.assertEqual(self.get("/api/profile")["weight_kg"], 70.0)
+        self.assertEqual(self.post("/api/profile", b'{"weight_kg": 9999}', h)[0], 400)
+        a = next(x for x in self.get("/api/activities?type=Inline%20Skate") if x["id"] == 1001)
+        self.assertGreater(a["kcal"], 300)
+        self.assertTrue(a["kcal_src"].startswith("MET"))
+        self.assertGreater(self.get("/api/activity/1001")["cal"]["kcal"], 300)
+
     def test_favorites(self):
         h = {"X-Rollbook": "1", "Content-Type": "application/json"}
         code, _ = self.post("/api/favorites", json.dumps({"kind": "sessions", "id": "1001", "on": True}).encode(), h)
