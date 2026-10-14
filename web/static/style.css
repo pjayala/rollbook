@@ -152,3 +152,6 @@ h1 .star { font-size: 22px; vertical-align: 1px; }
 .panel.expanded .map, .panel.expanded .bigmap { height: calc(100vh - 170px); }
 .panel.expanded .scroll { max-height: none !important; }
 body.has-expanded { overflow: hidden; }
+.warrow { display: inline-block; font-weight: 700; color: var(--accent2); }
+.gapbar { display: flex; gap: 2px; margin-top: 10px; height: 20px; border-radius: 4px; overflow: hidden; font-size: 11px; }
+.gapbar span { display: flex; align-items: center; justify-content: center; color: #111; white-space: nowrap; overflow: hidden; min-width: 0; }

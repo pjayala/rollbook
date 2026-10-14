@@ -6,9 +6,10 @@ cycling).
 
 Everything is offline and stdlib-only (pywebview for `rollbook app` is the one
 optional dependency, kept in `./.venv`). There is no API access — see
-[Why no API](#why-no-api). The network exceptions are OSM basemap tiles and
-OSM Nominatim reverse geocoding for segment names, both cached forever in
-`data/cache/` (`./rollbook web --offline` turns both off).
+[Why no API](#why-no-api). The network exceptions are OSM basemap tiles,
+OSM Nominatim reverse geocoding for segment names and Open-Meteo historical
+weather, all cached forever in `data/cache/` (`./rollbook web --offline`
+turns them off).
 
 ## Quick start
 
@@ -47,6 +48,7 @@ LICENSE                 GPL-3.0 text
 samples/*.gpx           two hand-checked rides used as regression fixtures
 web/server.py           `rollbook web`: stdlib HTTP server + JSON API, read-only DB
 web/segments.py         auto-generated segments + effort matching
+web/weather.py          historical weather per outdoor session (Open-Meteo, cached)
 web/geonames.py         segment place names (Nominatim reverse geocoding, cached)
 web/importer.py         Import dialog backend: uploads + background db build / enrich
 web/app.py              `rollbook app`: desktop window (pywebview / Chrome-Edge --app / browser)
@@ -191,6 +193,23 @@ changing `derive()`.
   (turnaround ≥ 50% of half the distance, finish within 1 km of start).
   `asym_pct` = out vs back moving speed; the home route's −0.15% grade alone
   gives 0–5%, more than that is wind.
+* **Weather / conditions** (`web/weather.py`, `conditions()` in server.py):
+  Open-Meteo hourly temperature, 10 m wind and gusts per 0.1° cell and UTC
+  day (archive API, forecast API `past_days` for the last week), cached in
+  `data/cache/weather.json`; never for indoor/Virtual sessions. For
+  out-and-backs each leg gets its tailwind component (wind at the leg's
+  mid-time along its heading) and its grade (height gain to the turnaround
+  as `((turn−start) − (end−turn))/2`, which cancels barometric drift). Slope
+  effect is physics at constant power (skate 75 kg, Crr 0.008, CdA 0.35;
+  ride 85/0.005/0.32; run 3%/1% grade); wind effect = k × tailwind, with k
+  least-squares fitted per sport on the user's own out-and-backs (gap minus
+  slope ~ a + k·Δtailwind; skate k ≈ 0.46 %/km/h, physics with model 10 m
+  wind would overstate it ~5×). "Adjusted" = each leg's best 10 min ÷
+  (1 + wind% + slope%), averaged. Measured on 169 skates: the out/back gap
+  (median +11.5%) splits into ~+4.7% wind, ~+6.2% slope (home route
+  −0.07…−0.10% out), ~+2% other. Because averaging the legs already cancels
+  most of both, adjusted ≈ wind-neutral; the value is the breakdown and
+  the per-leg numbers.
 * **Elevation** on the session page: samples with no GPS fix and `ele == 0`
   are placeholders and dropped (`load_track`). The GT 6 Pro writes a real
   altitude only every ~5 s and **-1 m** on every other record (~85% of

@@ -25,10 +25,12 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import weather
+from datetime import datetime, timedelta, timezone
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-METRICS_VERSION = 10
+METRICS_VERSION = 12
 THR = 0.5  # m/s, pause threshold; must match bin/rollbook
 WINDOWS = (30, 45, 60)  # minutes; 5/10/20 already live in the DB via `db enrich`
 LEG_WINDOW = 10  # minutes, best effort per out/back leg
@@ -385,6 +387,8 @@ def derive(db, aid):
         out["route"] = "indoor"
         return out
     out["trk"] = compact_track(rows)
+    out["ll0"] = [rows[valid[0]][1], rows[valid[0]][2]]
+    out["dur_s"] = t[-1] - t[0]
     o = (rows[valid[0]][1], rows[valid[0]][2])
     far = max(valid, key=lambda i: haversine(o, (rows[i][1], rows[i][2])))
     endp = (rows[valid[-1]][1], rows[valid[-1]][2])
@@ -409,6 +413,24 @@ def derive(db, aid):
     vb, mb = moving_kmh(t, d, far, n)
     bo = best_window(t, d, 0, far, LEG_WINDOW * 60)
     bb = best_window(t, d, far, n, LEG_WINDOW * 60)
+    # height gained on the out leg, drift-cancelling: barometric drift during the
+    # session shifts (turn - start) and (end - turn) the same way, so half
+    # their difference is the real height change
+    real = [j for j, r in enumerate(rows) if r[3] is not None]
+
+    def ele_at(i):
+        """median of the ~10 real altitude readings nearest sample i, within 5 min
+        (GT 6 Pro: a reading every ~5 s, and none at all before the first fix)"""
+        import bisect
+        k = bisect.bisect_left(real, i)
+        near = sorted(real[max(0, k - 10): k + 10], key=lambda j: abs(t[j] - t[i]))[:10]
+        w = [rows[j][3] for j in near if abs(t[j] - t[i]) <= 300]
+        return statistics.median(w) if w else None
+    e0, ef, e1 = ele_at(0), ele_at(far), ele_at(n)
+    if None not in (e0, ef, e1) and d[far] > 500 and d[n] - d[far] > 500:
+        h = ((ef - e0) - (e1 - ef)) / 2
+        out.update(h_out=h, g_out=h / d[far] * 100, g_back=-h / (d[n] - d[far]) * 100)
+    out.update(t_turn=t[far] - t[0])
     out.update(
         out_kmh=vo, back_kmh=vb, out_moving_s=mo, back_moving_s=mb,
         out_km=d[far] / 1000, back_km=(d[n] - d[far]) / 1000,
@@ -519,6 +541,18 @@ def api_activities(db, q, M):
             r["best_lap_s"] = min((x["elapsed"] for x in reg), default=None)
             r["best_lap_kmh"] = max((x["kmh_elapsed"] for x in reg if x["kmh_elapsed"]), default=None)
         r["hr_hist"] = m.get("hr_hist") or None
+        r["cond"] = conditions(r, m)
+    # refit the wind coefficient on this sport's data, then recompute with it
+    if typ:
+        k = fit_wind(typ, rows, ms)
+        if k is not None and abs(k - FITS.get(typ, -1)) > 1e-6:
+            FITS[typ] = k
+            for r in rows:
+                r["cond"] = conditions(r, ms.get(r["id"], {}))
+    for r in rows:
+        c = r["cond"] or {}
+        r["temp"], r["wind"] = c.get("temp"), c.get("ws")
+        r["adj_neutral"] = c.get("adjusted")
     return rows
 
 
@@ -559,6 +593,9 @@ def api_activity(db, q, M, aid):
         idx.append(n - 1)
     series = [pt(i) for i in idx]
     act["metrics"] = m
+    if act.get("type") and act["type"] not in FITS:
+        api_activities(db, {"type": act["type"]}, M)  # fits this sport's wind coefficient
+    act["cond"] = conditions(act, m)
     act["splits"] = splits
     act["series_cols"] = ["t", "km", "kmh", "hr", "ele", "lat", "lon"]
     act["series"] = series
@@ -581,6 +618,7 @@ SEGS = None  # segments.SegmentStore, set in start()
 IMPORTER = None  # importer.Importer, set in start()
 FAVS = None  # Favorites, set in start()
 GEO = None  # geonames.Geonames, set in start()
+WX = None  # weather.Weather, set in start()
 
 
 class Favorites:
@@ -635,8 +673,93 @@ def api_segments(db, q, M):
     return r
 
 
+# ------------------------------------------------------------------ conditions
+# Physics per sport for the slope term: speed change at constant power on a
+# small grade, dv/v = -m g s / (Crr m g + 1.5 rho CdA v^2). Running uses an
+# empirical ~3% speed per 1% grade instead. The wind term is fitted on the
+# user's own out-and-back sessions (model wind at 10 m is not what a skater
+# feels by a riverbank, so physics would overstate it ~5x).
+PHYS = {"Inline Skate": (75, 0.008, 0.35), "Ride": (85, 0.005, 0.32), "Run": None, "Walk": None}
+WIND_K_DEFAULT = {"Inline Skate": 0.4, "Ride": 0.5, "Run": 0.15, "Walk": 0.05}
+NO_WEATHER = ("Virtual Ride", "Virtual Run", "Swim", "Workout", "Weight Training", "Yoga")
+FITS = {}  # type -> wind coefficient, %/(km/h) per leg
+
+
+def slope_pct(typ, v_kmh, g):
+    """% speed change from grade g (%), e.g. -0.1% grade -> +2.5% for a skater."""
+    if g is None or not v_kmh:
+        return 0.0
+    if typ in ("Run", "Walk", "Hike"):
+        return -3.0 * g if typ == "Run" else -2.0 * g
+    m, crr, cda = PHYS.get(typ) or PHYS["Inline Skate"]
+    v = v_kmh / 3.6
+    return -100 * (m * 9.81 * g / 100) / (crr * m * 9.81 + 1.5 * 1.2 * cda * v * v)
+
+
+def tailwind(w, brg):
+    """km/h of wind pushing along heading brg (wind direction is where it comes FROM)."""
+    return -w["ws"] * math.cos(math.radians(w["wd"] - brg))
+
+
+def conditions(r, m):
+    """Weather and, for out-and-backs, the wind / slope split of the leg speeds."""
+    typ = r.get("type") or ""
+    if typ in NO_WEATHER or typ.startswith("Virtual") or not m.get("ll0") or m.get("route") in ("indoor", "virtual"):
+        return None
+    try:
+        t0 = datetime.fromisoformat(r["datetime"])
+    except (TypeError, ValueError):
+        return None
+    if t0.tzinfo is None:
+        t0 = t0.replace(tzinfo=timezone.utc)
+    lat, lon = m["ll0"]
+    mid = WX.at(lat, lon, t0 + timedelta(seconds=(m.get("dur_s") or 0) / 2))
+    if mid is None:
+        return {"pending": True}
+    c = {k: mid[k] for k in ("temp", "ws", "wd", "gust")}
+    if m.get("route") != "out-back" or not m.get("out_b10") or not m.get("back_b10"):
+        return c
+    tt = m.get("t_turn") or (m.get("dur_s") or 0) / 2
+    wo = WX.at(lat, lon, t0 + timedelta(seconds=tt / 2)) or mid
+    wb = WX.at(lat, lon, t0 + timedelta(seconds=(tt + (m.get("dur_s") or tt * 2)) / 2)) or mid
+    k = FITS.get(typ, WIND_K_DEFAULT.get(typ, 0.3))
+    legs = {}
+    for leg, w, brg in (("out", wo, m["bearing_out"]), ("back", wb, m["bearing_out"] + 180)):
+        tw = tailwind(w, brg)
+        se = slope_pct(typ, m[f"{leg}_b10"], m.get(f"g_{leg}"))
+        we = k * tw
+        legs[leg] = {"tail": tw, "grade": m.get(f"g_{leg}"), "wind_pct": we, "slope_pct": se,
+                     "adj_b10": m[f"{leg}_b10"] / (1 + (we + se) / 100)}
+    gap = (m["out_b10"] / m["back_b10"] - 1) * 100
+    wpart = legs["out"]["wind_pct"] - legs["back"]["wind_pct"]
+    spart = legs["out"]["slope_pct"] - legs["back"]["slope_pct"]
+    c.update(legs=legs, gap_pct=gap, gap_wind=wpart, gap_slope=spart, gap_other=gap - wpart - spart,
+             adjusted=(legs["out"]["adj_b10"] + legs["back"]["adj_b10"]) / 2, wind_k=k)
+    return c
+
+
+def fit_wind(typ, rows, ms):
+    """Least-squares wind coefficient from this sport's out-and-backs (gap minus slope ~ a + k * tailwind diff)."""
+    xs, ys = [], []
+    for r in rows:
+        c, m = r.get("cond"), ms.get(r["id"], {})
+        if not c or "legs" not in c:
+            continue
+        L = c["legs"]
+        xs.append(L["out"]["tail"] - L["back"]["tail"])
+        ys.append(c["gap_pct"] - c["gap_slope"])
+    if len(xs) < 30:
+        return None
+    mx, my = sum(xs) / len(xs), sum(ys) / len(ys)
+    sxx = sum((x - mx) ** 2 for x in xs)
+    if sxx <= 0:
+        return None
+    k = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sxx
+    return max(0.0, min(2.0, k))
+
+
 def api_status(db, q, M):
-    return dict(M.progress, cached=len(M.data))
+    return dict(M.progress, cached=len(M.data), weather_pending=WX.pending() if WX else 0)
 
 
 def api_hrmax(db, q, M):
@@ -842,7 +965,7 @@ def clean(o):
 
 def start(db_path, cache_path, port=8765, offline=False):
     """Bind and return (httpd, metrics, url); caller runs httpd.serve_forever()."""
-    global SEGS, IMPORTER, FAVS, GEO
+    global SEGS, IMPORTER, FAVS, GEO, WX
     import importer
     import segments  # imports this module; must come after it is fully loaded
 
@@ -852,6 +975,7 @@ def start(db_path, cache_path, port=8765, offline=False):
     FAVS = Favorites(os.path.join(os.path.dirname(os.path.abspath(db_path)), "favorites.json"))
     threading.Thread(target=M.warm, daemon=True).start()
     tiles = TileCache(os.path.join(os.path.dirname(cache_path), "tiles"), offline)
+    WX = weather.Weather(os.path.join(os.path.dirname(cache_path), "weather.json"), offline)
     GEO = geonames.Geonames(os.path.join(os.path.dirname(cache_path), "geonames.json"), offline)
     httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(db_path, M, tiles))
     httpd.daemon_threads = True

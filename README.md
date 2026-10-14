@@ -46,6 +46,10 @@ GPS: runs, rides, walks, skates, plus indoor rides from ROUVY or MyWhoosh.
   each direction separately (so wind shows up), and named after the streets
   and areas they cross using OpenStreetMap. Each segment has a leaderboard and
   a speed trend, and links to the opposite direction.
+- **Weather and conditions:** temperature, wind and gusts for every outdoor
+  session. On out-and-back routes, the gap between the two legs is split into
+  wind, slope and "other", giving a conditions-adjusted speed. Plus speed vs
+  temperature.
 - **Race predictor**, **favorites (☆)** for sessions and segments, and
   back/forward navigation.
 - **Import** from the UI: drop in a full Strava export `.zip` or single
@@ -160,12 +164,14 @@ in `./data`, which is git-ignored.
 
 - Your activities, the database and caches stay in `./data` on your machine.
   The server listens on `127.0.0.1` only.
-- Two things go over the network, both cached forever:
+- Three things go over the network, all cached forever:
   - **map tiles** from OpenStreetMap
   - **reverse geocoding** of segment points (OpenStreetMap Nominatim, at most
     one request per second) to name segments
+  - **historical weather** for outdoor sessions (Open-Meteo), per ~10 km
+    area and day
 
-  These requests reveal to OpenStreetMap the area you're looking at. Start
+  These requests reveal to those services the areas and dates involved. Start
   with `--offline` to use only what's cached.
 - No accounts, no telemetry, no Strava API.
 

@@ -344,6 +344,14 @@ function sessionMap(host, series, opt = {}) {
         ctx.beginPath(); ctx.moveTo(x, y - 9); ctx.lineTo(x + 9, y); ctx.lineTo(x, y + 9); ctx.lineTo(x - 9, y); ctx.closePath();
         ctx.fillStyle = "#ff7a1a"; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = "#000"; ctx.stroke();
       }
+      if (opt.wind && isNum(opt.wind.wd) && isNum(opt.wind.ws)) {  // wind compass, top-left: arrow points where it blows to
+        const cx = 34, cy = 34, a = (opt.wind.wd + 180) * Math.PI / 180, L = 16;
+        ctx.save(); ctx.fillStyle = "#0f1216d8"; ctx.beginPath(); ctx.arc(cx, cy, 26, 0, 7); ctx.fill();
+        ctx.translate(cx, cy); ctx.rotate(a); ctx.strokeStyle = "#3fb6ff"; ctx.fillStyle = "#3fb6ff"; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.moveTo(0, L); ctx.lineTo(0, -L + 4); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(0, -L - 2); ctx.lineTo(-6, -L + 7); ctx.lineTo(6, -L + 7); ctx.closePath(); ctx.fill(); ctx.restore();
+        ctx.fillStyle = "#e6e9ee"; ctx.font = "11px sans-serif"; ctx.textAlign = "center"; ctx.fillText(`${Math.round(opt.wind.ws)} km/h`, cx, cy + 40);
+      }
       if (hover != null) { ctx.beginPath(); ctx.arc(...S[hover], 9, 0, 7); ctx.lineWidth = 3; ctx.strokeStyle = "#fff"; ctx.stroke(); }
     }
   });
@@ -445,8 +453,9 @@ async function viewProgress() {
       <div class="panel"><h2>Average moving speed per session</h2><div id="c-avg"></div>
         <div class="note">Not comparable across 2025-08: the watch sample rate dropped then and inflates moving speed. Use best-10 for long-term form.</div></div>
       <div class="panel"><h2>Efficiency: best 10-min ÷ avg HR <span class="muted">km/h per 100 bpm</span></h2><div id="c-eff"></div></div>
-      <div class="panel"><h2>Wind: out-leg vs back-leg speed <span class="muted">out/back routes</span></h2><div id="c-wind"></div>
-        <div class="note">Positive = out leg faster. Calm days on your home route sit around 0–5% (gentle −0.15% grade).</div></div>
+      <div class="panel"><h2>Out-leg vs back-leg speed <span class="muted">out/back routes · bars = measured, dots = explained by wind + slope</span></h2><div id="c-wind"></div>
+        <div class="note">Positive = out leg faster. Dots use the hourly wind at each leg and the leg's grade; the rest is pacing, fatigue and gusts.</div></div>
+      <div class="panel"><h2>Heat: speed vs temperature <span class="muted">best 10-min (adjusted where available)</span></h2><div id="c-heat"></div></div>
       <div class="panel"><h2>Time in HR zones per month <span class="muted">HRmax ${S.hrmax ?? "?"} bpm</span></h2><div id="c-zones"></div></div>
       <div class="panel" id="p-pred"></div>
     </div>
@@ -515,9 +524,21 @@ async function viewProgress() {
   const ob = acts.filter(a => isNum(a.asym_pct));
   chart($("#c-wind"), {
     x: { type: "time" }, y: { fmt: v => v.toFixed(0) + "%" }, refY: 0, tip: tipAct, onClick: go,
-    series: [{ name: "out vs back", kind: "bar", color: "#3fb6ff", data: ob.map(a => ({ x: a._t, y: a.asym_pct, ref: a.id, color: Math.abs(a.asym_pct) < 6 ? "#3ecf8e" : Math.abs(a.asym_pct) < 15 ? "#f5c542" : "#ff4d4d" })) }],
+    series: [{ name: "explained", kind: "dot", color: "#fff", r: 2.5, data: ob.filter(a => a.cond && a.cond.legs).map(a => ({ x: a._t, y: a.cond.gap_wind + a.cond.gap_slope, ref: a.id })) },
+      { name: "out vs back", kind: "bar", color: "#3fb6ff", data: ob.map(a => ({ x: a._t, y: a.asym_pct, ref: a.id, color: Math.abs(a.asym_pct) < 6 ? "#3ecf8e" : Math.abs(a.asym_pct) < 15 ? "#f5c542" : "#ff4d4d" })) }],
     legend: false
   });
+  const hot = acts.filter(a => isNum(a.temp) && a.best10min_kmh > 5);
+  if (hot.length > 5) {
+    const pts = hot.map(a => ({ x: a.temp, y: a.adj_neutral || a.best10min_kmh, ref: a.id, color: a.hr_avg ? "#ff4d4d" : null }));
+    const bins = {}; for (const p of pts) (bins[Math.round(p.x / 3) * 3] ||= []).push(p.y);
+    chart($("#c-heat"), {
+      x: { type: "linear", fmt: v => v.toFixed(0) + "°" }, y: { fmt: v => v.toFixed(0), label: "km/h" }, onClick: go,
+      series: [{ name: "session", kind: "dot", color: "#ff7a1a", r: 2.5, opacity: .7, data: pts },
+        { name: "median per 3 °C", kind: "line", color: "#ffd166", width: 2.5, data: Object.entries(bins).filter(([, v]) => v.length >= 3).map(([k, v]) => ({ x: +k, y: median(v) })).sort((p, q) => p.x - q.x) }],
+      tip: (x, h, b) => { const a = acts.find(a => a.id === b.p.ref); return a ? `<b>${fdate(a._d)}</b> · ${f0(a.temp)}°C<div class="row"><span>best 10</span><span>${f2(b.p.y)}</span></div>${a.hr_avg ? `<div class="row"><span>HR</span><span>${f0(a.hr_avg)}</span></div>` : ""}` : `${f0(x)}°C`; },
+    });
+  } else $("#c-heat").innerHTML = `<p class="muted">Weather is loading (or no outdoor sessions in range).</p>`;
   const zm = mons.filter(m => m.zones.some(z => z > 0));
   chart($("#c-zones"), {
     x: { type: "time" }, y: { zero: true, fmt: v => v.toFixed(0), label: "h" },
@@ -796,6 +817,13 @@ async function viewMap() {
   }
   render();
 }
+
+// ------------------------------------------------------------------ weather
+const fdeg = d => isNum(d) ? COMPASS[Math.round(((d % 360) + 360) % 360 / 45) % 8] : "";
+/** "from W" arrow pointing where the wind blows to */
+const windArrow = wd => isNum(wd) ? `<span class="warrow" style="transform:rotate(${(wd + 180) % 360}deg)">↑</span>` : "";
+const fwind = c => c && isNum(c.ws) ? `${f0(c.ws)} km/h ${windArrow(c.wd)} from ${fdeg(c.wd)}` : "–";
+const fsigned = (v, u = "%") => isNum(v) ? (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(1) + u : "–";
 
 // ------------------------------------------------------------------ favorites
 
@@ -1124,6 +1152,8 @@ async function viewSessions() {
     ["kmh_moving", "avg km/h", a => f2(a.kmh_moving)], ["pace", "pace /km", a => pace(a.kmh_moving)], ["best10min_kmh", "best 10", a => f2(a.best10min_kmh)],
     ["b60", "best 60", a => f2(a.b60)], ["wind_neutral", "wind-neutral", a => f2(a.wind_neutral)], ["asym_pct", "out vs back", a => pct(a.asym_pct)],
     ["laps_n", "laps", a => a.laps_n ? `${a.laps_n} × ${f2(a.lap_km)}` : ""], ["best_lap_s", "best lap", a => a.best_lap_s ? dur(a.best_lap_s) : ""],
+    ["temp", "°C", a => f0(a.temp)], ["wind", "wind", a => a.cond && isNum(a.cond.ws) ? `${f0(a.cond.ws)} ${windArrow(a.cond.wd)}` : ""],
+    ["adj_neutral", "adjusted", a => f2(a.adj_neutral)],
     ["hr_avg", "HR", a => f0(a.hr_avg)], ["ascent_m", "ascent", a => f0(a.ascent_m)], ["route", "route", a => routePill(a.route), "l"],
   ];
   const app = $("#app");
@@ -1237,6 +1267,8 @@ async function viewSession(id) {
       ...(a.hr_avg ? [{ k: "Heart rate", v: f0(a.hr_avg), s: `avg · max ${f0(a.hr_max)} bpm` }, { k: "Efficiency", v: a.best10min_kmh ? f2(a.best10min_kmh / a.hr_avg * 100) : "–", s: "best10 / HR ×100" }] : []),
       ...(a.s_avg_watts ? [{ k: "Power", v: f0(a.s_avg_watts) + " W", s: `max ${f0(a.s_max_watts)} W` }] : []),
       { k: "Ascent", v: f0(a.ascent_m) + " m" },
+      ...(a.cond && isNum(a.cond.temp) ? [{ k: "Weather", v: `${f0(a.cond.temp)}°C`, s: `wind ${fwind(a.cond)}${isNum(a.cond.gust) ? ` · gusts ${f0(a.cond.gust)}` : ""}` }] : a.cond && a.cond.pending ? [{ k: "Weather", v: "…", s: "loading" }] : []),
+      ...(a.cond && isNum(a.cond.adjusted) ? [{ k: "Conditions-adjusted 10 min", v: f2(a.cond.adjusted), s: "wind and slope removed per leg", hl: 1 }] : []),
       ...(a.s_calories ? [{ k: "Calories", v: f0(a.s_calories) }] : []),
     ])}
     <div class="grid g2">
@@ -1257,7 +1289,7 @@ async function viewSession(id) {
     </div>
     <div class="grid g2">
       ${m.route === "out-back" ? `<div class="panel"><h2>Out / back legs</h2><div id="t-legs"></div>
-        <div class="note">A large gap between legs on a flat route is wind. Wind-neutral speed averages the two legs' best 10 min.</div></div>` : ""}
+        <div class="note">Wind-neutral averages the two legs' best 10 min. Adjusted first removes each leg's estimated wind and slope effect.</div></div>` : ""}
       ${hasHr ? `<div class="panel"><h2>Heart-rate zones <span class="muted">HRmax ${S.hrmax} bpm</span></h2><div id="t-zones"></div></div>` : ""}
       <div class="panel" id="p-segs" hidden></div>
       <div class="panel"><h2>Same route, other sessions</h2><div class="scroll" id="t-same"></div></div>
@@ -1267,7 +1299,7 @@ async function viewSession(id) {
   $("#next").onclick = () => next && go(next.id);
 
   let selKm = null, selectKm = () => {};
-  const map = hasGps ? sessionMap($("#map"), ser, { turnKm: m.route === "out-back" ? m.turn_km : null, gate: L ? L.gate : null }) : ($("#map").innerHTML = `<p class="muted">No GPS (indoor session).</p>`, null);
+  const map = hasGps ? sessionMap($("#map"), ser, { turnKm: m.route === "out-back" ? m.turn_km : null, gate: L ? L.gate : null, wind: a.cond }) : ($("#map").innerHTML = `<p class="muted">No GPS (indoor session).</p>`, null);
   // One selected stretch for the whole page. Everything that highlights the map
   // (km splits, out/back legs, laps, segment rows, brushing the speed chart)
   // goes through hl.highlightBy, which also shades the speed chart and
@@ -1450,10 +1482,15 @@ async function viewSession(id) {
   }
 
   if (m.route === "out-back") {
-    $("#t-legs").innerHTML = `<table><thead><tr><th>leg</th><th>km</th><th>moving</th><th>avg km/h</th><th>pace</th><th>best 10 min</th></tr></thead><tbody>
-      <tr class="click" data-leg="out"><td>Out (${f0(m.bearing_out)}°)</td><td>${f2(m.out_km)}</td><td>${dur(m.out_moving_s, true)}</td><td>${f2(m.out_kmh)}</td><td>${pace(m.out_kmh)}</td><td>${f2(m.out_b10)}</td></tr>
-      <tr class="click" data-leg="back"><td>Back</td><td>${f2(m.back_km)}</td><td>${dur(m.back_moving_s, true)}</td><td>${f2(m.back_kmh)}</td><td>${pace(m.back_kmh)}</td><td>${f2(m.back_b10)}</td></tr>
-      <tr><td><b>Difference</b></td><td></td><td></td><td>${pct(m.asym_pct)}</td><td></td><td>neutral <b>${f2(m.wind_neutral)}</b></td></tr></tbody></table>`;
+    const C = a.cond && a.cond.legs ? a.cond : null, Lg = C ? C.legs : {};
+    const cx = leg => C ? `<td>${fsigned(Lg[leg].tail, "")}</td><td>${fsigned(Lg[leg].grade, "%")}</td><td>${fsigned(Lg[leg].wind_pct)}</td><td>${fsigned(Lg[leg].slope_pct)}</td><td><b>${f2(Lg[leg].adj_b10)}</b></td>` : "";
+    $("#t-legs").innerHTML = `<div class="scroll"><table><thead><tr><th>leg</th><th>km</th><th>moving</th><th>avg km/h</th><th>best 10 min</th>${C ? "<th>tailwind km/h</th><th>grade</th><th>wind effect</th><th>slope effect</th><th>adjusted</th>" : ""}</tr></thead><tbody>
+      <tr class="click" data-leg="out"><td>Out (${f0(m.bearing_out)}°)</td><td>${f2(m.out_km)}</td><td>${dur(m.out_moving_s, true)}</td><td>${f2(m.out_kmh)}</td><td>${f2(m.out_b10)}</td>${cx("out")}</tr>
+      <tr class="click" data-leg="back"><td>Back</td><td>${f2(m.back_km)}</td><td>${dur(m.back_moving_s, true)}</td><td>${f2(m.back_kmh)}</td><td>${f2(m.back_b10)}</td>${cx("back")}</tr>
+      <tr><td><b>Neutral</b></td><td></td><td></td><td>${pct(m.asym_pct)}</td><td><b>${f2(m.wind_neutral)}</b></td>${C ? `<td colspan="4"></td><td><b>${f2(C.adjusted)}</b></td>` : ""}</tr></tbody></table></div>` +
+      (C ? `<div class="gapbar">${[["wind", C.gap_wind, "#3fb6ff"], ["slope", C.gap_slope, "#c6e04a"], ["other", C.gap_other, "#8a94a3"]].map(([n, v, c]) =>
+        `<span style="flex:${Math.max(0.5, Math.abs(v))};background:${c}" title="${n} ${fsigned(v)}">${n} ${fsigned(v)}</span>`).join("")}</div>
+        <div class="note">Out leg ${fsigned(C.gap_pct)} faster than back (best 10 min): <b>${fsigned(C.gap_wind)}</b> from wind (${f0(C.ws)} km/h from ${fdeg(C.wd)}, ${C.wind_k.toFixed(2)}% per km/h, fitted on your sessions), <b>${fsigned(C.gap_slope)}</b> from slope, ${fsigned(C.gap_other)} other (pacing, fatigue, gusts the hourly model misses). Weather: Open-Meteo, hourly, ~10 km grid.</div>` : "");
   }
   if (m.route === "out-back") {
     let selLeg = null;
