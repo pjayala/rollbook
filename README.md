@@ -188,7 +188,7 @@ bridge, filler altitude readings and stuck odometers.
 ## Development
 
 Tests use only the standard library and never touch the network or your
-`./data`:
+`./data`. Changes to `master` go through pull requests, and all CI jobs must pass before merging:
 
 ```sh
 python3 -m unittest discover -s tests -t tests
