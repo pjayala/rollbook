@@ -1461,6 +1461,10 @@ def cmd_db_query(a):
     if a.csv:
         import csv as _csv
 
+        # csv ends rows with \r\n itself; a text stdout on Windows would turn
+        # that into \r\r\n, i.e. a blank line after every row
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(newline="")
         w = _csv.writer(sys.stdout)
         w.writerow(heads)
         w.writerows(rows)
