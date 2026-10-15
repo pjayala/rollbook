@@ -62,6 +62,20 @@ class Tracks(unittest.TestCase):
         d = [i * 5.0 if i < 600 else 3000 + (i - 600) * 7.0 for i in t]  # 18 then 25.2 km/h
         self.assertAlmostEqual(server.best_window(t, d, 0, len(t) - 1, 600), 25.2, places=1)
 
+    def test_power_grid_and_bests(self):
+        # 10 min at 200 W, then 5 min at 300 W, sampled every 2 s, then a 60 s pause
+        rows = [(t, None, None, None, None, None, t * 5.0, 200 if t < 600 else 300) for t in range(0, 900, 2)]
+        rows.append((960, None, None, None, None, None, 4500.0, 100))
+        t = [r[0] for r in rows]
+        g = server.power_grid(rows, t)
+        self.assertEqual(len(g), 961)
+        self.assertEqual((g[1], g[601], g[905], g[930], g[960]), (200, 300, 300, 0, 100))  # held 2 s; >10 s gap = 0 W
+        self.assertAlmostEqual(server.best_power(g, 300), 300)
+        self.assertAlmostEqual(server.best_power(g, 600), (292 * 200 + 308 * 300) / 600)  # last reading held 10 s
+        self.assertIsNone(server.best_power(g, 3600))
+        self.assertGreater(server.normalized_power(g), sum(g) / len(g))  # variable effort: NP > average
+        self.assertIsNone(server.power_grid([r[:7] for r in rows], t))  # no power column (older DB / tests)
+
     def test_ele_placeholder(self):
         rows = [(i, 10.0, 20.0, 150.0 if i % 5 == 0 else -1.0, None, None, i) for i in range(300)]
         self.assertEqual(server._ele_placeholder(rows), -1.0)

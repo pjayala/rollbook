@@ -414,6 +414,14 @@ function inRange(acts) {
   return acts.filter(a => a._t >= cut);
 }
 const isSkate = () => /skate/i.test(S.type);
+/** Average watts: recorded in the file, else Strava's figure for indoor rides (its outdoor one is an estimate). */
+const pwAvg = a => isNum(a.watts_avg) ? a.watts_avg : /^Virtual/.test(a.type || "") && isNum(a.s_avg_watts) ? a.s_avg_watts : null;
+const FTP_DAYS = 180;
+/** FTP estimate at time t: 95% of the best 20-min power in the FTP_DAYS before it. */
+function ftpEst(acts, t = Date.now()) {
+  const b = acts.filter(a => isNum(a.pw20m) && a._t <= t && a._t > t - FTP_DAYS * DAY).reduce((m, a) => Math.max(m, a.pw20m), 0);
+  return b ? 0.95 * b : null;
+}
 
 // ------------------------------------------------------------------ views
 
@@ -434,6 +442,7 @@ async function viewProgress() {
   const k30 = last30.reduce((s, a) => s + a.km, 0), kp30 = prev30.reduce((s, a) => s + a.km, 0);
   const wnRecent = median(last30.map(a => a.wind_neutral)), wnPrev = median(all.filter(a => a._t < Date.now() - 30 * DAY).slice(-40).map(a => a.wind_neutral));
   const link = a => a ? `<a href="#/session/${a.id}">${fdate(a._d)}</a>` : "";
+  const hasPw = acts.some(a => isNum(a.pw20m)), p20 = best("pw20m"), ftp = ftpEst(all);
   app.innerHTML = `
     <div class="head"><div><h1>${esc(S.type)} progress</h1><div class="muted">${acts.length} sessions · ${fdate(acts[0]._d)} → ${fdate(acts[acts.length - 1]._d)}</div></div></div>
     ${cards([
@@ -445,6 +454,8 @@ async function viewProgress() {
       { k: "Best wind-neutral", v: f2(wn?.wind_neutral), s: wn ? `km/h · ${link(wn)}` : "out/back routes only", hl: 1 },
       { k: "Last 30 days", v: fkm(k30) + " km", s: `${last30.length} sessions · prev 30d ${fkm(kp30)} km` },
       { k: "Wind-neutral, 30d median", v: f2(wnRecent), s: isNum(wnRecent) && isNum(wnPrev) ? `<span class="${wnRecent >= wnPrev ? "up" : "down"}">${pct((wnRecent / wnPrev - 1) * 100)}</span> vs previous 40` : "" },
+      ...(hasPw ? [{ k: "Best 20-min power", v: f0(p20?.pw20m) + " W", s: link(p20), hl: 1 },
+        { k: "FTP estimate", v: isNum(ftp) ? f0(ftp) + " W" : "–", s: `95% of best 20 min, last ${FTP_DAYS / 30} months` + (ftp && S.profile?.weight_kg ? ` · ${(ftp / S.profile.weight_kg).toFixed(2)} W/kg` : "")}] : []),
     ])}
     <div class="panel"><h2>Calendar <span class="muted">km per day · click a day to open it</span></h2><div id="cal"></div></div>
     <div class="grid g2">
@@ -457,6 +468,10 @@ async function viewProgress() {
       <div class="panel"><h2>Average moving speed per session</h2><div id="c-avg"></div>
         <div class="note">Not comparable across 2025-08: the watch sample rate dropped then and inflates moving speed. Use best-10 for long-term form.</div></div>
       <div class="panel"><h2>Efficiency: best 10-min ÷ avg HR <span class="muted">km/h per 100 bpm</span></h2><div id="c-eff"></div></div>
+      ${hasPw ? `<div class="panel"><h2>Power: best 5 / 20 min <span class="muted">click a dot to open the session</span></h2><div id="c-pow"></div>
+        <div class="note">Recorded by the trainer or power meter, the most reliable fitness signal here. FTP estimate = 95% of the best 20 min over the previous ${FTP_DAYS / 30} months.</div></div>
+      <div class="panel"><h2>Power ÷ heart rate <span class="muted">avg W per bpm</span></h2><div id="c-pwhr"></div>
+        <div class="note">More watts for the same heart rate = fitter. Only sessions with both.</div></div>` : ""}
       <div class="panel"><h2>Out-leg vs back-leg speed <span class="muted">out/back routes · bars = measured, dots = explained by wind + slope</span></h2><div id="c-wind"></div>
         <div class="note">Positive = out leg faster. Dots use the hourly wind at each leg and the leg's grade; the rest is pacing, fatigue and gusts.</div></div>
       <div class="panel"><h2>Heat: speed vs temperature <span class="muted">best 10-min (adjusted where available)</span></h2><div id="c-heat"></div></div>
@@ -535,6 +550,25 @@ async function viewProgress() {
     series: [{ name: "efficiency", kind: "dot", color: "#ff7a1a", r: 3.5, data: withHr.map(a => ({ x: a._t, y: a.best10min_kmh / a.hr_avg * 100, ref: a.id })) },
       { name: "avg HR", kind: "dot", color: "#ff4d4d", axis: "y2", r: 2, opacity: .45, data: withHr.map(a => ({ x: a._t, y: a.hr_avg, ref: a.id })) }]
   });
+  if (hasPw) {
+    const pw = acts.filter(a => isNum(a.pw20m));
+    const ftpLine = pw.map(a => ({ x: a._t, y: ftpEst(all, a._t) }));
+    const tipPw = (x, hits, b) => { const a = acts.find(a => a.id === b.p.ref); return a ? `<b>${fdate(a._d)}</b> · ${esc(a.name)}<div class="row"><span>best 5 min</span><span>${f0(a.pw5m)} W</span></div><div class="row"><span>best 20 min</span><span>${f0(a.pw20m)} W</span></div><div class="row"><span>NP</span><span>${f0(a.np)} W</span></div><div class="row"><span>avg</span><span>${f0(pwAvg(a))} W</span></div>` : ""; };
+    chart($("#c-pow"), {
+      x: { type: "time" }, y: { fmt: v => v.toFixed(0), label: "W" }, tip: tipPw, onClick: go,
+      series: [{ name: "best 5 min", kind: "dot", color: "#8a94a3", r: 2.5, opacity: .7, data: P("pw5m", pw) },
+        { name: "best 20 min", kind: "dot", color: "#ff7a1a", r: 3.5, data: P("pw20m", pw) },
+        { name: "FTP estimate", kind: "line", color: "#ffd166", width: 2.5, data: ftpLine, gapX: 60 * DAY }],
+    });
+    const ph = acts.filter(a => pwAvg(a) && a.hr_avg > 60);
+    if (ph.length) chart($("#c-pwhr"), {
+      x: { type: "time" }, y: { fmt: v => v.toFixed(2), label: "W/bpm" }, onClick: go, legend: false,
+      tip: (x, h, b) => { const a = acts.find(a => a.id === b.p.ref); return a ? `<b>${fdate(a._d)}</b><div class="row"><span>avg power</span><span>${f0(pwAvg(a))} W</span></div><div class="row"><span>avg HR</span><span>${f0(a.hr_avg)} bpm</span></div><div class="row"><span>W per bpm</span><span>${(pwAvg(a) / a.hr_avg).toFixed(2)}</span></div>` : ""; },
+      series: [{ name: "W per bpm", kind: "dot", color: "#3ecf8e", r: 3, data: ph.map(a => ({ x: a._t, y: pwAvg(a) / a.hr_avg, ref: a.id })) },
+        { name: "rolling", kind: "line", color: "#b8f5d6", width: 2.5, data: rolling(ph.map(a => ({ x: a._t, y: pwAvg(a) / a.hr_avg })), 6), gapX: 45 * DAY }],
+    });
+    else $("#c-pwhr").innerHTML = `<p class="muted">No sessions with both power and heart rate in this range.</p>`;
+  }
   const ob = acts.filter(a => isNum(a.asym_pct));
   chart($("#c-wind"), {
     x: { type: "time" }, y: { fmt: v => v.toFixed(0) + "%" }, refY: 0, tip: tipAct, onClick: go,
@@ -564,9 +598,10 @@ async function viewProgress() {
   // records
   const recs = [["Best 5 min", "best5min_kmh", "km/h"], ["Best 10 min", "best10min_kmh", "km/h"], ["Best 20 min", "best20min_kmh", "km/h"],
     ["Best 30 min", "b30", "km/h"], ["Best 60 min", "b60", "km/h"], ["Best wind-neutral 10 min", "wind_neutral", "km/h"],
-    ["Fastest avg (≥10 km)", "kmh_moving", "km/h", acts.filter(a => a.km >= 10)], ["Longest", "km", "km"], ["Longest moving time", "moving_s", ""], ["Most climbing", "ascent_m", "m"]];
+    ["Fastest avg (≥10 km)", "kmh_moving", "km/h", acts.filter(a => a.km >= 10)], ["Longest", "km", "km"], ["Longest moving time", "moving_s", ""], ["Most climbing", "ascent_m", "m"],
+    ...(hasPw ? [["Best 5 s power", "pw5s", "W"], ["Best 1 min power", "pw1m", "W"], ["Best 5 min power", "pw5m", "W"], ["Best 20 min power", "pw20m", "W"], ["Best 60 min power", "pw60m", "W"], ["Highest NP", "np", "W"]] : [])];
   $("#t-rec").innerHTML = `<table><thead><tr><th>record</th><th>value</th><th class="l">date</th><th>km</th><th class="l">route</th></tr></thead><tbody>` +
-    recs.map(([n, k, u, xs]) => { const a = best(k, xs); if (!a) return ""; return `<tr class="click" data-id="${a.id}"><td class="l">${n}</td><td>${k === "moving_s" ? dur(a[k], true) : f2(a[k])} ${u}</td><td class="l">${fdate(a._d)}</td><td>${fkm(a.km)}</td><td class="l">${routePill(a.route)}</td></tr>`; }).join("") + `</tbody></table>`;
+    recs.map(([n, k, u, xs]) => { const a = best(k, xs); if (!a) return ""; return `<tr class="click" data-id="${a.id}"><td class="l">${n}</td><td>${k === "moving_s" ? dur(a[k], true) : u === "W" ? f0(a[k]) : f2(a[k])} ${u}</td><td class="l">${fdate(a._d)}</td><td>${fkm(a.km)}</td><td class="l">${routePill(a.route)}</td></tr>`; }).join("") + `</tbody></table>`;
   $("#t-mon").innerHTML = `<table><thead><tr><th>month</th><th>n</th><th>km</th><th>moving</th><th>km/h</th><th>best10 max</th><th>best10 med</th><th>wind-neutral</th><th>HR</th><th>kcal</th></tr></thead><tbody>` +
     mons.slice().reverse().map(m => `<tr><td class="l">${fmon(new Date(m.x))}</td><td>${m.n}</td><td>${fkm(m.km)}</td><td>${hours(m.mv)}</td><td>${f1(m.kmh)}</td><td>${f2(m.b10)}</td><td>${f2(m.b10med)}</td><td>${f2(m.wn)}</td><td>${f0(m.hr)}</td><td>${m.kcal ? f0(m.kcal) : "–"}</td></tr>`).join("") + `</tbody></table>`;
   app.querySelectorAll("tr[data-id]").forEach(tr => tr.onclick = () => go(tr.dataset.id));
@@ -900,6 +935,7 @@ async function viewProfile() {
   };
 }
 function setProfileBtn(p) {
+  S.profile = p || null;  // weight for W/kg
   const b = $("#profile-btn"); if (!b) return;
   b.textContent = p && p.name ? p.name.split(" ")[0] : "Profile";
   b.classList.toggle("warn", !(p && p.weight_kg));
@@ -1239,6 +1275,8 @@ async function viewSessions() {
     ["adj_neutral", "adjusted", a => f2(a.adj_neutral)], ["kcal", "kcal", a => f0(a.kcal)],
     ["hr_avg", "HR", a => f0(a.hr_avg)], ["ascent_m", "ascent", a => f0(a.ascent_m)], ["route", "route", a => routePill(a.route), "l"],
   ];
+  if (acts.some(a => isNum(pwAvg(a)))) cols.splice(cols.findIndex(c => c[0] === "hr_avg"), 0,
+    ["watts", "avg W", a => f0(pwAvg(a))], ["np", "NP", a => f0(a.np)], ["pw20m", "best 20 W", a => f0(a.pw20m)]);
   const app = $("#app");
   app.innerHTML = `<div class="head"><div><h1>${esc(S.type)} sessions</h1><div class="muted" id="cnt"></div></div></div>
     <div class="panel"><div class="toolbar"><input id="q" placeholder="filter: name, date, route…" value="${esc(S.q)}" style="width:260px">
@@ -1249,7 +1287,7 @@ async function viewSessions() {
   const draw = () => {
     const q = S.q.toLowerCase(), mink = +($("#mink").value || 0);
     const k = S.sort.k, dir = S.sort.dir;
-    const val = a => k === "pace" ? (a.kmh_moving ? -a.kmh_moving : null) : k === "date" ? a._t : k === "fav" ? (isFav("sessions", a.id) ? 1 : 0) : a[k];
+    const val = a => k === "watts" ? pwAvg(a) : k === "pace" ? (a.kmh_moving ? -a.kmh_moving : null) : k === "date" ? a._t : k === "fav" ? (isFav("sessions", a.id) ? 1 : 0) : a[k];
     const favOnly = $("#favonly").checked;
     const rows = acts.filter(a => (a.km || 0) >= mink && (!favOnly || isFav("sessions", a.id)) && (!q || `${a.name} ${a.date} ${a.route} ${a.device}`.toLowerCase().includes(q)))
       .sort((a, b) => { const x = val(a), y = val(b); if (x == null) return 1; if (y == null) return -1; return (x > y ? 1 : x < y ? -1 : 0) * dir; });
@@ -1327,7 +1365,9 @@ async function viewSession(id) {
   const i = peers.findIndex(p => p.id === a.id), prev = i >= 0 ? peers[i - 1] : null, next = i >= 0 ? peers[i + 1] : null;
   const d = new Date(a.datetime || a.date);
   const ser = a.series || [];
-  const hasHr = ser.some(r => r[3]), hasEle = ser.some(r => r[4] != null), hasGps = ser.some(r => r[5] != null);
+  const hasHr = ser.some(r => r[3]), hasEle = ser.some(r => r[4] != null), hasGps = ser.some(r => r[5] != null), hasPw = ser.some(r => r[7] != null);
+  // power: recorded average (or Strava's indoors), best efforts, intensity vs the FTP estimate at that date
+  const W = pwAvg(a), pwb = m.pw || {}, ftp = ftpEst(peers, +d), IF = isNum(m.np) && ftp ? m.np / ftp : null;
   const avg = a.kmh_moving;
   const L = m.laps;
   app.innerHTML = `
@@ -1354,7 +1394,11 @@ async function viewSession(id) {
       ...(L ? [{ k: "Laps", v: `${L.laps.length}`, s: `${f2(L.lap_km)} km circuit` }] : []),
       ...(m.route === "out-back" ? [{ k: "Wind-neutral 10 min", v: f2(m.wind_neutral), s: `out ${pct(m.asym_pct)} vs back`, hl: 1 }] : []),
       ...(a.hr_avg ? [{ k: "Heart rate", v: f0(a.hr_avg), s: `avg · max ${f0(a.hr_max)} bpm` }, { k: "Efficiency", v: a.best10min_kmh ? f2(a.best10min_kmh / a.hr_avg * 100) : "–", s: "best10 / HR ×100" }] : []),
-      ...(a.s_avg_watts ? [{ k: "Power", v: f0(a.s_avg_watts) + " W", s: `max ${f0(a.s_max_watts)} W` }] : []),
+      ...(isNum(W) ? [{ k: "Power", v: f0(W) + " W", s: [isNum(m.np) && `NP ${f0(m.np)}`, isNum(a.watts_max) && `max ${f0(a.watts_max)} W`].filter(Boolean).join(" · ") || "avg (Strava)", hl: 1 }]
+        : a.s_avg_watts ? [{ k: "Power (Strava est.)", v: f0(a.s_avg_watts) + " W", s: "estimated, no power meter" }] : []),
+      ...(isNum(pwb["1200"]) || isNum(pwb["300"]) ? [{ k: "Best 5 s / 1 / 5 / 20 min", v: f0(pwb["5"]) + " W", s: `${f0(pwb["60"])} · ${f0(pwb["300"])} · ${f0(pwb["1200"])} W` }] : []),
+      ...(isNum(IF) ? [{ k: "Intensity", v: IF.toFixed(2), s: `TSS ${f0(a.elapsed_s / 3600 * IF * IF * 100)} · FTP est. ${f0(ftp)} W` }] : []),
+      ...(isNum(W) && a.hr_avg ? [{ k: "Power / HR", v: (W / a.hr_avg).toFixed(2), s: "W per bpm" }] : []),
       { k: "Ascent", v: f0(a.ascent_m) + " m" },
       ...(a.cond && isNum(a.cond.temp) ? [{ k: "Weather", v: `${f0(a.cond.temp)}°C`, s: `wind ${fwind(a.cond)}${isNum(a.cond.gust) ? ` · gusts ${f0(a.cond.gust)}` : ""}` }] : a.cond && a.cond.pending ? [{ k: "Weather", v: "…", s: "loading" }] : []),
       ...(a.cond && isNum(a.cond.adjusted) ? [{ k: "Conditions-adjusted 10 min", v: f2(a.cond.adjusted), s: "wind and slope removed per leg", hl: 1 }] : []),
@@ -1363,9 +1407,10 @@ async function viewSession(id) {
     ])}
     <div class="grid g2">
       <div class="panel"><h2>Route <span class="muted">coloured by speed · drag / scroll to explore · hover the chart to follow along</span></h2><div id="map"></div></div>
-      <div class="panel selhost"><div id="speed-sel" class="selbox" hidden></div><h2>Speed${hasHr ? ", heart rate" : ""}${hasEle ? " &amp; elevation" : ""}</h2>
+      <div class="panel selhost"><div id="speed-sel" class="selbox" hidden></div><h2>Speed${hasHr ? ", heart rate" : ""}${hasPw ? ", power" : ""}${hasEle ? " &amp; elevation" : ""}</h2>
         <div class="toolbar"><div class="seg" id="xmode"><button data-x="km" class="on">distance</button><button data-x="t">time</button></div></div>
         <div id="c-speed"></div>
+        ${hasPw ? `<div class="subhead"><b>Power</b> <span class="muted small" id="pw-sum"></span></div><div id="c-pw"></div>` : ""}
         ${hasEle ? `<div class="subhead"><b>Elevation</b> <span class="muted small" id="ele-sum"></span></div><div id="c-ele"></div>` : ""}
         <div class="note">Drag across the chart to select a stretch; click to select that km.</div></div>
     </div>
@@ -1404,18 +1449,20 @@ async function viewSession(id) {
   const idxRange = (col, lo, hi) => { let i0 = -1, i1 = -1; ser.forEach((r, j) => { if (r[col] >= lo && r[col] <= hi) { if (i0 < 0) i0 = j; i1 = j; } }); return i0 < 0 ? null : [i0, i1]; };
   const paintSel = () => {
     const box = $("#speed-sel");
-    if (!sel) { speedChart && speedChart.setBand(null); eleChart && eleChart.setBand(null); if (box) box.hidden = true; return; }
+    if (!sel) { speedChart && speedChart.setBand(null); eleChart && eleChart.setBand(null); pwChart && pwChart.setBand(null); if (box) box.hidden = true; return; }
     const r = idxRange(sel.col, sel.lo, sel.hi);
     if (!r) return;
     const [i0, i1] = r, xi = xmode === "km" ? 1 : 0;
     speedChart && speedChart.setBand(ser[i0][xi], ser[i1][xi]);
     eleChart && eleChart.setBand(ser[i0][xi], ser[i1][xi]);
-    let mv = 0, hrS = 0, hrT = 0;
+    pwChart && pwChart.setBand(ser[i0][xi], ser[i1][xi]);
+    let mv = 0, hrS = 0, hrT = 0, pwS = 0, pwT = 0;
     for (let j = i0; j < i1; j++) {
       const dt = ser[j + 1][0] - ser[j][0];
       if (dt <= 0) continue;
       if ((ser[j + 1][1] - ser[j][1]) * 1000 / dt >= 0.5) mv += dt;
       if (ser[j][3] && dt <= 60) { hrS += ser[j][3] * dt; hrT += dt; }
+      if (ser[j][7] != null && dt <= 60) { pwS += ser[j][7] * dt; pwT += dt; }
     }
     const km = ser[i1][1] - ser[i0][1], el = ser[i1][0] - ser[i0][0], v = mv ? km / (mv / 3600) : null;
     box.hidden = false;
@@ -1425,6 +1472,7 @@ async function viewSession(id) {
       row("time", dur(el, el >= 3600) + (mv < el - 2 ? ` <span class="muted">(moving ${dur(mv, mv >= 3600)})</span>` : "")) +
       row("speed", `${f2(v)} km/h` + (isNum(v) && isNum(avg) ? ` <span class="${v >= avg ? "up" : "down"}">${pct((v / avg - 1) * 100)}</span>` : "")) +
       row("pace", `${pace(v)}/km`) + (hrT ? row("HR", `${f0(hrS / hrT)} bpm`) : "") +
+      (pwT ? row("power", `${f0(pwS / pwT)} W` + (isNum(W) && W ? ` <span class="${pwS / pwT >= W ? "up" : "down"}">${pct((pwS / pwT / W - 1) * 100)}</span>` : "")) : "") +
       (isNum(eg.net) ? row("elev", `${fnet(eg.net)}${isNum(eg.g) ? ` <span class="muted">(${fgrade(eg.g)})</span>` : ""}`) : "");
     $("#sel-clear").onclick = () => { clearRowSel(); hl.highlightBy(null); };
   };
@@ -1490,7 +1538,29 @@ async function viewSession(id) {
   };
   /** km range [k0, k1] -> series index range */
   const kmIdx = (k0, k1) => { let i0 = 0, i1 = ser.length - 1; while (i0 < i1 && ser[i0][1] < k0) i0++; while (i1 > i0 && ser[i1][1] > k1) i1--; return [i0, i1]; };
-  let eleChart = null;
+  let eleChart = null, pwChart = null;
+  const drawPw = () => {
+    if (!hasPw || !$("#c-pw")) return;
+    const xi = xmode === "km" ? 1 : 0, xf = xmode === "km" ? v => v.toFixed(0) : v => dur(v);
+    const vals = ser.map(r => r[7]).filter(isNum), top = Math.max(50, (quantile(vals, .995) || 300) * 1.1);
+    $("#pw-sum").textContent = `30 s mean · avg ${f0(W)} W` + (isNum(m.np) ? ` · NP ${f0(m.np)} W` : "") + (ftp ? ` · FTP est. ${f0(ftp)} W` : "");
+    const idxOf = new Map(ser.map((r, j) => [r[xi], j]));
+    const x0 = ser[0][xi], x1 = ser[ser.length - 1][xi];
+    pwChart = chart($("#c-pw"), {
+      height: 170, padRight: true,
+      x: { type: "linear", fmt: xf }, y: { min: 0, max: top, fmt: v => v.toFixed(0), label: "W", ticks: 4 },
+      series: [
+        { name: "power", kind: "area", color: "#c77dff", opacity: .25, legend: false, data: ser.map((r, j) => ({ x: r[xi], y: r[7], ref: j })) },
+        { name: "power", kind: "line", color: "#c77dff", width: 1.4, data: ser.map((r, j) => ({ x: r[xi], y: r[7], ref: j })) },
+        ...(isNum(W) ? [{ name: `avg ${f0(W)}`, kind: "line", color: "#ff7a1a", width: 1, dash: "5 4", data: [{ x: x0, y: W }, { x: x1, y: W }] }] : []),
+        ...(ftp ? [{ name: `FTP est. ${f0(ftp)}`, kind: "line", color: "#ffd166", width: 1, dash: "2 3", data: [{ x: x0, y: ftp }, { x: x1, y: ftp }] }] : []),
+      ],
+      tip: x => { const j = idxOf.get(x); if (j == null) return ""; const r = ser[j]; return `<b>${f2(r[1])} km · ${dur(r[0], true)}</b><div class="row"><span>power</span><span>${f0(r[7])} W${ftp && r[7] != null ? ` · ${f0(r[7] / ftp * 100)}% FTP` : ""}</span></div><div class="row"><span>speed</span><span>${f1(r[2])} km/h</span></div>` + (r[3] ? `<div class="row"><span>HR</span><span>${r[3]} bpm</span></div>` : ""); },
+      onHover: x => { map && map.mark(x == null ? null : idxOf.get(x)); speedChart && speedChart.cursor(x); eleChart && eleChart.cursor(x); },
+      onClick: j => { const k = Math.floor(ser[j][1]) + 1; if ((a.splits || []).some(s => s.km === k)) selectKm(k); },
+      onBrush: (x0, x1) => { clearRowSel(); hl.highlightBy(xi, x0, x1, false); },
+    });
+  };
   const drawEle = () => {
     if (!ele || !$("#c-ele")) return;
     const xi = xmode === "km" ? 1 : 0, xf = xmode === "km" ? v => v.toFixed(0) : v => dur(v);
@@ -1507,7 +1577,7 @@ async function viewSession(id) {
         { name: "elevation", kind: "line", color: "#c9d1dc", width: 1.5, data: ser.map((r, j) => ({ x: r[xi], y: ele[j], ref: j })) },
       ],
       tip: x => { const j = idxOf.get(x); if (j == null) return ""; const r = ser[j], g = gradeAt(j); return `<b>${f2(r[1])} km · ${dur(r[0], true)}</b><div class="row"><span>elevation</span><span>${f0(ele[j])} m</span></div>` + (isNum(g) ? `<div class="row"><span>grade</span><span>${g >= 0 ? "+" : ""}${g.toFixed(1)}%</span></div>` : "") + `<div class="row"><span>speed</span><span>${f1(r[2])} km/h</span></div>`; },
-      onHover: x => { map && map.mark(x == null ? null : idxOf.get(x)); speedChart && speedChart.cursor(x); },
+      onHover: x => { map && map.mark(x == null ? null : idxOf.get(x)); speedChart && speedChart.cursor(x); pwChart && pwChart.cursor(x); },
       onClick: j => { const k = Math.floor(ser[j][1]) + 1; if ((a.splits || []).some(s => s.km === k)) selectKm(k); },
       onBrush: (x0, x1) => { clearRowSel(); hl.highlightBy(xi, x0, x1, false); },
     });
@@ -1529,13 +1599,13 @@ async function viewSession(id) {
         ...(isNum(avg) ? [{ name: `avg ${f1(avg)}`, kind: "line", color: "#ff7a1a", width: 1, dash: "5 4", data: [{ x: pts[0].x, y: avg }, { x: pts[pts.length - 1].x, y: avg }] }] : []),
         ...(hasHr ? [{ name: "heart rate", kind: "line", color: "#ff4d4d", axis: "y2", width: 1.3, opacity: .85, data: pts.map(p => ({ x: p.x, y: p.r[3] || null, ref: p.j })) }] : []),
       ],
-      tip: x => { const j = idxOf.get(x); if (j == null) return ""; const r = ser[j]; return `<b>${f2(r[1])} km · ${dur(r[0], true)}</b><div class="row"><span>speed</span><span>${f1(r[2])} km/h · ${pace(r[2])}/km</span></div>` + (r[3] ? `<div class="row"><span>HR</span><span>${r[3]} bpm</span></div>` : "") + (r[4] != null ? `<div class="row"><span>elevation</span><span>${f0(r[4])} m</span></div>` : ""); },
-      onHover: x => { map && map.mark(x == null ? null : idxOf.get(x)); eleChart && eleChart.cursor(x); },
+      tip: x => { const j = idxOf.get(x); if (j == null) return ""; const r = ser[j]; return `<b>${f2(r[1])} km · ${dur(r[0], true)}</b><div class="row"><span>speed</span><span>${f1(r[2])} km/h · ${pace(r[2])}/km</span></div>` + (r[3] ? `<div class="row"><span>HR</span><span>${r[3]} bpm</span></div>` : "") + (r[7] != null ? `<div class="row"><span>power</span><span>${f0(r[7])} W</span></div>` : "") + (r[4] != null ? `<div class="row"><span>elevation</span><span>${f0(r[4])} m</span></div>` : ""); },
+      onHover: x => { map && map.mark(x == null ? null : idxOf.get(x)); eleChart && eleChart.cursor(x); pwChart && pwChart.cursor(x); },
       onClick: j => { const k = Math.floor(ser[j][1]) + 1; if ((a.splits || []).some(s => s.km === k)) selectKm(k); },
     });
   };
-  $("#xmode").querySelectorAll("button").forEach(b => b.onclick = () => { xmode = b.dataset.x; $("#xmode").querySelectorAll("button").forEach(z => z.classList.toggle("on", z === b)); drawSpeed(); drawEle(); paintSel(); });
-  drawSpeed(); drawEle();
+  $("#xmode").querySelectorAll("button").forEach(b => b.onclick = () => { xmode = b.dataset.x; $("#xmode").querySelectorAll("button").forEach(z => z.classList.toggle("on", z === b)); drawSpeed(); drawPw(); drawEle(); paintSel(); });
+  drawSpeed(); drawPw(); drawEle();
 
   if (L) lapWidgets(L, hl, hasHr);
   if (hasGps) sessionSegments(peers.find(p => p.id === a.id) || a, hl);

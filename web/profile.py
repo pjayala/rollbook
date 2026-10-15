@@ -8,8 +8,9 @@ Strava's fallback for skating without HR is ~2x it. So every session gets the
 same per-sport formula, and Strava's figure is shown only as a reference.
 
 Gross energy (kcal) per sport, in order of preference:
-  power    indoor (Virtual*) sessions with average watts: work / 24% gross
-           efficiency. Strava's outdoor watts are its own estimate, not used
+  power    rides with recorded power (watts_avg), or Strava's average watts
+           indoors: work / 24% gross efficiency. Strava's outdoor watts are
+           its own estimate, not used
   ACSM     run / walk / hike: ACSM metabolic equations from speed and grade
            (grade = ascent / distance), the standard oxygen-cost model
   MET      inline skate, outdoor ride without power, others: Compendium of
@@ -96,8 +97,12 @@ def calories(a, profile):
         return None
     out = {}
     # Strava exports *estimated* average watts for outdoor rides (and even some
-    # skates) without a power meter; only indoor trainers measure power here
-    watts = a.get("s_avg_watts") if typ.startswith("Virtual") else None
+    # skates) without a power meter, so its figure only counts indoors. Power
+    # recorded in the file (watts_avg: trainer or power meter) is a measurement,
+    # for any ride; watch "running power" isn't comparable, so not for runs.
+    watts = a.get("watts_avg") if "Ride" in typ else None
+    if not watts and typ.startswith("Virtual"):
+        watts = a.get("s_avg_watts")
     if watts and watts > 20:
         out = {"kcal": watts * mv / EFF_POWER / 4184, "source": "power"}
     elif typ in ACSM and km > 0.2:

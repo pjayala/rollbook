@@ -220,6 +220,64 @@ class Api(Build):
         self.assertEqual(self.get("/api/activity/1002")["name"], "The come back")
 
 
+class PowerBuild(unittest.TestCase):
+    """Power through the whole pipeline, and an older DB without the power columns."""
+
+    def setUp(self):
+        from datetime import datetime, timedelta, timezone
+        from helpers import write_fit
+        self.home = tmpdir(self)
+        self.export = os.path.join(self.home, "export")
+        os.makedirs(os.path.join(self.export, "activities"))
+        t0 = datetime(2026, 3, 1, 8, 0, tzinfo=timezone.utc)
+        # indoor: no GPS, 30 min of 180 W with 30 s of 400 W in the middle
+        pts = [(t0 + timedelta(seconds=i), None, None, 20.0, 130, 400 if 900 <= i < 930 else 180) for i in range(1800)]
+        write_fit(os.path.join(self.export, "activities", "ride.fit"), pts)
+        with open(os.path.join(self.export, "activities.csv"), "w", newline="") as f:
+            csv.writer(f).writerows([["Activity ID", "Activity Date", "Activity Name", "Activity Type", "Filename", "Average Watts"],
+                                     ["2001", "", "ROUVY test", "Virtual Ride", "activities/ride.fit", "184"]])
+
+    def test_power_in_db_and_api(self):
+        r = run(self.home, "db", "build", self.export)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(run(self.home, "db", "enrich").returncode, 0)
+        db = sqlite3.connect(os.path.join(self.home, "rollbook.db"))
+        self.addCleanup(db.close)
+        avg, mx, sw = db.execute("SELECT watts_avg, watts_max, s_avg_watts FROM activities").fetchone()
+        self.assertAlmostEqual(avg, 184, delta=1)
+        self.assertAlmostEqual(avg, sw, delta=1)
+        self.assertEqual(mx, 400)
+        self.assertEqual(db.execute("SELECT COUNT(watts) FROM samples").fetchone(), (1800,))
+        db.close()
+        M = server.Metrics(os.path.join(self.home, "rollbook.db"), os.path.join(self.home, "cache", "m.json"))
+        con = server.connect(os.path.join(self.home, "rollbook.db"))
+        self.addCleanup(con.close)
+        a = next(x for x in server.api_activities(con, {"type": "Virtual Ride"}, M) if x["id"] == 2001)
+        self.assertEqual(round(a["pw5s"]), 400)
+        self.assertAlmostEqual(a["pw20m"], (30 * 400 + 1170 * 180) / 1200, delta=1)
+        self.assertGreater(a["np"], a["watts_avg"])
+        s = server.api_activity(con, {}, M, 2001)
+        self.assertEqual(s["series_cols"][-1], "watts")
+        self.assertTrue(all(isinstance(r[-1], int) for r in s["series"]))
+
+    def test_older_db_is_migrated_in_place(self):
+        from helpers import load_tool
+        old = load_tool().SCHEMA  # the schema as it was before the power columns
+        old = old.replace(",\n  watts_avg     REAL, watts_max REAL", "").replace(",\n  watts INTEGER", "")
+        self.assertNotIn("watts", old.replace("s_avg_watts", "").replace("s_max_watts", ""))
+        db = sqlite3.connect(os.path.join(self.home, "rollbook.db"))
+        db.executescript(old)
+        db.execute("INSERT INTO activities (id, filename) VALUES (1, 'activities/old.fit')")
+        db.commit()
+        db.close()
+        r = run(self.home, "db", "build", self.export)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("db build --fresh", r.stderr)
+        db = sqlite3.connect(os.path.join(self.home, "rollbook.db"))
+        self.addCleanup(db.close)
+        self.assertEqual(db.execute("SELECT COUNT(watts) FROM samples").fetchone(), (1800,))
+
+
 class EditsStore(unittest.TestCase):
     """web/edits.py on its own: the SQL overlay, rebuild survival, deleting imports."""
 

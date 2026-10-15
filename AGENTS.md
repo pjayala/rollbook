@@ -132,11 +132,19 @@ you pay a 310 MB re-extract.
   tracks.
 * `moving_s`, `pause_s`, `best30_kmh`, `best<N>min_kmh` and everything in
   `splits` exist **only** here — Strava's export does not contain them.
+* `watts_avg` / `watts_max` — power recorded in the file (FIT record field 7,
+  TCX `ns3:Watts`, GPX `<power>`), mean of the readings with 0 W (coasting)
+  included. On the 87 Virtual Rides: 81 within 1 W of Strava's
+  `s_avg_watts`, all within 3 W. Strava's `s_max_watts` is always empty.
+* Columns added later (`MIGRATIONS` in `bin/rollbook`) are `ALTER TABLE`d into
+  an older DB by `db build`; rows imported before stay NULL until
+  `db build --fresh`. Code reading them must cope with the column missing
+  (`server.has_col`).
 
 `splits` — per kilometre: `moving_s`, `pause_s`, `kmh`, `hr`.
 
-`samples` — per second: `lat`, `lon`, `ele`, `hr`, `cad`, `dist_m`.
-4.07M rows, indexed on `(activity_id, t)`.
+`samples` — per second: `lat`, `lon`, `ele`, `hr`, `cad`, `dist_m`, `watts`
+(NULL = not recorded, 0 = a real 0 W). 4.1M rows, indexed on `(activity_id, t)`.
 
 `v_activities` — convenience view with pre-formatted km / moving / kmh /
 `kmh_per_bpm`.
@@ -160,8 +168,9 @@ will measure the equipment, not the athlete.
 * **`hr_avg`** — only present on 16 skates (the GT 6 Pro arrived 2026-09-08)
   and on the indoor rides. There is no long-run HR trend for skating.
   `best10min_kmh / hr_avg` is the efficiency metric of choice when HR exists.
-* **`s_avg_watts`** — indoor cycling only, and the single most reliable
-  fitness signal in the dataset.
+* **Power** (`watts_avg`, best 5 s … 60 min, NP) — indoor cycling only (smart
+  trainer), and the single most reliable fitness signal in the dataset. On
+  outdoor rides `s_avg_watts` is Strava's *estimate*, not a measurement.
 
 Never compare `Virtual Ride` speeds to outdoor: ROUVY/MyWhoosh simulate
 gradients, so `best10min_kmh` of 47–58 km/h are simulated descents.
@@ -199,7 +208,8 @@ changing `derive()`.
 * **Calories** (`web/profile.py`): Rollbook's own estimate everywhere;
   Strava's/the watch's `s_calories` is shown only as a reference (without HR,
   Strava's skate figure is ~2× the measured rate). Per sport: indoor rides
-  `avg watts × time ÷ 24%` (outdoor rides' `s_avg_watts` is Strava's
+  `avg watts × time ÷ 24%`, recorded `watts_avg` for any ride, else
+  Strava's `s_avg_watts` indoors (outdoor rides' `s_avg_watts` is Strava's
   *estimate*, not used); run/walk/hike ACSM equations (speed + uphill grade
   from `ascent_m`); inline skate / outdoor ride Compendium MET by speed;
   others a fixed MET; Keytel HR formula as a cross-check when birth year
@@ -316,6 +326,14 @@ changing `derive()`.
   stays, restorable, until a fresh build); re-uploading that file un-deletes.
   A sport change drops the session's metrics cache entry. The CLI
   (`db query`, `v_activities`) shows the raw, unedited DB.
+* **Power** (`power_grid` etc. in server.py): readings go on a 1 s grid,
+  each held until the next one for at most 10 s (a paused trainer stops
+  recording, so longer gaps are 0 W). From it: best mean power over 5 s,
+  1/5/20/60 min (`pw` in the metrics cache, `pw5s`…`pw60m` in the list) and
+  Coggan normalized power (30 s rolling mean, 4th-power mean). The session
+  series gets a centred 30 s mean (`watts` column). In the browser, FTP
+  estimate = 95% of the best 20 min in the previous 180 days, intensity =
+  NP / FTP, TSS = hours × IF² × 100, plus W per bpm.
 * **Circuits** (progress page) group sessions whose lap *centre* is within
   max(60 m, 25% of lap length) and lap length within 12% — the gate itself
   moves between sessions, the centre doesn't.
