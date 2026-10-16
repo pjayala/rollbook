@@ -20,6 +20,7 @@ come back within BYE_GRACE_S (reloads do come back).
 """
 
 import os
+import secrets
 import shutil
 import subprocess
 import sys
@@ -102,14 +103,17 @@ def run(db_path, cache_path, port=8765, offline=False, mode="auto"):
             httpd, M, url = server.start(db_path, cache_path, 0, offline)
             print(f"note: port {port} is busy, using {url} (saved names/settings are per port)")
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    app_url = url + "?app=1"
+    # per-launch window token: the page echoes it in /api/bye, so a second
+    # launcher's window on this server can't stop this one when it closes
+    token = secrets.token_hex(6)
+    app_url = url + f"?app={token}"
     print(f"opening {mode} window")
 
     try:
         if mode == "webview":
             _webview(app_url)
         elif mode == "chrome":
-            _chrome(app_url, httpd, cache_path)
+            _chrome(app_url, httpd, cache_path, token)
         else:
             webbrowser.open(url)
             if httpd:
@@ -138,7 +142,7 @@ def _webview(url):
         webview.start(private_mode=False)
 
 
-def _chrome(url, httpd, cache_path):
+def _chrome(url, httpd, cache_path, token=None):
     profile = os.path.join(os.path.dirname(cache_path), "app-profile")
     os.makedirs(profile, exist_ok=True)
     proc = subprocess.Popen(
@@ -154,8 +158,9 @@ def _chrome(url, httpd, cache_path):
     closed = threading.Event()
     state = {"bye": None}
 
-    def on_bye():
-        state["bye"] = time.monotonic()
+    def on_bye(app=None):
+        if app == token:  # ignore other launchers' windows reusing this server
+            state["bye"] = time.monotonic()
 
     httpd.on_bye = on_bye
     while not closed.is_set():
@@ -163,8 +168,8 @@ def _chrome(url, httpd, cache_path):
             break
         b = state["bye"]
         if b is not None and time.monotonic() - b > BYE_GRACE_S:
-            # no page came back: if a request arrived after the bye, it was a reload
-            if getattr(httpd, "last_request", 0) > b:
+            # no page came back: if this window loaded a page after the bye, it was a reload
+            if getattr(httpd, "app_pages", {}).get(token, 0) > b:
                 state["bye"] = None
                 continue
             break

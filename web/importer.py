@@ -144,18 +144,29 @@ class Importer:
     def _store_activity(self, tmp, name, sport):
         acts = os.path.join(self.imports, "activities")
         os.makedirs(acts, exist_ok=True)
-        dest = os.path.join(acts, name)
-        if os.path.exists(dest):
-            # stored before, but maybe not in the DB (e.g. after `db build --fresh`
-            # of an export): still queue a build, which skips it if it's there
-            with self.lock:
-                if self.imports not in self.pending:
-                    self.pending.append(self.imports)
-            return 200, {"kind": "activity", "stored": name, "duplicate": True}
+        # same name, other content -> name-2.ext, -3…: HUAWEI "Export Original"
+        # always names the file Outdoor_cycle.fit, so the name says nothing
+        m = re.search(r"\.(fit|gpx|tcx)(\.gz)?$", name, flags=re.I)
+        base, ext = (name[:m.start()], name[m.start():]) if m else os.path.splitext(name)
+        digest = _sha1(tmp)
+        for k in range(1, 1000):
+            name = f"{base}{'' if k == 1 else f'-{k}'}{ext}"
+            dest = os.path.join(acts, name)
+            if not os.path.exists(dest):
+                break
+            if os.path.getsize(dest) == os.path.getsize(tmp) and _sha1(dest) == digest:
+                # stored before, but maybe not in the DB (e.g. after `db build --fresh`
+                # of an export): still queue a build, which skips it if it's there
+                with self.lock:
+                    if self.imports not in self.pending:
+                        self.pending.append(self.imports)
+                return 200, {"kind": "activity", "stored": name, "duplicate": True}
+        else:
+            return 409, {"error": f"{name}: too many different files with this name"}
         os.replace(tmp, dest)
         index = os.path.join(self.imports, "activities.csv")
         new = not os.path.exists(index)
-        title = re.sub(r"\.(fit|gpx|tcx)(\.gz)?$", "", name, flags=re.I).replace("_", " ")
+        title = base.replace("_", " ")  # without the -N: both rides are "Outdoor cycle"
         with open(index, "a", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             if new:
@@ -188,13 +199,18 @@ class Importer:
             j["log"] = j["log"][-40:]
         return j
 
-    def _count(self):
+    def _ids(self):
+        """Activity ids in the DB. A set, not a count: an export replacing a bare
+        import (dedup) swaps one id for another and leaves the count unchanged."""
         import sqlite3
         try:
             db = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
-            return db.execute("SELECT COUNT(*) FROM activities").fetchone()[0]
+            try:
+                return {r[0] for r in db.execute("SELECT id FROM activities")}
+            finally:
+                db.close()
         except sqlite3.Error:
-            return 0
+            return set()
 
     def _cmd(self, args, phase):
         j = self.job
@@ -221,15 +237,16 @@ class Importer:
 
     def _work(self, todo):
         j = self.job
-        before = self._count()
+        before = self._ids()
         try:
             for path in todo:
                 label = os.path.basename(path)
                 if self._cmd(["db", "build", path], f"importing {label}"):
                     raise RuntimeError(next((x for x in reversed(j["log"]) if x.startswith("error")),
                                             f"db build failed for {label}"))
-            j["added"] = self._count() - before
-            if j["added"]:
+            after = self._ids()
+            j["added"] = len(after) - len(before)
+            if after != before:  # new rows, or a replacement with a new id
                 j["done"] = j["total"] = 0
                 if self._cmd(["db", "enrich", "--missing"], "computing best efforts"):
                     raise RuntimeError("db enrich failed")
@@ -237,4 +254,4 @@ class Importer:
                 self.M.warm()  # new activities only; cached ones are kept
             j.update(state="done", phase="done", finished=time.time())
         except Exception as e:
-            j.update(state="error", phase="failed", error=str(e), added=self._count() - before)
+            j.update(state="error", phase="failed", error=str(e), added=len(self._ids()) - len(before))
