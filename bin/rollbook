@@ -24,6 +24,8 @@ Commands
   rollbook login | whoami              OAuth setup / check           (API only)
 """
 
+__version__ = "0.1.0"
+
 import argparse
 import hashlib
 import http.server
@@ -1680,6 +1682,7 @@ def main():
         if hasattr(f, "reconfigure"):
             f.reconfigure(errors="replace")
     p = argparse.ArgumentParser(prog="rollbook")
+    p.add_argument("--version", action="version", version=f"rollbook {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("login").set_defaults(fn=lambda a: login())
     sub.add_parser("whoami").set_defaults(fn=cmd_whoami)

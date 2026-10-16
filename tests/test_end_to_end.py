@@ -87,6 +87,13 @@ class Build(unittest.TestCase):
         r = run(self.home, "db", "query", "DELETE FROM activities")
         self.assertNotEqual(r.returncode, 0)
 
+    def test_version(self):
+        r = run(self.home, "--version")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stdout.strip(), r"^rollbook \d+\.\d+\.\d+$")
+        with open(os.path.join(os.path.dirname(TOOL), "..", "CHANGELOG.md"), encoding="utf-8") as f:
+            self.assertIn(f"## {r.stdout.split()[1]} ", f.read())  # every version has release notes
+
 
 class Api(Build):
     """Same database, served by web/server.py on a free port, offline."""

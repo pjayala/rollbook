@@ -65,7 +65,9 @@ GPS: runs, rides, walks, skates, plus indoor rides from ROUVY or MyWhoosh.
 - **Race predictor**, **favorites (☆)** for sessions and segments, and
   back/forward navigation.
 - **Import** from the UI: drop in a full Strava export `.zip` or single
-  `.fit/.gpx/.tcx` files ("Export Original"). Duplicates are detected.
+  `.fit/.gpx/.tcx` files ("Export Original"). Duplicates are detected, and
+  different files with the same name (HUAWEI calls every export
+  `Outdoor_cycle.fit`) are all kept.
 - **Edit sessions** (✎ on a session): rename, fix the sport, hide from stats
   or delete. Edits are stored next to the database and survive rebuilds.
 - **Desktop window** (`rollbook app`) or a normal browser tab
@@ -78,8 +80,15 @@ GPS: runs, rides, walks, skates, plus indoor rides from ROUVY or MyWhoosh.
 <td align="center"><sub>A segment: speed over time and its leaderboard</sub></td></tr>
 </table>
 
-<p align="center"><img src="docs/screenshots/heatmap.png" width="80%" alt="Heatmap"><br>
-<sub>Heatmap. The screenshots use demo data with relocated GPS and no basemap. Normally you see OpenStreetMap underneath.</sub></p>
+<table>
+<tr><td><img src="docs/screenshots/power.png" alt="Indoor ride with power"></td>
+<td><img src="docs/screenshots/heatmap.png" alt="Heatmap"></td></tr>
+<tr><td align="center"><sub>An indoor ride: power, intensity and load against FTP</sub></td>
+<td align="center"><sub>Heatmap of every session</sub></td></tr>
+</table>
+
+<p align="center"><sub>The screenshots show a synthetic demo athlete (<code>tools/demo.py</code>), offline, so
+there is no basemap. Normally you see OpenStreetMap underneath.</sub></p>
 
 ## Requirements
 
@@ -170,6 +179,7 @@ dialog, because watches often mislabel it; HUAWEI saves skating as
 | `rollbook db query "SQL" [--csv]` | read-only SQL against your data |
 | `rollbook analyze <file>` | one activity: pauses, splits, out/back legs, grade |
 | `rollbook compare <a> <b> …` | side-by-side summary |
+| `rollbook --version` | print the version |
 
 Use `./rollbook` on macOS/Linux and `rollbook.cmd` on Windows. All state lives
 in `./data`, which is git-ignored.
@@ -208,9 +218,20 @@ python3 -m unittest discover -s tests -t tests
 
 They cover the parsers (GPX, gzipped files, synthetic little- and big-endian
 FIT), the regression fixtures in `samples/`, GPS and elevation clean-up,
-laps, segments, the wind and slope model, and an end-to-end build plus the
-dashboard API and its CSRF checks. GitHub Actions runs them on every push and
-pull request on Linux, macOS and Windows with Python 3.9 and 3.13.
+laps and circuits, segments, the wind and slope model, the weather cache, the
+importer (uploads, duplicate detection, background build), the `rollbook app`
+launcher, FTP choice and power zones (run under Node when it's installed), and
+an end-to-end build plus the dashboard API and its CSRF checks. GitHub Actions
+runs them on every push and pull request on Linux, macOS and Windows with
+Python 3.9 and 3.13.
+
+Screenshots are regenerated from a synthetic athlete, never from real data:
+
+```sh
+python3 tools/screenshots.py      # builds the demo with tools/demo.py, needs Chrome
+```
+
+Changes are listed in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
