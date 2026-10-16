@@ -76,6 +76,18 @@ class Tracks(unittest.TestCase):
         self.assertGreater(server.normalized_power(g), sum(g) / len(g))  # variable effort: NP > average
         self.assertIsNone(server.power_grid([r[:7] for r in rows], t))  # no power column (older DB / tests)
 
+    def test_zero_power_and_histogram(self):
+        # 1 Hz: 100 s at 200 W, 20 s coasting at a recorded 0 W, a 60 s gap (no readings), 50 s at 100 W
+        rows = [(i, None, None, None, None, None, 0.0, 200 if i < 100 else 0) for i in range(120)]
+        rows += [(i, None, None, None, None, None, 0.0, 100) for i in range(180, 230)]
+        t = [r[0] for r in rows]
+        self.assertEqual(server.zero_power_s(rows, t), 19 + 10)  # 0 W at 100..119; the last holds 10 s into the gap
+        g = server.power_grid(rows, t)
+        h = server.power_hist(g)
+        self.assertEqual(sum(h.values()), len(g))
+        self.assertEqual((h[200], h[100]), (100, 50))
+        self.assertIsNone(server.zero_power_s([r[:7] for r in rows], t))
+
     def test_ele_placeholder(self):
         rows = [(i, 10.0, 20.0, 150.0 if i % 5 == 0 else -1.0, None, None, i) for i in range(300)]
         self.assertEqual(server._ele_placeholder(rows), -1.0)

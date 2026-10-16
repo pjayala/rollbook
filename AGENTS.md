@@ -136,6 +136,11 @@ you pay a 310 MB re-extract.
   TCX `ns3:Watts`, GPX `<power>`), mean of the readings with 0 W (coasting)
   included. On the 87 Virtual Rides: 81 within 1 W of Strava's
   `s_avg_watts`, all within 3 W. Strava's `s_max_watts` is always empty.
+* `f_avg_watts`, `f_max_watts`, `f_np`, `f_if`, `f_tss` — the FIT session
+  message's own power summary (ROUVY writes it; fields 20/21/34/36/35).
+  The file doesn't hold the FTP the app used, so `f_ftp = f_np / f_if`
+  (ROUVY: 147 W in May → 195 in July → 185–188 W since September).
+* `cad_avg` / `cad_max` (0 rpm left out), `kmh_max` (device speed channel).
 * Columns added later (`MIGRATIONS` in `bin/rollbook`) are `ALTER TABLE`d into
   an older DB by `db build`; rows imported before stay NULL until
   `db build --fresh`. Code reading them must cope with the column missing
@@ -331,9 +336,16 @@ changing `derive()`.
   recording, so longer gaps are 0 W). From it: best mean power over 5 s,
   1/5/20/60 min (`pw` in the metrics cache, `pw5s`…`pw60m` in the list) and
   Coggan normalized power (30 s rolling mean, 4th-power mean). The session
-  series gets a centred 30 s mean (`watts` column). In the browser, FTP
-  estimate = 95% of the best 20 min in the previous 180 days, intensity =
-  NP / FTP, TSS = hours × IF² × 100, plus W per bpm.
+  series gets a centred 30 s mean (`watts` column). Also cached: best 30 s /
+  30 min, `pw_zero_s` (time at a *recorded* 0 W — the 0 W power_grid puts in
+  gaps doesn't count) and `pw_hist` (seconds per 1 W; coarser bins moved
+  zone shares by up to 3 points). In the browser, `ftpAt()`: profile `ftp` >
+  the latest `f_ftp` up to that ride (a ride's own wins) > 95% of the best
+  20 min in the previous 180 days. Power zones are Coggan's 7 levels as % of
+  that FTP. The UI says "weighted power / intensity / load" (NP, IF and TSS
+  are TrainingPeaks trademarks; named only in notes). Lago di Garda vs
+  ROUVY: zones 3/20/38/29/9/1/0 vs 3/19/38/30/9/1/0 %, every best-power
+  window equal, zero power 26 vs 25 s, cadence 97/110 equal.
 * **Circuits** (progress page) group sessions whose lap *centre* is within
   max(60 m, 25% of lap length) and lap length within 12% — the gate itself
   moves between sessions, the centre doesn't.

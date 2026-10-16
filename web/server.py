@@ -32,7 +32,7 @@ from datetime import datetime, timedelta, timezone
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-METRICS_VERSION = 13
+METRICS_VERSION = 15
 THR = 0.5  # m/s, pause threshold; must match bin/rollbook
 WINDOWS = (30, 45, 60)  # minutes; 5/10/20 already live in the DB via `db enrich`
 LEG_WINDOW = 10  # minutes, best effort per out/back leg
@@ -47,7 +47,10 @@ LAP_CAND_M = 80  # m, spacing of candidate gates along the track
 LAP_MIN_M = 150  # m, shortest lap considered (inline/athletics tracks are ~200-400 m)
 LAP_HEAD_COS = 0.7  # pass heading must be within ~45 deg of the gate heading
 TRACK_Q = 1e5  # lat/lon quantised to 1e-5 deg (~1 m), then delta-encoded
-POWER_WINDOWS = (5, 60, 300, 1200, 3600)  # s, best mean power ("power curve" points)
+POWER_WINDOWS = (5, 30, 60, 300, 1200, 1800, 3600)  # s, best mean power ("power curve" points)
+POWER_KEYS = ("pw5s", "pw30s", "pw1m", "pw5m", "pw20m", "pw30m", "pw60m")  # list columns, same order
+PW_BIN = 1  # W, power histogram bin (zones are drawn in the browser, where FTP is known;
+#            coarser bins moved ROUVY's zone shares by up to 3 points)
 POWER_HOLD = 10  # s, a reading counts until the next one; longer gaps are 0 W (stopped)
 
 # Basemap tiles are the one thing fetched from the network: proxied through
@@ -63,6 +66,8 @@ MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=ut
         ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml",
         ".png": "image/png", ".ico": "image/x-icon"}
 
+# columns added by later `db build` migrations: listed when the DB has them, else NULL
+OPT_COLS = ("watts_avg", "watts_max", "cad_avg", "cad_max", "kmh_max", "f_avg_watts", "f_np", "f_if", "f_tss", "f_ftp")
 LIST_COLS = (
     "id, date, datetime, name, type, device, gear, km, elapsed_s, moving_s, pause_s, "
     "kmh_moving, kmh_elapsed, best30_kmh, best5min_kmh, best10min_kmh, best20min_kmh, "
@@ -389,6 +394,24 @@ def power_grid(rows, t):
     return g
 
 
+def zero_power_s(rows, t):
+    """Seconds spent at a recorded 0 W (not pedalling). Each reading counts
+    until the next one, at most POWER_HOLD s, the same rule as power_grid; the
+    0 W that power_grid puts into longer recording gaps is not counted."""
+    pw = [(t[i], r[7]) for i, r in enumerate(rows) if len(r) > 7 and r[7] is not None]
+    return sum(min(tb - ta, POWER_HOLD) for (ta, wa), (tb, _) in zip(pw, pw[1:] + [(pw[-1][0] + 1, None)])
+               if wa == 0) if pw else None
+
+
+def power_hist(g):
+    """Seconds per PW_BIN-watt bin over the 1 s grid, {bin_start: s}."""
+    h = {}
+    for w in g:
+        k = int(w // PW_BIN) * PW_BIN
+        h[k] = h.get(k, 0) + 1
+    return h
+
+
 def best_power(g, span):
     """Highest mean power over any `span`-second window of the 1 s grid."""
     if not g or len(g) < span:
@@ -434,6 +457,8 @@ def derive(db, aid):
     if g:
         out["pw"] = {str(w): best_power(g, w) for w in POWER_WINDOWS}
         out["np"] = normalized_power(g)
+        out["pw_hist"] = power_hist(g)
+        out["pw_zero_s"] = zero_power_s(rows, t)
 
     typ = db.execute("SELECT type FROM activities_all WHERE id=?", (aid,)).fetchone()[0] or ""
     if typ.startswith("Virtual"):  # simulated GPS, no wind, gradients are fake
@@ -577,7 +602,7 @@ def api_types(db, q, M):
 def api_activities(db, q, M):
     typ = q.get("type")
     # hidden=1 also lists hidden / deleted sessions (flagged), so they can be restored
-    pw = ", watts_avg, watts_max" if has_col(db, "activities_all", "watts_avg", None) else ", NULL AS watts_avg, NULL AS watts_max"
+    pw = "".join(f", {c}" if has_col(db, "activities_all", c, None) else f", NULL AS {c}" for c in OPT_COLS)
     sql = f"SELECT {LIST_COLS}{pw}, hidden, deleted FROM activities_all WHERE parse_error IS NULL"
     if q.get("hidden") != "1":
         sql += " AND NOT hidden"
@@ -604,7 +629,9 @@ def api_activities(db, q, M):
             r["best_lap_kmh"] = max((x["kmh_elapsed"] for x in reg if x["kmh_elapsed"]), default=None)
         r["hr_hist"] = m.get("hr_hist") or None
         p = m.get("pw") or {}
-        r["pw5s"], r["pw1m"], r["pw5m"], r["pw20m"], r["pw60m"] = (p.get(str(w)) for w in POWER_WINDOWS)
+        for k, w in zip(POWER_KEYS, POWER_WINDOWS):
+            r[k] = p.get(str(w))
+        r["pw_hist"] = m.get("pw_hist")
         r["np"] = m.get("np")
         r["cond"] = conditions(r, m)
     # refit the wind coefficient on this sport's data, then recompute with it

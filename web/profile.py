@@ -48,6 +48,7 @@ FIELDS = {  # name: (type, min, max)
     "name": (str, 0, 80), "sex": (str, 0, 10), "birth_year": (int, 1900, 2100),
     "height_cm": (float, 100, 250), "weight_kg": (float, 25, 300),
     "hr_rest": (int, 25, 120), "hr_max": (int, 100, 240),
+    "ftp": (int, 50, 600),  # W, threshold power; overrides ROUVY's and the estimate
 }
 
 

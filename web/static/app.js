@@ -417,10 +417,35 @@ const isSkate = () => /skate/i.test(S.type);
 /** Average watts: recorded in the file, else Strava's figure for indoor rides (its outdoor one is an estimate). */
 const pwAvg = a => isNum(a.watts_avg) ? a.watts_avg : /^Virtual/.test(a.type || "") && isNum(a.s_avg_watts) ? a.s_avg_watts : null;
 const FTP_DAYS = 180;
-/** FTP estimate at time t: 95% of the best 20-min power in the FTP_DAYS before it. */
-function ftpEst(acts, t = Date.now()) {
+/** Threshold power (FTP) at time t, as {w, src, note}, in order of preference:
+ * the profile's FTP; the one the training app used on the latest ride up to t
+ * (ROUVY writes NP and IF into each file, FTP = NP / IF: `f_ftp`, `self` wins for
+ * its own ride); else 95% of the best 20-min power over the previous FTP_DAYS. */
+function ftpAt(acts, t = Date.now(), self) {
+  if (S.profile && S.profile.ftp) return { w: S.profile.ftp, src: "profile", note: "your profile" };
+  const app = self && isNum(self.f_ftp) ? self : acts.filter(a => isNum(a.f_ftp) && a._t <= t + 60e3 && a._t > t - FTP_DAYS * DAY).reduce((b, a) => !b || a._t > b._t ? a : b, null);
+  if (app) { const n = /rouvy/i.test(app.name || "") ? "ROUVY" : /whoosh/i.test(app.name || "") ? "MyWhoosh" : "your training app"; return { w: app.f_ftp, src: "app", note: `set in ${n}` }; }
   const b = acts.filter(a => isNum(a.pw20m) && a._t <= t && a._t > t - FTP_DAYS * DAY).reduce((m, a) => Math.max(m, a.pw20m), 0);
-  return b ? 0.95 * b : null;
+  return b ? { w: 0.95 * b, src: "estimate", note: `95% of best 20 min, last ${FTP_DAYS / 30} months` } : null;
+}
+const ftpEst = (acts, t, self) => (ftpAt(acts, t, self) || {}).w ?? null;
+// Power zones as % of FTP (Coggan's 7 levels); hi = upper edge
+const PZONES = [{ n: "Z1", hi: .55, c: "#8a94a3", d: "active recovery" }, { n: "Z2", hi: .75, c: "#4a90d9", d: "endurance" },
+  { n: "Z3", hi: .90, c: "#3ecf8e", d: "tempo" }, { n: "Z4", hi: 1.05, c: "#f5c542", d: "threshold" }, { n: "Z5", hi: 1.20, c: "#ff8a3d", d: "VO2max" },
+  { n: "Z6", hi: 1.50, c: "#ff4d4d", d: "anaerobic" }, { n: "Z7", hi: Infinity, c: "#c77dff", d: "neuromuscular" }];
+/** Seconds per power zone from the server's {watts: s} histogram (1 W bins). */
+function pzSecs(hist, ftp) {
+  const z = PZONES.map(() => 0);
+  if (!hist || !ftp) return z;
+  for (const [k, sec] of Object.entries(hist)) z[PZONES.findIndex(p => +k <= p.hi * ftp)] += sec;
+  return z;
+}
+const pzLabel = (i, ftp) => { const lo = i ? Math.round(PZONES[i - 1].hi * ftp) + 1 : 0, hi = PZONES[i].hi * ftp; return `${PZONES[i].n} ${isFinite(hi) ? `${lo}–${Math.round(hi)}` : `${lo}+`} W`; };
+/** ROUVY-style strip: one column per zone, bar height by share of time. */
+function zoneStrip(secs, zones, label) {
+  const tot = secs.reduce((x, y) => x + y, 0) || 1, mx = Math.max(...secs) / tot || 1;
+  return `<div class="zstrip">` + secs.map((v, i) => { const f = v / tot; return `<div class="zcol" title="${esc(label(i))} · ${dur(v, true)}">
+    <div class="zbar"><i style="height:${(f / mx * 100).toFixed(1)}%;background:${zones[i].c}"></i></div><b>${zones[i].n}</b><span>${f >= .005 ? (f * 100).toFixed(0) + " %" : ""}</span></div>`; }).join("") + `</div>`;
 }
 
 // ------------------------------------------------------------------ views
@@ -442,7 +467,7 @@ async function viewProgress() {
   const k30 = last30.reduce((s, a) => s + a.km, 0), kp30 = prev30.reduce((s, a) => s + a.km, 0);
   const wnRecent = median(last30.map(a => a.wind_neutral)), wnPrev = median(all.filter(a => a._t < Date.now() - 30 * DAY).slice(-40).map(a => a.wind_neutral));
   const link = a => a ? `<a href="#/session/${a.id}">${fdate(a._d)}</a>` : "";
-  const hasPw = acts.some(a => isNum(a.pw20m)), p20 = best("pw20m"), ftp = ftpEst(all);
+  const hasPw = acts.some(a => isNum(a.pw20m)), p20 = best("pw20m"), FT = ftpAt(all), ftp = FT && FT.w;
   app.innerHTML = `
     <div class="head"><div><h1>${esc(S.type)} progress</h1><div class="muted">${acts.length} sessions · ${fdate(acts[0]._d)} → ${fdate(acts[acts.length - 1]._d)}</div></div></div>
     ${cards([
@@ -455,7 +480,7 @@ async function viewProgress() {
       { k: "Last 30 days", v: fkm(k30) + " km", s: `${last30.length} sessions · prev 30d ${fkm(kp30)} km` },
       { k: "Wind-neutral, 30d median", v: f2(wnRecent), s: isNum(wnRecent) && isNum(wnPrev) ? `<span class="${wnRecent >= wnPrev ? "up" : "down"}">${pct((wnRecent / wnPrev - 1) * 100)}</span> vs previous 40` : "" },
       ...(hasPw ? [{ k: "Best 20-min power", v: f0(p20?.pw20m) + " W", s: link(p20), hl: 1 },
-        { k: "FTP estimate", v: isNum(ftp) ? f0(ftp) + " W" : "–", s: `95% of best 20 min, last ${FTP_DAYS / 30} months` + (ftp && S.profile?.weight_kg ? ` · ${(ftp / S.profile.weight_kg).toFixed(2)} W/kg` : "")}] : []),
+        { k: FT && FT.src === "estimate" ? "FTP estimate" : "FTP", v: isNum(ftp) ? f0(ftp) + " W" : "–", s: (FT ? FT.note : "") + (ftp && S.profile?.weight_kg ? ` · ${(ftp / S.profile.weight_kg).toFixed(2)} W/kg` : "") }] : []),
     ])}
     <div class="panel"><h2>Calendar <span class="muted">km per day · click a day to open it</span></h2><div id="cal"></div></div>
     <div class="grid g2">
@@ -469,7 +494,8 @@ async function viewProgress() {
         <div class="note">Not comparable across 2025-08: the watch sample rate dropped then and inflates moving speed. Use best-10 for long-term form.</div></div>
       <div class="panel"><h2>Efficiency: best 10-min ÷ avg HR <span class="muted">km/h per 100 bpm</span></h2><div id="c-eff"></div></div>
       ${hasPw ? `<div class="panel"><h2>Power: best 5 / 20 min <span class="muted">click a dot to open the session</span></h2><div id="c-pow"></div>
-        <div class="note">Recorded by the trainer or power meter, the most reliable fitness signal here. FTP estimate = 95% of the best 20 min over the previous ${FTP_DAYS / 30} months.</div></div>
+        <div class="note">Recorded by the trainer or power meter, the most reliable fitness signal here. FTP: your profile's if set, else the one your training app used (ROUVY stores it in each ride), else 95% of the best 20 min over the previous ${FTP_DAYS / 30} months.</div></div>
+      <div class="panel"><h2>Time in power zones per month <span class="muted">% of FTP at the time of each ride</span></h2><div id="c-pzones"></div></div>
       <div class="panel"><h2>Power ÷ heart rate <span class="muted">avg W per bpm</span></h2><div id="c-pwhr"></div>
         <div class="note">More watts for the same heart rate = fitter. Only sessions with both.</div></div>` : ""}
       <div class="panel"><h2>Out-leg vs back-leg speed <span class="muted">out/back routes · bars = measured, dots = explained by wind + slope</span></h2><div id="c-wind"></div>
@@ -552,14 +578,21 @@ async function viewProgress() {
   });
   if (hasPw) {
     const pw = acts.filter(a => isNum(a.pw20m));
-    const ftpLine = pw.map(a => ({ x: a._t, y: ftpEst(all, a._t) }));
-    const tipPw = (x, hits, b) => { const a = acts.find(a => a.id === b.p.ref); return a ? `<b>${fdate(a._d)}</b> · ${esc(a.name)}<div class="row"><span>best 5 min</span><span>${f0(a.pw5m)} W</span></div><div class="row"><span>best 20 min</span><span>${f0(a.pw20m)} W</span></div><div class="row"><span>NP</span><span>${f0(a.np)} W</span></div><div class="row"><span>avg</span><span>${f0(pwAvg(a))} W</span></div>` : ""; };
+    const ftpLine = pw.map(a => ({ x: a._t, y: ftpEst(all, a._t, a) }));
+    const tipPw = (x, hits, b) => { const a = acts.find(a => a.id === b.p.ref); return a ? `<b>${fdate(a._d)}</b> · ${esc(a.name)}<div class="row"><span>best 5 min</span><span>${f0(a.pw5m)} W</span></div><div class="row"><span>best 20 min</span><span>${f0(a.pw20m)} W</span></div><div class="row"><span>weighted</span><span>${f0(a.np)} W</span></div><div class="row"><span>avg</span><span>${f0(pwAvg(a))} W</span></div>` : ""; };
     chart($("#c-pow"), {
       x: { type: "time" }, y: { fmt: v => v.toFixed(0), label: "W" }, tip: tipPw, onClick: go,
       series: [{ name: "best 5 min", kind: "dot", color: "#8a94a3", r: 2.5, opacity: .7, data: P("pw5m", pw) },
         { name: "best 20 min", kind: "dot", color: "#ff7a1a", r: 3.5, data: P("pw20m", pw) },
-        { name: "FTP estimate", kind: "line", color: "#ffd166", width: 2.5, data: ftpLine, gapX: 60 * DAY }],
+        { name: "FTP", kind: "line", color: "#ffd166", width: 2.5, data: ftpLine, gapX: 60 * DAY }],
     });
+    const pzm = mons.map(mo => ({ x: mo.x, z: mo.a.reduce((z, a) => pzSecs(a.pw_hist, ftpEst(all, a._t, a)).map((v, i) => z[i] + v), PZONES.map(() => 0)) })).filter(mo => mo.z.some(v => v > 0));
+    if (pzm.length) chart($("#c-pzones"), {
+      x: { type: "time" }, y: { zero: true, fmt: v => v.toFixed(0), label: "h" },
+      series: PZONES.map((z, i) => ({ name: `${z.n} ${z.d}`, kind: "bar", stack: "z", color: z.c, data: pzm.map(mo => ({ x: mo.x, y: mo.z[i] / 3600 })) })),
+      tip: x => { const mo = pzm.find(mo => mo.x === x); if (!mo) return ""; const tot = mo.z.reduce((p, q) => p + q, 0); return `<b>${fmon(new Date(mo.x))}</b>` + mo.z.map((v, i) => `<div class="row"><span>${PZONES[i].n} ${PZONES[i].d}</span><span>${dur(v, true)} · ${(v / tot * 100).toFixed(0)}%</span></div>`).join(""); },
+    });
+    else $("#c-pzones").innerHTML = `<p class="muted">No power data in this range.</p>`;
     const ph = acts.filter(a => pwAvg(a) && a.hr_avg > 60);
     if (ph.length) chart($("#c-pwhr"), {
       x: { type: "time" }, y: { fmt: v => v.toFixed(2), label: "W/bpm" }, onClick: go, legend: false,
@@ -599,7 +632,7 @@ async function viewProgress() {
   const recs = [["Best 5 min", "best5min_kmh", "km/h"], ["Best 10 min", "best10min_kmh", "km/h"], ["Best 20 min", "best20min_kmh", "km/h"],
     ["Best 30 min", "b30", "km/h"], ["Best 60 min", "b60", "km/h"], ["Best wind-neutral 10 min", "wind_neutral", "km/h"],
     ["Fastest avg (≥10 km)", "kmh_moving", "km/h", acts.filter(a => a.km >= 10)], ["Longest", "km", "km"], ["Longest moving time", "moving_s", ""], ["Most climbing", "ascent_m", "m"],
-    ...(hasPw ? [["Best 5 s power", "pw5s", "W"], ["Best 1 min power", "pw1m", "W"], ["Best 5 min power", "pw5m", "W"], ["Best 20 min power", "pw20m", "W"], ["Best 60 min power", "pw60m", "W"], ["Highest NP", "np", "W"]] : [])];
+    ...(hasPw ? [["Best 5 s power", "pw5s", "W"], ["Best 30 s power", "pw30s", "W"], ["Best 1 min power", "pw1m", "W"], ["Best 5 min power", "pw5m", "W"], ["Best 20 min power", "pw20m", "W"], ["Best 30 min power", "pw30m", "W"], ["Best 60 min power", "pw60m", "W"], ["Highest weighted power", "np", "W"]] : [])];
   $("#t-rec").innerHTML = `<table><thead><tr><th>record</th><th>value</th><th class="l">date</th><th>km</th><th class="l">route</th></tr></thead><tbody>` +
     recs.map(([n, k, u, xs]) => { const a = best(k, xs); if (!a) return ""; return `<tr class="click" data-id="${a.id}"><td class="l">${n}</td><td>${k === "moving_s" ? dur(a[k], true) : u === "W" ? f0(a[k]) : f2(a[k])} ${u}</td><td class="l">${fdate(a._d)}</td><td>${fkm(a.km)}</td><td class="l">${routePill(a.route)}</td></tr>`; }).join("") + `</tbody></table>`;
   $("#t-mon").innerHTML = `<table><thead><tr><th>month</th><th>n</th><th>km</th><th>moving</th><th>km/h</th><th>best10 max</th><th>best10 med</th><th>wind-neutral</th><th>HR</th><th>kcal</th></tr></thead><tbody>` +
@@ -893,6 +926,7 @@ async function viewProfile() {
           ${field("height_cm", "Height (cm)", `type="number" min="100" max="250" step="0.5"`, "resting energy and BMI")}
           ${field("weight_kg", "Weight (kg)", `type="number" min="25" max="300" step="0.1"`, "<b>needed for calories</b>")}
           ${field("hr_rest", "Resting HR (bpm)", `type="number" min="25" max="120" step="1"`, "optional")}
+          ${field("ftp", "FTP (W)", `type="number" min="50" max="600" step="1"`, "optional threshold power for power zones and intensity; otherwise the one your training app used (ROUVY), or 95% of your best 20 min")}
           ${field("hr_max", "Max HR (bpm)", `type="number" min="100" max="240" step="1"`, `optional, otherwise the highest recorded in the last 12 months (${S.hrmax ?? "?"} bpm) is used for zones`)}
           <div class="toolbar"><button class="btn" type="submit" id="psave">Save</button><span id="pmsg" class="small"></span></div>
         </form>
@@ -921,13 +955,14 @@ async function viewProfile() {
   $("#pform").onsubmit = async e => {
     e.preventDefault();
     const body = {};
-    for (const k of ["name", "sex", "birth_year", "height_cm", "weight_kg", "hr_rest", "hr_max"]) body[k] = $("#pf-" + k).value.trim();
+    for (const k of ["name", "sex", "birth_year", "height_cm", "weight_kg", "hr_rest", "hr_max", "ftp"]) body[k] = $("#pf-" + k).value.trim();
     const msg = $("#pmsg"); msg.className = "small muted"; msg.textContent = "saving…";
     try {
       const r = await fetch("/api/profile", { method: "POST", headers: { "X-Rollbook": "1", "Content-Type": "application/json" }, body: JSON.stringify(body) });
       const j = await r.json();
       if (!r.ok) throw new Error(j.error || r.status);
       msg.className = "small up"; msg.textContent = "✓ saved; calories and zones updated";
+      S.profile = j;
       S.acts = {};  // recompute calories in every view
       ({ hrmax: S.hrmax } = await api("hrmax"));
       derived(j); setProfileBtn(j);
@@ -1276,7 +1311,7 @@ async function viewSessions() {
     ["hr_avg", "HR", a => f0(a.hr_avg)], ["ascent_m", "ascent", a => f0(a.ascent_m)], ["route", "route", a => routePill(a.route), "l"],
   ];
   if (acts.some(a => isNum(pwAvg(a)))) cols.splice(cols.findIndex(c => c[0] === "hr_avg"), 0,
-    ["watts", "avg W", a => f0(pwAvg(a))], ["np", "NP", a => f0(a.np)], ["pw20m", "best 20 W", a => f0(a.pw20m)]);
+    ["watts", "avg W", a => f0(pwAvg(a))], ["np", "weighted W", a => f0(a.np)], ["pw20m", "best 20 W", a => f0(a.pw20m)]);
   const app = $("#app");
   app.innerHTML = `<div class="head"><div><h1>${esc(S.type)} sessions</h1><div class="muted" id="cnt"></div></div></div>
     <div class="panel"><div class="toolbar"><input id="q" placeholder="filter: name, date, route…" value="${esc(S.q)}" style="width:260px">
@@ -1367,7 +1402,10 @@ async function viewSession(id) {
   const ser = a.series || [];
   const hasHr = ser.some(r => r[3]), hasEle = ser.some(r => r[4] != null), hasGps = ser.some(r => r[5] != null), hasPw = ser.some(r => r[7] != null);
   // power: recorded average (or Strava's indoors), best efforts, intensity vs the FTP estimate at that date
-  const W = pwAvg(a), pwb = m.pw || {}, ftp = ftpEst(peers, +d), IF = isNum(m.np) && ftp ? m.np / ftp : null;
+  const self = peers.find(p => p.id === a.id) || { ...a, _t: +d };
+  const W = pwAvg(a), pwb = m.pw || {}, FT = ftpAt(peers, +d, self), ftp = FT && FT.w, IF = isNum(m.np) && ftp ? m.np / ftp : null;
+  const load = isNum(IF) ? a.elapsed_s / 3600 * IF * IF * 100 : null;
+  const cad = isNum(a.cad_avg) ? a.cad_avg : a.s_avg_cad, vmax = isNum(a.kmh_max) ? a.kmh_max : a.s_max_speed ? a.s_max_speed * 3.6 : null;
   const avg = a.kmh_moving;
   const L = m.laps;
   app.innerHTML = `
@@ -1390,14 +1428,14 @@ async function viewSession(id) {
       { k: "Avg speed (elapsed)", v: f2(a.kmh_elapsed), s: `${pace(a.kmh_elapsed)} /km` },
       { k: "Best 5 / 10 / 20 min", v: `${f1(a.best5min_kmh)}`, s: `${f1(a.best10min_kmh)} · ${f1(a.best20min_kmh)} km/h` },
       { k: "Best 30 / 60 min", v: f1(m.b30), s: `${f1(m.b60)} km/h` },
-      { k: "Top speed (30 s)", v: f1(a.best30_kmh), s: "km/h" },
+      { k: "Top speed (30 s)", v: f1(a.best30_kmh), s: isNum(vmax) ? `km/h · max ${f1(vmax)}` : "km/h" },
       ...(L ? [{ k: "Laps", v: `${L.laps.length}`, s: `${f2(L.lap_km)} km circuit` }] : []),
       ...(m.route === "out-back" ? [{ k: "Wind-neutral 10 min", v: f2(m.wind_neutral), s: `out ${pct(m.asym_pct)} vs back`, hl: 1 }] : []),
       ...(a.hr_avg ? [{ k: "Heart rate", v: f0(a.hr_avg), s: `avg · max ${f0(a.hr_max)} bpm` }, { k: "Efficiency", v: a.best10min_kmh ? f2(a.best10min_kmh / a.hr_avg * 100) : "–", s: "best10 / HR ×100" }] : []),
-      ...(isNum(W) ? [{ k: "Power", v: f0(W) + " W", s: [isNum(m.np) && `NP ${f0(m.np)}`, isNum(a.watts_max) && `max ${f0(a.watts_max)} W`].filter(Boolean).join(" · ") || "avg (Strava)", hl: 1 }]
+      ...(isNum(W) ? [{ k: "Power", v: f0(W) + " W", s: [isNum(m.np) && `weighted ${f0(m.np)}`, isNum(a.watts_max) && `max ${f0(a.watts_max)} W`].filter(Boolean).join(" · ") || "avg (Strava)", hl: 1 }]
         : a.s_avg_watts ? [{ k: "Power (Strava est.)", v: f0(a.s_avg_watts) + " W", s: "estimated, no power meter" }] : []),
-      ...(isNum(pwb["1200"]) || isNum(pwb["300"]) ? [{ k: "Best 5 s / 1 / 5 / 20 min", v: f0(pwb["5"]) + " W", s: `${f0(pwb["60"])} · ${f0(pwb["300"])} · ${f0(pwb["1200"])} W` }] : []),
-      ...(isNum(IF) ? [{ k: "Intensity", v: IF.toFixed(2), s: `TSS ${f0(a.elapsed_s / 3600 * IF * IF * 100)} · FTP est. ${f0(ftp)} W` }] : []),
+      ...(isNum(IF) ? [{ k: "Intensity", v: IF.toFixed(2), s: `load ${f0(load)} · FTP ${f0(ftp)} W` + (isNum(a.f_if) ? ` · <span title="the intensity and training load your training app computed (its NP ${f0(a.f_np)} W)">app ${a.f_if.toFixed(2)} / ${f0(a.f_tss)}</span>` : "") }] : []),
+      ...(isNum(cad) ? [{ k: "Cadence", v: f0(cad), s: `rpm avg${isNum(a.cad_max) ? ` · max ${f0(a.cad_max)}` : ""}` }] : []),
       ...(isNum(W) && a.hr_avg ? [{ k: "Power / HR", v: (W / a.hr_avg).toFixed(2), s: "W per bpm" }] : []),
       { k: "Ascent", v: f0(a.ascent_m) + " m" },
       ...(a.cond && isNum(a.cond.temp) ? [{ k: "Weather", v: `${f0(a.cond.temp)}°C`, s: `wind ${fwind(a.cond)}${isNum(a.cond.gust) ? ` · gusts ${f0(a.cond.gust)}` : ""}` }] : a.cond && a.cond.pending ? [{ k: "Weather", v: "…", s: "loading" }] : []),
@@ -1425,6 +1463,7 @@ async function viewSession(id) {
     <div class="grid g2">
       ${m.route === "out-back" ? `<div class="panel"><h2>Out / back legs</h2><div id="t-legs"></div>
         <div class="note">Wind-neutral averages the two legs' best 10 min. Adjusted first removes each leg's estimated wind and slope effect.</div></div>` : ""}
+      ${m.pw ? `<div class="panel"><h2>Power <span class="muted">zones as % of FTP ${f0(ftp)} W (${esc(FT ? FT.note : "none")})</span></h2><div id="p-power"></div></div>` : ""}
       ${hasHr ? `<div class="panel"><h2>Heart-rate zones <span class="muted">HRmax ${S.hrmax} bpm</span></h2><div id="t-zones"></div></div>` : ""}
       <div class="panel" id="p-segs" hidden></div>
       <div class="panel"><h2>Same route, other sessions</h2><div class="scroll" id="t-same"></div></div>
@@ -1543,7 +1582,7 @@ async function viewSession(id) {
     if (!hasPw || !$("#c-pw")) return;
     const xi = xmode === "km" ? 1 : 0, xf = xmode === "km" ? v => v.toFixed(0) : v => dur(v);
     const vals = ser.map(r => r[7]).filter(isNum), top = Math.max(50, (quantile(vals, .995) || 300) * 1.1);
-    $("#pw-sum").textContent = `30 s mean · avg ${f0(W)} W` + (isNum(m.np) ? ` · NP ${f0(m.np)} W` : "") + (ftp ? ` · FTP est. ${f0(ftp)} W` : "");
+    $("#pw-sum").textContent = `30 s mean · avg ${f0(W)} W` + (isNum(m.np) ? ` · weighted ${f0(m.np)} W` : "") + (ftp ? ` · FTP ${f0(ftp)} W` : "");
     const idxOf = new Map(ser.map((r, j) => [r[xi], j]));
     const x0 = ser[0][xi], x1 = ser[ser.length - 1][xi];
     pwChart = chart($("#c-pw"), {
@@ -1553,7 +1592,7 @@ async function viewSession(id) {
         { name: "power", kind: "area", color: "#c77dff", opacity: .25, legend: false, data: ser.map((r, j) => ({ x: r[xi], y: r[7], ref: j })) },
         { name: "power", kind: "line", color: "#c77dff", width: 1.4, data: ser.map((r, j) => ({ x: r[xi], y: r[7], ref: j })) },
         ...(isNum(W) ? [{ name: `avg ${f0(W)}`, kind: "line", color: "#ff7a1a", width: 1, dash: "5 4", data: [{ x: x0, y: W }, { x: x1, y: W }] }] : []),
-        ...(ftp ? [{ name: `FTP est. ${f0(ftp)}`, kind: "line", color: "#ffd166", width: 1, dash: "2 3", data: [{ x: x0, y: ftp }, { x: x1, y: ftp }] }] : []),
+        ...(ftp ? [{ name: `FTP ${f0(ftp)}`, kind: "line", color: "#ffd166", width: 1, dash: "2 3", data: [{ x: x0, y: ftp }, { x: x1, y: ftp }] }] : []),
       ],
       tip: x => { const j = idxOf.get(x); if (j == null) return ""; const r = ser[j]; return `<b>${f2(r[1])} km · ${dur(r[0], true)}</b><div class="row"><span>power</span><span>${f0(r[7])} W${ftp && r[7] != null ? ` · ${f0(r[7] / ftp * 100)}% FTP` : ""}</span></div><div class="row"><span>speed</span><span>${f1(r[2])} km/h</span></div>` + (r[3] ? `<div class="row"><span>HR</span><span>${r[3]} bpm</span></div>` : ""); },
       onHover: x => { map && map.mark(x == null ? null : idxOf.get(x)); speedChart && speedChart.cursor(x); eleChart && eleChart.cursor(x); },
@@ -1665,6 +1704,16 @@ async function viewSession(id) {
       selLeg ? hl.highlightBy(1, selLeg === "out" ? 0 : m.turn_km, selLeg === "out" ? m.turn_km : end, false) : hl.highlightBy(1, null);
       $("#t-legs").querySelectorAll("tr[data-leg]").forEach(r => r.classList.toggle("sel", r.dataset.leg === selLeg));
     });
+  }
+  if (m.pw) {
+    const st = (k, v, u = "W", t = "") => `<div class="pstat"${t ? ` title="${esc(t)}"` : ""}><span>${k}</span><div><b>${v}</b>${v === "–" ? "" : ` <small>${u}</small>`}</div></div>`;
+    const pp = (lbl, w) => st(lbl, isNum(pwb[w]) && pwb[w] > 0 ? f0(pwb[w]) : "–");
+    const zs = m.pw_zero_s, dt = a.elapsed_s || 1;
+    $("#p-power").innerHTML = (ftp && m.pw_hist ? zoneStrip(pzSecs(m.pw_hist, ftp), PZONES, i => `${pzLabel(i, ftp)} · ${PZONES[i].d}`) : "") +
+      `<div class="pstats"><div>${st("Avg power", f0(W))}${st("Max power", f0(a.watts_max))}${st("Weighted power", f0(m.np), "W", "normalized power (Coggan): what a steady effort of the same cost would be")}${isNum(zs) ? st("Zero power", `${f0(zs)} s / ${f0(zs / dt * 100)}`, "%") : ""}</div>
+        <div>${pp("Best 5 s", "5")}${pp("Best 30 s", "30")}${pp("Best 1 min", "60")}${pp("Best 5 min", "300")}</div>
+        <div>${pp("Best 20 min", "1200")}${pp("Best 30 min", "1800")}${pp("Best 60 min", "3600")}${isNum(IF) ? st("Intensity / load", `${IF.toFixed(2)} / ${f0(load)}`, "") : ""}</div></div>
+      <div class="note">Intensity = weighted power ÷ FTP; load = hours × intensity² × 100 (Coggan's NP, IF and TSS, trademarks of TrainingPeaks). Set your FTP in the <a href="#/profile">profile</a> to override ${FT && FT.src === "app" ? "the one from your training app" : "the estimate"}.</div>`;
   }
   if (hasHr) {
     const z = zoneSecs(m.hr_hist, S.hrmax), tot = z.reduce((x, y) => x + y, 0) || 1;
@@ -1976,7 +2025,7 @@ async function boot() {
   addEventListener("hashchange", route);
   let rt; addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(() => { if (!/^#\/(map|segment)/.test(location.hash)) route(); }, 200); });
   initImport();
-  api("profile").then(setProfileBtn).catch(() => { });
+  await api("profile").then(setProfileBtn).catch(() => { });  // FTP / weight before the first page
   pollStatus();
   route();
 }
