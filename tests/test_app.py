@@ -603,6 +603,10 @@ class ByeEndpoint(unittest.TestCase):
         self.assertEqual(self.post("/api/bye?app=1", {"Origin": self.origin}), 204)
         self.assertEqual(self.post("/api/bye", {"Origin": f"http://localhost:{self.port}",
                                                 "Host": f"localhost:{self.port}"}), 204)
+        # the handler answers 204 before calling on_bye: wait for the callbacks
+        end = time.monotonic() + 5
+        while len(self.byes) < 2 and time.monotonic() < end:
+            time.sleep(0.01)
         self.assertEqual(self.byes, ["1", None])  # the window token is passed through
 
     def test_without_launcher_is_harmless(self):
