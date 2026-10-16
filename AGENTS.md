@@ -45,7 +45,10 @@ data/rollbook.db          SQLite: 1866 activities, 4.07M samples   (gitignored)
 data/cache/archives/    extracted Strava export                  (gitignored)
 exports/*.zip           raw Strava account exports, by request date (gitignored)
 LICENSE                 GPL-3.0 text
-tests/                  unittest suite (parsing, logic, end-to-end API); run in CI
+tests/                  unittest suite (parsing, logic, importer, app, weather, laps, FTP, end-to-end API); run in CI
+tools/demo.py           synthetic demo athlete (export + DB + seeded caches), never real data
+tools/screenshots.py    regenerates docs/screenshots/*.png from the demo, headless Chrome, --offline
+CHANGELOG.md            release notes; `rollbook --version` = __version__ in bin/rollbook
 samples/*.gpx           two hand-checked rides used as regression fixtures
 web/server.py           `rollbook web`: stdlib HTTP server + JSON API, read-only DB
 web/segments.py         auto-generated segments + effort matching
@@ -384,12 +387,21 @@ swim, two 30-second-sampling skates) — find them via `km_diff_pct`.
 
 ## Tests
 
-`python3 -m unittest discover -s tests -t tests` (stdlib only, ~2 s, no
+`python3 -m unittest discover -s tests -t tests` (stdlib only, ~10 s, no
 network; `tests/helpers.py` points `ROLLBOOK_HOME` at a temp dir). CI:
 `.github/workflows/tests.yml` on every push / PR, ubuntu/macos/windows ×
 Python 3.9 and 3.13, plus `node --check` on the JS. `tests/helpers.py` also
 writes synthetic FIT files (either endianness, optional sport/session
 messages), so add a test there when a new device quirk turns up.
+
+Screenshots: `python3 tools/screenshots.py` (needs Chrome) builds the demo
+athlete in `$TMPDIR/rollbook-demo` if missing (`tools/demo.py`, ~20 s,
+deterministic) and shoots progress / session / segment / map / power pages
+at 1440 px wide. Delete that directory after changing `demo.py`. Never
+screenshot real data: GPS tracks reveal home.
+
+Releases: bump `__version__` in `bin/rollbook`, add a `## x.y.z (date)`
+section to `CHANGELOG.md` (a test checks it exists), tag `vx.y.z` on master.
 
 ## Regression fixtures
 
