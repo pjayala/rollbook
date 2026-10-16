@@ -98,11 +98,16 @@ has `activities.csv` metadata and the existing copy doesn't, it replaces it.
 Or from the dashboard: **⇪ Import** (or drag files onto the page). It takes the
 export `.zip` (stored in `exports/`, renamed `-2`, `-3`… if a different file
 has the same name, since archives are reused by stem) and/or single
-`.fit/.gpx/.tcx(.gz)` files (stored in `data/imports/activities/`, with a row
+`.fit/.gpx/.tcx(.gz)` files (stored in `data/imports/activities/`, likewise
+`-2`, `-3`… for same name / other content — HUAWEI names every
+"Export Original" `Outdoor_cycle.fit` — with a row
 in `data/imports/activities.csv` holding the sport picked in the dialog and a
 name from the file name; `data/imports` is then built like an export). The
-build and `enrich --missing` run as a subprocess; the page polls
-`GET /api/import` and reloads its data when done. Upload/run are POSTs that
+build and `enrich --missing` run as a subprocess (enrich whenever the set of
+activity ids changed, so a dedup replacement is enriched too); the page polls
+`GET /api/import` and reloads its data when done. The dashboard also works on
+a DB that was never enriched (`best<N>min_kmh` are optional columns, NULL).
+Upload/run are POSTs that
 need an `X-Rollbook: 1` header, a 127.0.0.1/localhost `Host` and no foreign
 `Origin` (CSRF + DNS rebinding). Files without a CSV id get a stable id from
 a SHA-1 of their path (it used to be Python's salted `hash()`).
@@ -200,8 +205,11 @@ changing `derive()`.
   in `--app` mode with its own profile in `data/cache/app-profile`, else a
   tab. It stops when the window closes: `webview.start()` returns, the browser
   process exits (Windows/Linux), or — macOS, where Chrome outlives its window
-  — the page's `pagehide` beacon (`POST /api/bye`, only with `?app=1` and a
-  same-origin `Origin` header) isn't followed by a reload within 4 s. If the
+  — the page's `pagehide` beacon (`POST /api/bye?app=<token>`, same-origin
+  `Origin` header) isn't followed by a reload within 4 s. The token is random
+  per launch (`?app=<token>` on the window URL): only that launcher's beacon
+  counts, and only a page load carrying its token is a reload, so a second
+  `rollbook app` reusing the server can close its window safely. If the
   port already answers `/api/status`, it just opens a window on that server.
   Window storage (segment names, settings) is per engine/profile, so it is
   not shared with your normal browser.
