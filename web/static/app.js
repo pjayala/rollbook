@@ -2007,9 +2007,12 @@ function initImport() {
 }
 
 // In the desktop app the server stops once its window is gone. pagehide also
-// fires on reload, so the launcher waits a few seconds for a new page.
+// fires on reload, so the launcher waits a few seconds for a new page. The
+// ?app=<token> is per launcher, so closing a second window that reuses this
+// server doesn't stop the launcher that owns it.
 if (new URLSearchParams(location.search).has("app"))
-  addEventListener("pagehide", () => navigator.sendBeacon("/api/bye"));
+  addEventListener("pagehide", () => navigator.sendBeacon(
+    "/api/bye?app=" + encodeURIComponent(new URLSearchParams(location.search).get("app"))));
 
 async function boot() {
   [S.types, { hrmax: S.hrmax }, S.favs] = await Promise.all([api("types"), api("hrmax"), api("favorites")]);
