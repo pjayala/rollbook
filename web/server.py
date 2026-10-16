@@ -66,11 +66,13 @@ MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=ut
         ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml",
         ".png": "image/png", ".ico": "image/x-icon"}
 
-# columns added by later `db build` migrations: listed when the DB has them, else NULL
-OPT_COLS = ("watts_avg", "watts_max", "cad_avg", "cad_max", "kmh_max", "f_avg_watts", "f_np", "f_if", "f_tss", "f_ftp")
+# columns added later — by `db build` migrations, or by `db enrich` (best<N>min_kmh,
+# absent until the first enrich): listed when the DB has them, else NULL
+OPT_COLS = ("best5min_kmh", "best10min_kmh", "best20min_kmh",
+            "watts_avg", "watts_max", "cad_avg", "cad_max", "kmh_max", "f_avg_watts", "f_np", "f_if", "f_tss", "f_ftp")
 LIST_COLS = (
     "id, date, datetime, name, type, device, gear, km, elapsed_s, moving_s, pause_s, "
-    "kmh_moving, kmh_elapsed, best30_kmh, best5min_kmh, best10min_kmh, best20min_kmh, "
+    "kmh_moving, kmh_elapsed, best30_kmh, "
     "hr_avg, hr_max, ascent_m, descent_m, s_avg_watts, s_max_watts, s_avg_cad, "
     "s_calories, s_rel_effort, km_diff_pct, samples, has_gps"
 )
@@ -963,10 +965,14 @@ def make_handler(db_path, M, tiles):
                                        default=str))
 
         def do_GET(self):
-            self.server.last_request = time.monotonic()  # app launcher: reload vs. closed window
+            now = time.monotonic()
+            self.server.last_request = now
             u = urllib.parse.urlparse(self.path)
             q = {k: v[-1] for k, v in urllib.parse.parse_qs(u.query).items()}
             p = u.path
+            if "app" in q and not p.startswith(("/api/", "/tiles/")):
+                # app launcher: a page load of window <token> after its bye = a reload
+                self.server.app_pages[q["app"]] = now
             try:
                 if p.startswith("/api/"):
                     return self.route_api(p[5:], q)
@@ -1006,11 +1012,10 @@ def make_handler(db_path, M, tiles):
                 # custom header possible; Origin is always set for beacons)
                 if not self._same_origin() or not self.headers.get("Origin"):
                     return self._reject(403, "forbidden", "text/plain")
-                self.send(204, b"", "text/plain")
                 cb = getattr(self.server, "on_bye", None)
-                if cb:
-                    cb()
-                return
+                if cb:  # before answering (it only stamps a time): a 204 means it was seen
+                    cb(q.get("app"))  # which window: a reused server also serves other launchers' windows
+                return self.send(204, b"", "text/plain")
             if u.path == "/api/profile":
                 if not self._same_origin() or self.headers.get("X-Rollbook") != "1":
                     return self._reject(403, json.dumps({"error": "forbidden"}))
@@ -1144,7 +1149,8 @@ def start(db_path, cache_path, port=8765, offline=False):
     GEO = geonames.Geonames(os.path.join(os.path.dirname(cache_path), "geonames.json"), offline)
     httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(db_path, M, tiles))
     httpd.daemon_threads = True
-    httpd.on_bye = None  # set by the app launcher: called when the page's window closes
+    httpd.on_bye = None  # set by the app launcher: called with the window token when a page closes
+    httpd.app_pages = {}  # window token -> monotonic time of its last page load
     url = f"http://127.0.0.1:{httpd.server_address[1]}/"
     print(f"serving {url}  (db {db_path}, tiles {'cache only' if offline else 'online + cache'})")
     return httpd, M, url

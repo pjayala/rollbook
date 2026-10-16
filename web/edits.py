@@ -84,8 +84,17 @@ class Edits:
     def sync(self, db):
         """Install / refresh the TEMP overlay on one connection (cheap when current)."""
         try:
-            v = db.execute("SELECT v FROM temp.rollbook_edits_v").fetchone()[0]
+            v, ncols = db.execute("SELECT v, ncols FROM temp.rollbook_edits_v").fetchone()
         except sqlite3.OperationalError:
+            if not self._create(db):
+                return
+            v, ncols = 0, None
+        if ncols is not None and ncols != self._ncols(db):
+            # `db build` migrations / `db enrich` added columns since the views were
+            # made (they list columns explicitly): rebuild them
+            for kind, name in (("VIEW", "activities"), ("VIEW", "activities_all"),
+                               ("TABLE", "rollbook_edits"), ("TABLE", "rollbook_edits_v")):
+                db.execute(f"DROP {kind} IF EXISTS temp.{name}")
             if not self._create(db):
                 return
             v = 0
@@ -102,14 +111,18 @@ class Edits:
         db.commit()
 
     @staticmethod
+    def _ncols(db):
+        return len(db.execute("PRAGMA main.table_info(activities)").fetchall())
+
+    @staticmethod
     def _create(db):
         cols = [r[1] for r in db.execute("PRAGMA main.table_info(activities)")]
         if not cols:
             return False
         db.execute("CREATE TEMP TABLE rollbook_edits (id INTEGER PRIMARY KEY, name TEXT, type TEXT, "
                    "hidden INTEGER, deleted INTEGER)")
-        db.execute("CREATE TEMP TABLE rollbook_edits_v (v INTEGER)")
-        db.execute("INSERT INTO temp.rollbook_edits_v VALUES (0)")
+        db.execute("CREATE TEMP TABLE rollbook_edits_v (v INTEGER, ncols INTEGER)")
+        db.execute("INSERT INTO temp.rollbook_edits_v VALUES (0, ?)", (len(cols),))
         sel = ", ".join(f'COALESCE(e."{c}", a."{c}") AS "{c}"' if c in OVERRIDES else f'a."{c}"'
                         for c in cols)
         src = "FROM main.activities a LEFT JOIN temp.rollbook_edits e ON e.id = a.id"
