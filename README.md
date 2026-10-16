@@ -53,8 +53,10 @@ GPS: runs, rides, walks, skates, plus indoor rides from ROUVY or MyWhoosh.
   wind, slope and "other", giving a conditions-adjusted speed. Plus speed vs
   temperature.
 - **Power** for indoor rides (smart trainer, from the original files):
-  average, normalized power, best 5 s to 60 min, an FTP estimate with
-  intensity and TSS, watts per heartbeat, and a power chart per session.
+  average, weighted power, best 5 s to 60 min, zero-power time, power zones
+  per session and per month, intensity and training load against your FTP
+  (from the profile, from ROUVY's files, or estimated), cadence, watts per
+  heartbeat, and a power chart per session.
 - **Calories:** Rollbook's own per-sport estimate, from measured power for
   indoor rides, the ACSM equations for running and walking, and
   speed-based METs for skating and outdoor rides. Watches and Strava differ

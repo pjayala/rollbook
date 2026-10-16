@@ -112,6 +112,22 @@ class Power(unittest.TestCase):
             self.assertAlmostEqual(c["watts_avg"], 299 * 100 / 299, delta=0.5)
             self.assertEqual(c["watts_max"], 200)
 
+    def test_session_power_summary_and_app_ftp(self):
+        """ROUVY's own avg / NP / IF / TSS; it doesn't store FTP, but FTP = NP / IF."""
+        d = tmpdir(self)
+        p = os.path.join(d, "a.fit")
+        write_fit(p, [(*x, 160, 90 if i % 10 else 0) for i, x in enumerate(line_points(120))],
+                  session_sport=2, session_fields={20: 160, 21: 281, 34: 163, 35: 468, 36: 869})
+        meta, s = rb.load_file(p)
+        self.assertEqual(meta["session"], {"f_avg_watts": 160, "f_max_watts": 281, "f_np": 163,
+                                           "f_if": 0.869, "f_tss": 46.8, "f_ftp": 188})
+        c = rb.core(s)
+        self.assertEqual((c["cad_avg"], c["cad_max"]), (90, 90))  # 0 rpm (not pedalling) left out
+        write_fit(p, line_points(50), session_sport=2)
+        meta, s = rb.load_file(p)
+        self.assertIsNone(meta["session"]["f_ftp"])
+        self.assertIsNone(rb.core(s)["cad_avg"])
+
     def test_no_power_channel(self):
         d = tmpdir(self)
         p = os.path.join(d, "a.fit")

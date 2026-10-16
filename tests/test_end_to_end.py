@@ -160,6 +160,9 @@ class Api(Build):
         self.assertEqual(code, 200, body)
         self.assertEqual(self.get("/api/profile")["weight_kg"], 70.0)
         self.assertEqual(self.post("/api/profile", b'{"weight_kg": 9999}', h)[0], 400)
+        self.assertEqual(self.post("/api/profile", b'{"ftp": 20}', h)[0], 400)
+        code, _ = self.post("/api/profile", b'{"weight_kg": 70, "sex": "male", "birth_year": 1985, "ftp": 185}', h)
+        self.assertEqual((code, self.get("/api/profile")["ftp"]), (200, 185))
         a = next(x for x in self.get("/api/activities?type=Inline%20Skate") if x["id"] == 1001)
         self.assertGreater(a["kcal"], 300)
         self.assertTrue(a["kcal_src"].startswith("MET"))
@@ -231,8 +234,9 @@ class PowerBuild(unittest.TestCase):
         os.makedirs(os.path.join(self.export, "activities"))
         t0 = datetime(2026, 3, 1, 8, 0, tzinfo=timezone.utc)
         # indoor: no GPS, 30 min of 180 W with 30 s of 400 W in the middle
-        pts = [(t0 + timedelta(seconds=i), None, None, 20.0, 130, 400 if 900 <= i < 930 else 180) for i in range(1800)]
-        write_fit(os.path.join(self.export, "activities", "ride.fit"), pts)
+        pts = [(t0 + timedelta(seconds=i), None, None, 20.0, 130, 400 if 900 <= i < 930 else 180, 85) for i in range(1800)]
+        write_fit(os.path.join(self.export, "activities", "ride.fit"), pts, session_sport=2,
+                  session_fields={20: 184, 34: 190, 35: 451, 36: 950})
         with open(os.path.join(self.export, "activities.csv"), "w", newline="") as f:
             csv.writer(f).writerows([["Activity ID", "Activity Date", "Activity Name", "Activity Type", "Filename", "Average Watts"],
                                      ["2001", "", "ROUVY test", "Virtual Ride", "activities/ride.fit", "184"]])
@@ -254,6 +258,10 @@ class PowerBuild(unittest.TestCase):
         self.addCleanup(con.close)
         a = next(x for x in server.api_activities(con, {"type": "Virtual Ride"}, M) if x["id"] == 2001)
         self.assertEqual(round(a["pw5s"]), 400)
+        self.assertEqual(round(a["pw30s"]), 400)
+        self.assertEqual(round(a["pw30m"]), round(a["watts_avg"]))
+        self.assertEqual(sum(a["pw_hist"].values()), 1800)
+        self.assertEqual((a["f_np"], a["f_ftp"], a["cad_avg"]), (190, 200, 85))
         self.assertAlmostEqual(a["pw20m"], (30 * 400 + 1170 * 180) / 1200, delta=1)
         self.assertGreater(a["np"], a["watts_avg"])
         s = server.api_activity(con, {}, M, 2001)
@@ -263,7 +271,8 @@ class PowerBuild(unittest.TestCase):
     def test_older_db_is_migrated_in_place(self):
         from helpers import load_tool
         old = load_tool().SCHEMA  # the schema as it was before the power columns
-        old = old.replace(",\n  watts_avg     REAL, watts_max REAL", "").replace(",\n  watts INTEGER", "")
+        import re
+        old = re.sub(r"parse_error TEXT,.*?\n\);", "parse_error TEXT\n);", old, count=1, flags=re.S).replace(",\n  watts INTEGER", "")
         self.assertNotIn("watts", old.replace("s_avg_watts", "").replace("s_max_watts", ""))
         db = sqlite3.connect(os.path.join(self.home, "rollbook.db"))
         db.executescript(old)

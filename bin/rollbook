@@ -434,7 +434,7 @@ def fit_load(path):
     data_size = struct.unpack("<I", buf[4:8])[0]
     pos, end = hdr, min(len(buf), hdr + data_size)
 
-    defs, recs, sport, session_sport = {}, [], None, None
+    defs, recs, sport, session_sport, session = {}, [], None, None, None
     while pos < end:
         rh = buf[pos]
         pos += 1
@@ -502,8 +502,8 @@ def fit_load(path):
             recs.append(vals)
         elif gmsg == 12 and sport is None:  # sport
             sport = vals
-        elif gmsg == 18 and session_sport is None:  # session: sport is field 5
-            session_sport = vals.get(5)
+        elif gmsg == 18 and session is None:  # session: sport is field 5
+            session, session_sport = vals, vals.get(5)
 
     if not recs:
         die(f"{path}: FIT contained no record messages")
@@ -536,7 +536,26 @@ def fit_load(path):
     # "Export Original" files (e.g. HUAWEI) often have no sport message, only
     # the session's sport field
     typ = SPORTS.get(sport.get(0) if sport else session_sport, "unknown")
-    return pts_to_streams(pts, name, typ, path)
+    meta, s = pts_to_streams(pts, name, typ, path)
+    meta["session"] = fit_session_power(session or {})
+    return meta, s
+
+
+def fit_session_power(v):
+    """The device's / app's own power summary from the FIT session message.
+
+    ROUVY and MyWhoosh write avg/max power, normalized power, intensity
+    factor and training stress here (fields 20, 21, 34, 36 /1000, 35 /10), but
+    not the threshold power they used. That one follows: FTP = NP / IF.
+    """
+    np_, if_ = v.get(34), v.get(36)
+    out = {
+        "f_avg_watts": v.get(20), "f_max_watts": v.get(21), "f_np": np_,
+        "f_if": if_ / 1000 if if_ else None,
+        "f_tss": v.get(35) / 10 if v.get(35) is not None else None,
+    }
+    out["f_ftp"] = round(np_ / out["f_if"]) if np_ and out["f_if"] else None
+    return out
 
 
 LOADERS = ((".gpx", gpx_load), (".tcx", tcx_load), (".fit", fit_load))
@@ -758,11 +777,18 @@ def core(s):
             best30 = max(best30, (dist[i + 30] - dist[i]) / dt * 3.6)
     hrs = [x for x in hr if x]
     pw = [w for w in (s.get("watts") or {}).get("data") or [] if w is not None]
+    cad = [x for x in (s.get("cadence") or {}).get("data") or [] if x]
+    spd = [x for x in (s.get("velocity_smooth") or {}).get("data") or [] if x is not None and x < MAX_MS]
     return {
         # mean of the recorded readings, zeros (coasting) included: matches
         # Strava's "Average Watts" to < 0.5 W on 84 indoor rides
         "watts_avg": statistics.mean(pw) if pw else None,
         "watts_max": max(pw) if pw else None,
+        # pedalling cadence: 0 rpm is "not pedalling", left out like Strava does
+        "cad_avg": statistics.mean(cad) if cad else None,
+        "cad_max": max(cad) if cad else None,
+        # top of the device's own speed channel (indoor: the trainer's), km/h
+        "kmh_max": max(spd) * 3.6 if spd else None,
         "ascent_est": climb(sm),
         "km": dist[-1] / 1000 if has_dist else None,
         "elapsed": elapsed,
@@ -1199,7 +1225,10 @@ CREATE TABLE IF NOT EXISTS activities (
   descent_m     REAL, ele_min REAL, ele_max REAL,
   hr_avg        REAL, hr_max REAL,
   samples       INTEGER, has_gps INTEGER, parse_error TEXT,
-  watts_avg     REAL, watts_max REAL  -- recorded power (power meter / smart trainer)
+  watts_avg     REAL, watts_max REAL, -- recorded power (power meter / smart trainer)
+  cad_avg       REAL, cad_max REAL, kmh_max REAL,
+  -- the FIT session's own power summary (ROUVY / MyWhoosh); f_ftp = f_np / f_if
+  f_avg_watts   REAL, f_max_watts REAL, f_np REAL, f_if REAL, f_tss REAL, f_ftp REAL
 );
 CREATE TABLE IF NOT EXISTS splits (
   activity_id INTEGER, km INTEGER,
@@ -1233,6 +1262,9 @@ CREATE VIEW IF NOT EXISTS v_activities AS
 MIGRATIONS = (
     ("activities", "watts_avg", "REAL"), ("activities", "watts_max", "REAL"),
     ("samples", "watts", "INTEGER"),
+    ("activities", "cad_avg", "REAL"), ("activities", "cad_max", "REAL"), ("activities", "kmh_max", "REAL"),
+    ("activities", "f_avg_watts", "REAL"), ("activities", "f_max_watts", "REAL"), ("activities", "f_np", "REAL"),
+    ("activities", "f_if", "REAL"), ("activities", "f_tss", "REAL"), ("activities", "f_ftp", "REAL"),
 )
 
 
@@ -1398,6 +1430,8 @@ def cmd_db_build(a):
                 "ele_min": c["ele_min"], "ele_max": c["ele_max"],
                 "hr_avg": c["hr_avg"] or None, "hr_max": c["hr_max"] or None,
                 "watts_avg": c["watts_avg"], "watts_max": c["watts_max"],
+                "cad_avg": c["cad_avg"], "cad_max": c["cad_max"], "kmh_max": c["kmh_max"],
+                **(meta.get("session") or {}),
                 "samples": len(c["_t"]),
                 "has_gps": 1 if c["_ll"] and any(_valid_ll(p) for p in c["_ll"]) else 0,
                 "parse_error": None,
