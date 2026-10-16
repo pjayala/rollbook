@@ -1012,11 +1012,10 @@ def make_handler(db_path, M, tiles):
                 # custom header possible; Origin is always set for beacons)
                 if not self._same_origin() or not self.headers.get("Origin"):
                     return self._reject(403, "forbidden", "text/plain")
-                self.send(204, b"", "text/plain")
                 cb = getattr(self.server, "on_bye", None)
-                if cb:
+                if cb:  # before answering (it only stamps a time): a 204 means it was seen
                     cb(q.get("app"))  # which window: a reused server also serves other launchers' windows
-                return
+                return self.send(204, b"", "text/plain")
             if u.path == "/api/profile":
                 if not self._same_origin() or self.headers.get("X-Rollbook") != "1":
                     return self._reject(403, json.dumps({"error": "forbidden"}))
