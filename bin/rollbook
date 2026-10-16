@@ -248,7 +248,7 @@ def parse_time(s):
 
 
 def pts_to_streams(pts, meta_name, meta_type, path):
-    """pts: list of (dt, lat|None, lon|None, ele, hr, cad, dist|None, speed|None).
+    """pts: list of (dt, lat|None, lon|None, ele, hr, cad, dist|None, speed|None[, watts|None]).
 
     Partial GPS is preserved: devices routinely emit samples before the first
     fix (FIT writes 0x7FFFFFFF, TCX omits <Position>), so the channel is kept
@@ -283,6 +283,9 @@ def pts_to_streams(pts, meta_name, meta_type, path):
         s["heartrate"] = {"data": [p[4] for p in pts]}
     if any(p[5] for p in pts):
         s["cadence"] = {"data": [p[5] for p in pts]}
+    # power: 0 W is a real reading (coasting), only None means "not recorded"
+    if any(len(p) > 8 and p[8] is not None for p in pts):
+        s["watts"] = {"data": [p[8] if len(p) > 8 else None for p in pts]}
     meta = {
         "name": meta_name or os.path.basename(path),
         "type": meta_type or "unknown",
@@ -290,6 +293,22 @@ def pts_to_streams(pts, meta_name, meta_type, path):
         "source": path,
     }
     return meta, s
+
+
+POWER_TAGS = ("power", "PowerInWatts", "Watts")  # GPX (Strava, gpxpx) and TCX (ns3:TPX)
+MAX_WATTS = 3000  # above any human sprint: a corrupt reading
+
+
+def _ext_power(node):
+    """Watts from a GPX trkpt / TCX Trackpoint extension, any namespace, or None."""
+    for e in node.iter():
+        if e.tag.rsplit("}", 1)[-1] in POWER_TAGS and e.text:
+            try:
+                w = float(e.text)
+            except ValueError:
+                return None
+            return int(round(w)) if 0 <= w < MAX_WATTS else None
+    return None
 
 
 def gpx_load(path):
@@ -308,6 +327,7 @@ def gpx_load(path):
         ele = p.find(f"{GNS}ele")
         hr = p.find(f".//{TPX}hr")
         cad = p.find(f".//{TPX}cad")
+        pw = _ext_power(p)
         pts.append(
             (
                 parse_time(tm.text),
@@ -318,6 +338,7 @@ def gpx_load(path):
                 int(cad.text) if cad is not None and cad.text else 0,
                 None,
                 None,
+                pw,
             )
         )
     return pts_to_streams(
@@ -367,6 +388,7 @@ def tcx_load(path):
                 int(num("Cadence") or 0),
                 num("DistanceMeters"),
                 None,
+                _ext_power(tp),
             )
         )
     return pts_to_streams(pts, os.path.basename(path), typ, path)
@@ -412,7 +434,7 @@ def fit_load(path):
     data_size = struct.unpack("<I", buf[4:8])[0]
     pos, end = hdr, min(len(buf), hdr + data_size)
 
-    defs, recs, sport, session_sport = {}, [], None, None
+    defs, recs, sport, session_sport, session = {}, [], None, None, None
     while pos < end:
         rh = buf[pos]
         pos += 1
@@ -480,8 +502,8 @@ def fit_load(path):
             recs.append(vals)
         elif gmsg == 12 and sport is None:  # sport
             sport = vals
-        elif gmsg == 18 and session_sport is None:  # session: sport is field 5
-            session_sport = vals.get(5)
+        elif gmsg == 18 and session is None:  # session: sport is field 5
+            session, session_sport = vals, vals.get(5)
 
     if not recs:
         die(f"{path}: FIT contained no record messages")
@@ -507,13 +529,33 @@ def fit_load(path):
                 r.get(4) or 0,  # cadence
                 (r[5] / 100.0) if r.get(5) is not None else None,  # distance
                 (r[6] / 1000.0) if r.get(6) is not None else None,  # speed m/s
+                r.get(7) if r.get(7) is not None and r[7] < MAX_WATTS else None,  # power W
             )
         )
     name = os.path.basename(path)
     # "Export Original" files (e.g. HUAWEI) often have no sport message, only
     # the session's sport field
     typ = SPORTS.get(sport.get(0) if sport else session_sport, "unknown")
-    return pts_to_streams(pts, name, typ, path)
+    meta, s = pts_to_streams(pts, name, typ, path)
+    meta["session"] = fit_session_power(session or {})
+    return meta, s
+
+
+def fit_session_power(v):
+    """The device's / app's own power summary from the FIT session message.
+
+    ROUVY and MyWhoosh write avg/max power, normalized power, intensity
+    factor and training stress here (fields 20, 21, 34, 36 /1000, 35 /10), but
+    not the threshold power they used. That one follows: FTP = NP / IF.
+    """
+    np_, if_ = v.get(34), v.get(36)
+    out = {
+        "f_avg_watts": v.get(20), "f_max_watts": v.get(21), "f_np": np_,
+        "f_if": if_ / 1000 if if_ else None,
+        "f_tss": v.get(35) / 10 if v.get(35) is not None else None,
+    }
+    out["f_ftp"] = round(np_ / out["f_if"]) if np_ and out["f_if"] else None
+    return out
 
 
 LOADERS = ((".gpx", gpx_load), (".tcx", tcx_load), (".fit", fit_load))
@@ -734,7 +776,19 @@ def core(s):
         if dt > 0:
             best30 = max(best30, (dist[i + 30] - dist[i]) / dt * 3.6)
     hrs = [x for x in hr if x]
+    pw = [w for w in (s.get("watts") or {}).get("data") or [] if w is not None]
+    cad = [x for x in (s.get("cadence") or {}).get("data") or [] if x]
+    spd = [x for x in (s.get("velocity_smooth") or {}).get("data") or [] if x is not None and x < MAX_MS]
     return {
+        # mean of the recorded readings, zeros (coasting) included: matches
+        # Strava's "Average Watts" to < 0.5 W on 84 indoor rides
+        "watts_avg": statistics.mean(pw) if pw else None,
+        "watts_max": max(pw) if pw else None,
+        # pedalling cadence: 0 rpm is "not pedalling", left out like Strava does
+        "cad_avg": statistics.mean(cad) if cad else None,
+        "cad_max": max(cad) if cad else None,
+        # top of the device's own speed channel (indoor: the trainer's), km/h
+        "kmh_max": max(spd) * 3.6 if spd else None,
         "ascent_est": climb(sm),
         "km": dist[-1] / 1000 if has_dist else None,
         "elapsed": elapsed,
@@ -875,6 +929,8 @@ def cmd_analyze(a):
     if not c["has_distance"]:
         print(f"   no GPS and no distance channel (indoor / HR-only workout)")
         print(f"   elapsed {hm(c['elapsed'])} | HR avg {c['hr_avg']:.0f} max {c['hr_max']:.0f}")
+        if c["watts_avg"] is not None:
+            print(f"   power avg {c['watts_avg']:.0f} W | max {c['watts_max']:.0f} W")
         return
     print(
         f"   {c['km']:.3f} km | elapsed {hm(c['elapsed'])} | moving {hm(c['moving'])} "
@@ -888,6 +944,8 @@ def cmd_analyze(a):
         f"   ele {c['ele_min']:.0f}-{c['ele_max']:.0f} m | +{c['up']:.0f} -{c['dn']:.0f} m"
         f" | HR avg {c['hr_avg']:.0f} max {c['hr_max']:.0f}"
     )
+    if c["watts_avg"] is not None:
+        print(f"   power avg {c['watts_avg']:.0f} W | max {c['watts_max']:.0f} W")
     print(f"\n   km |  moving  | km/h  | pause | HR")
     for i, (lt, lm, h) in enumerate(splits(c), 1):
         print(
@@ -923,6 +981,7 @@ def cmd_compare(a):
         ("HR avg", lambda m, c: f"{c['hr_avg']:.0f}"),
         ("HR max", lambda m, c: f"{c['hr_max']:.0f}"),
         ("ascent", lambda m, c: f"+{c['up']:.0f}"),
+        ("power avg", lambda m, c: f"{c['watts_avg']:.0f} W" if c["watts_avg"] is not None else "-"),
         ("km/h per bpm", lambda m, c: f"{c['kmh_moving'] / c['hr_avg']:.4f}" if c["hr_avg"] and c["kmh_moving"] else "-"),
     ]
     w = max(len(m["name"][:18]) for m, _ in data) + 2
@@ -1165,7 +1224,11 @@ CREATE TABLE IF NOT EXISTS activities (
   kmh_moving    REAL, kmh_elapsed REAL, best30_kmh REAL,
   descent_m     REAL, ele_min REAL, ele_max REAL,
   hr_avg        REAL, hr_max REAL,
-  samples       INTEGER, has_gps INTEGER, parse_error TEXT
+  samples       INTEGER, has_gps INTEGER, parse_error TEXT,
+  watts_avg     REAL, watts_max REAL, -- recorded power (power meter / smart trainer)
+  cad_avg       REAL, cad_max REAL, kmh_max REAL,
+  -- the FIT session's own power summary (ROUVY / MyWhoosh); f_ftp = f_np / f_if
+  f_avg_watts   REAL, f_max_watts REAL, f_np REAL, f_if REAL, f_tss REAL, f_ftp REAL
 );
 CREATE TABLE IF NOT EXISTS splits (
   activity_id INTEGER, km INTEGER,
@@ -1174,7 +1237,8 @@ CREATE TABLE IF NOT EXISTS splits (
 );
 CREATE TABLE IF NOT EXISTS samples (
   activity_id INTEGER, t INTEGER,
-  lat REAL, lon REAL, ele REAL, hr INTEGER, cad INTEGER, dist_m REAL
+  lat REAL, lon REAL, ele REAL, hr INTEGER, cad INTEGER, dist_m REAL,
+  watts INTEGER
 );
 CREATE INDEX IF NOT EXISTS ix_act_date ON activities(date);
 CREATE INDEX IF NOT EXISTS ix_act_type ON activities(type);
@@ -1191,6 +1255,29 @@ CREATE VIEW IF NOT EXISTS v_activities AS
          ROUND(kmh_moving / NULLIF(hr_avg, 0), 4) AS kmh_per_bpm
   FROM activities WHERE parse_error IS NULL;
 """
+
+# columns added after the first release: (table, column, type). `db build`
+# adds whichever an older database lacks, so it keeps working in place; rows
+# imported before need `db build --fresh` once to fill them.
+MIGRATIONS = (
+    ("activities", "watts_avg", "REAL"), ("activities", "watts_max", "REAL"),
+    ("samples", "watts", "INTEGER"),
+    ("activities", "cad_avg", "REAL"), ("activities", "cad_max", "REAL"), ("activities", "kmh_max", "REAL"),
+    ("activities", "f_avg_watts", "REAL"), ("activities", "f_max_watts", "REAL"), ("activities", "f_np", "REAL"),
+    ("activities", "f_if", "REAL"), ("activities", "f_tss", "REAL"), ("activities", "f_ftp", "REAL"),
+)
+
+
+def migrate(db):
+    """Add missing MIGRATIONS columns; returns the ones added."""
+    added = []
+    for tbl, col, typ in MIGRATIONS:
+        if col not in {r[1] for r in db.execute(f"PRAGMA table_info({tbl})")}:
+            db.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {typ}")
+            added.append(f"{tbl}.{col}")
+    db.commit()
+    return added
+
 
 CSV_NUM = {
     "s_elapsed_s": "Elapsed Time", "s_moving_s": "Moving Time",
@@ -1300,6 +1387,10 @@ def cmd_db_build(a):
         os.remove(DB)
     db = sqlite3.connect(DB)
     db.executescript(SCHEMA)
+    added = migrate(db)
+    if added and db.execute("SELECT COUNT(*) FROM activities").fetchone()[0]:
+        print(f"added {', '.join(added)}; activities imported before stay empty there "
+              f"until a `db build --fresh`", file=sys.stderr)
     db.execute("PRAGMA journal_mode=WAL")
     db.execute("PRAGMA synchronous=OFF")
 
@@ -1338,6 +1429,9 @@ def cmd_db_build(a):
                 "descent_m": c["dn"],
                 "ele_min": c["ele_min"], "ele_max": c["ele_max"],
                 "hr_avg": c["hr_avg"] or None, "hr_max": c["hr_max"] or None,
+                "watts_avg": c["watts_avg"], "watts_max": c["watts_max"],
+                "cad_avg": c["cad_avg"], "cad_max": c["cad_max"], "kmh_max": c["kmh_max"],
+                **(meta.get("session") or {}),
                 "samples": len(c["_t"]),
                 "has_gps": 1 if c["_ll"] and any(_valid_ll(p) for p in c["_ll"]) else 0,
                 "parse_error": None,
@@ -1393,13 +1487,15 @@ def cmd_db_build(a):
                 t, d, ll = c["_t"], c["_d"], c["_ll"]
                 hr = s.get("heartrate", {}).get("data") or [None] * len(t)
                 cad = s.get("cadence", {}).get("data") or [None] * len(t)
+                pw = s.get("watts", {}).get("data") or [None] * len(t)
                 ele = s["altitude"]["data"]
                 db.execute("DELETE FROM samples WHERE activity_id=?", (aid,))
                 db.executemany(
-                    "INSERT INTO samples VALUES (?,?,?,?,?,?,?,?)",
+                    "INSERT INTO samples (activity_id, t, lat, lon, ele, hr, cad, dist_m, watts) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
                     [
                         (aid, t[i], ll[i][0] if ll else None, ll[i][1] if ll else None,
-                         ele[i], hr[i] or None, cad[i] or None, d[i])
+                         ele[i], hr[i] or None, cad[i] or None, d[i], pw[i])
                         for i in range(len(t))
                     ],
                 )

@@ -32,7 +32,7 @@ from datetime import datetime, timedelta, timezone
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-METRICS_VERSION = 12
+METRICS_VERSION = 15
 THR = 0.5  # m/s, pause threshold; must match bin/rollbook
 WINDOWS = (30, 45, 60)  # minutes; 5/10/20 already live in the DB via `db enrich`
 LEG_WINDOW = 10  # minutes, best effort per out/back leg
@@ -47,6 +47,11 @@ LAP_CAND_M = 80  # m, spacing of candidate gates along the track
 LAP_MIN_M = 150  # m, shortest lap considered (inline/athletics tracks are ~200-400 m)
 LAP_HEAD_COS = 0.7  # pass heading must be within ~45 deg of the gate heading
 TRACK_Q = 1e5  # lat/lon quantised to 1e-5 deg (~1 m), then delta-encoded
+POWER_WINDOWS = (5, 30, 60, 300, 1200, 1800, 3600)  # s, best mean power ("power curve" points)
+POWER_KEYS = ("pw5s", "pw30s", "pw1m", "pw5m", "pw20m", "pw30m", "pw60m")  # list columns, same order
+PW_BIN = 1  # W, power histogram bin (zones are drawn in the browser, where FTP is known;
+#            coarser bins moved ROUVY's zone shares by up to 3 points)
+POWER_HOLD = 10  # s, a reading counts until the next one; longer gaps are 0 W (stopped)
 
 # Basemap tiles are the one thing fetched from the network: proxied through
 # this server and cached on disk forever, so the browser never talks to a
@@ -61,6 +66,8 @@ MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=ut
         ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml",
         ".png": "image/png", ".ico": "image/x-icon"}
 
+# columns added by later `db build` migrations: listed when the DB has them, else NULL
+OPT_COLS = ("watts_avg", "watts_max", "cad_avg", "cad_max", "kmh_max", "f_avg_watts", "f_np", "f_if", "f_tss", "f_ftp")
 LIST_COLS = (
     "id, date, datetime, name, type, device, gear, km, elapsed_s, moving_s, pause_s, "
     "kmh_moving, kmh_elapsed, best30_kmh, best5min_kmh, best10min_kmh, best20min_kmh, "
@@ -139,11 +146,20 @@ def _ele_placeholder(rows):
     return None
 
 
+def has_col(db, table, col, schema="main"):
+    """Columns added by `db build` migrations are missing from an older DB.
+    schema=None resolves like a query would (the edits overlay's TEMP view)."""
+    pragma = f"PRAGMA {schema}.table_info({table})" if schema else f"PRAGMA table_info({table})"
+    return any(r[1] == col for r in db.execute(pragma))
+
+
 def load_track(db, aid):
+    """Sample rows (t, lat, lon, ele, hr, cad, dist_m, watts), plus t and scaled distance."""
     km, km_calc = db.execute("SELECT km, km_calc FROM activities_all WHERE id=?", (aid,)).fetchone()
     scale = (km / km_calc) if (km and km_calc and km_calc > 0) else 1.0
+    w = "watts" if has_col(db, "samples", "watts") else "NULL"
     rows = db.execute(
-        "SELECT t, lat, lon, ele, hr, cad, dist_m FROM samples WHERE activity_id=? ORDER BY t",
+        f"SELECT t, lat, lon, ele, hr, cad, dist_m, {w} FROM samples WHERE activity_id=? ORDER BY t",
         (aid,),
     ).fetchall()
     t = [r[0] for r in rows]
@@ -363,6 +379,63 @@ def find_laps(rows, t, d):
     }
 
 
+def power_grid(rows, t):
+    """Power on a 1 s grid from t[0]: each reading holds until the next one,
+    for at most POWER_HOLD s (a paused trainer stops recording: that's 0 W).
+    None when the session has no power readings."""
+    pw = [(t[i], r[7]) for i, r in enumerate(rows) if len(r) > 7 and r[7] is not None]
+    if len(pw) < 2:
+        return None
+    g = [0.0] * (int(t[-1] - t[0]) + 1)
+    for (ta, wa), (tb, _) in zip(pw, pw[1:] + [(pw[-1][0] + 1, None)]):
+        for s in range(int(ta - t[0]), int(min(tb, ta + POWER_HOLD) - t[0])):
+            if s < len(g):
+                g[s] = wa
+    return g
+
+
+def zero_power_s(rows, t):
+    """Seconds spent at a recorded 0 W (not pedalling). Each reading counts
+    until the next one, at most POWER_HOLD s, the same rule as power_grid; the
+    0 W that power_grid puts into longer recording gaps is not counted."""
+    pw = [(t[i], r[7]) for i, r in enumerate(rows) if len(r) > 7 and r[7] is not None]
+    return sum(min(tb - ta, POWER_HOLD) for (ta, wa), (tb, _) in zip(pw, pw[1:] + [(pw[-1][0] + 1, None)])
+               if wa == 0) if pw else None
+
+
+def power_hist(g):
+    """Seconds per PW_BIN-watt bin over the 1 s grid, {bin_start: s}."""
+    h = {}
+    for w in g:
+        k = int(w // PW_BIN) * PW_BIN
+        h[k] = h.get(k, 0) + 1
+    return h
+
+
+def best_power(g, span):
+    """Highest mean power over any `span`-second window of the 1 s grid."""
+    if not g or len(g) < span:
+        return None
+    acc = sum(g[:span])
+    best = acc
+    for i in range(span, len(g)):
+        acc += g[i] - g[i - span]
+        best = max(best, acc)
+    return best / span
+
+
+def normalized_power(g):
+    """Coggan NP: 30 s rolling mean, 4th power, mean, 4th root (>= 5 min only)."""
+    if not g or len(g) < 300:
+        return None
+    acc, q = sum(g[:30]), []
+    q.append((acc / 30) ** 4)
+    for i in range(30, len(g)):
+        acc += g[i] - g[i - 30]
+        q.append((acc / 30) ** 4)
+    return (sum(q) / len(q)) ** 0.25
+
+
 def derive(db, aid):
     rows, t, d = load_track(db, aid)
     out: dict = {"n": len(rows)}
@@ -379,6 +452,13 @@ def derive(db, aid):
         if hr and 0 < dt <= MAX_DT:
             hist[int(hr)] = hist.get(int(hr), 0) + dt
     out["hr_hist"] = hist
+
+    g = power_grid(rows, t)
+    if g:
+        out["pw"] = {str(w): best_power(g, w) for w in POWER_WINDOWS}
+        out["np"] = normalized_power(g)
+        out["pw_hist"] = power_hist(g)
+        out["pw_zero_s"] = zero_power_s(rows, t)
 
     typ = db.execute("SELECT type FROM activities_all WHERE id=?", (aid,)).fetchone()[0] or ""
     if typ.startswith("Virtual"):  # simulated GPS, no wind, gradients are fake
@@ -522,7 +602,8 @@ def api_types(db, q, M):
 def api_activities(db, q, M):
     typ = q.get("type")
     # hidden=1 also lists hidden / deleted sessions (flagged), so they can be restored
-    sql = f"SELECT {LIST_COLS}, hidden, deleted FROM activities_all WHERE parse_error IS NULL"
+    pw = "".join(f", {c}" if has_col(db, "activities_all", c, None) else f", NULL AS {c}" for c in OPT_COLS)
+    sql = f"SELECT {LIST_COLS}{pw}, hidden, deleted FROM activities_all WHERE parse_error IS NULL"
     if q.get("hidden") != "1":
         sql += " AND NOT hidden"
     args = []
@@ -547,6 +628,11 @@ def api_activities(db, q, M):
             r["best_lap_s"] = min((x["elapsed"] for x in reg), default=None)
             r["best_lap_kmh"] = max((x["kmh_elapsed"] for x in reg if x["kmh_elapsed"]), default=None)
         r["hr_hist"] = m.get("hr_hist") or None
+        p = m.get("pw") or {}
+        for k, w in zip(POWER_KEYS, POWER_WINDOWS):
+            r[k] = p.get(str(w))
+        r["pw_hist"] = m.get("pw_hist")
+        r["np"] = m.get("np")
         r["cond"] = conditions(r, m)
     # refit the wind coefficient on this sport's data, then recompute with it
     if typ:
@@ -592,12 +678,27 @@ def api_activity(db, q, M, aid):
             a, b = max(0, i - 1), min(n - 1, i + 1)
         dt = t[b] - t[a]
         speed.append((d[b] - d[a]) / dt * 3.6 if dt > 0 else 0.0)
+    # power: centred 30 s mean on the 1 s grid, raw watts are too spiky to read
+    g = power_grid(rows, t)
+    if g:
+        cs = [0.0]
+        for v in g:
+            cs.append(cs[-1] + v)
+
+        def watts(i):
+            k = int(t[i] - t[0])
+            lo_, hi_ = max(0, k - 15), min(len(g), k + 16)
+            return round((cs[hi_] - cs[lo_]) / (hi_ - lo_)) if hi_ > lo_ else None
+    else:
+        def watts(i):
+            return None
+
     def pt(i):
         r = rows[i]
         ll = valid_ll(r[1], r[2])
         return [t[i], round(d[i] / 1000, 4), round(speed[i], 2), r[4],
                 None if r[3] is None else round(r[3], 1),
-                round(r[1], 6) if ll else None, round(r[2], 6) if ll else None]
+                round(r[1], 6) if ll else None, round(r[2], 6) if ll else None, watts(i)]
 
     step = max(1, math.ceil(n / SERIES_MAX))
     idx = list(range(0, n, step))
@@ -610,7 +711,7 @@ def api_activity(db, q, M, aid):
     act["cond"] = conditions(act, m)
     act["cal"] = athlete.calories(act, PROFILE.get())
     act["splits"] = splits
-    act["series_cols"] = ["t", "km", "kmh", "hr", "ele", "lat", "lon"]
+    act["series_cols"] = ["t", "km", "kmh", "hr", "ele", "lat", "lon", "watts"]
     act["series"] = series
     return act
 

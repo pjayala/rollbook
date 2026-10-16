@@ -95,6 +95,71 @@ class Fit(unittest.TestCase):
         self.assertAlmostEqual(c["km"], (299 - 20) * 6 / 1000, delta=0.02)
 
 
+class Power(unittest.TestCase):
+    """Smart trainers (ROUVY / MyWhoosh) and power meters write watts in FIT field 7."""
+
+    def test_fit_power_both_endians(self):
+        d = tmpdir(self)
+        pts = [(*p, 200 if i % 2 else 0) for i, p in enumerate(line_points(300))]
+        pts[5] = (*pts[5][:5], None)  # a record without a reading
+        for be in (False, True):
+            p = os.path.join(d, f"{be}.fit")
+            write_fit(p, pts, big_endian=be)
+            _, s = rb.load_file(p)
+            c = rb.core(s)
+            self.assertIsNone(s["watts"]["data"][5])
+            self.assertEqual(s["watts"]["data"][:4], [0, 200, 0, 200])  # 0 W is a reading, not "missing"
+            self.assertAlmostEqual(c["watts_avg"], 299 * 100 / 299, delta=0.5)
+            self.assertEqual(c["watts_max"], 200)
+
+    def test_session_power_summary_and_app_ftp(self):
+        """ROUVY's own avg / NP / IF / TSS; it doesn't store FTP, but FTP = NP / IF."""
+        d = tmpdir(self)
+        p = os.path.join(d, "a.fit")
+        write_fit(p, [(*x, 160, 90 if i % 10 else 0) for i, x in enumerate(line_points(120))],
+                  session_sport=2, session_fields={20: 160, 21: 281, 34: 163, 35: 468, 36: 869})
+        meta, s = rb.load_file(p)
+        self.assertEqual(meta["session"], {"f_avg_watts": 160, "f_max_watts": 281, "f_np": 163,
+                                           "f_if": 0.869, "f_tss": 46.8, "f_ftp": 188})
+        c = rb.core(s)
+        self.assertEqual((c["cad_avg"], c["cad_max"]), (90, 90))  # 0 rpm (not pedalling) left out
+        write_fit(p, line_points(50), session_sport=2)
+        meta, s = rb.load_file(p)
+        self.assertIsNone(meta["session"]["f_ftp"])
+        self.assertIsNone(rb.core(s)["cad_avg"])
+
+    def test_no_power_channel(self):
+        d = tmpdir(self)
+        p = os.path.join(d, "a.fit")
+        write_fit(p, line_points(100))
+        _, s = rb.load_file(p)
+        self.assertNotIn("watts", s)
+        self.assertIsNone(rb.core(s)["watts_avg"])
+        _, s = rb.load_file(os.path.join(SAMPLES, "Outdoor_cycle.gpx"))
+        self.assertNotIn("watts", s)
+
+    def test_gpx_and_tcx_power_extensions(self):
+        d = tmpdir(self)
+        gpx = os.path.join(d, "a.gpx")
+        with open(gpx, "w") as f:
+            f.write('<?xml version="1.0"?><gpx xmlns="http://www.topografix.com/GPX/1/1"><trk><trkseg>' + "".join(
+                f'<trkpt lat="10" lon="{20 + i * 1e-4}"><time>2026-01-01T08:00:{i:02d}Z</time>'
+                f'<extensions><power>{150 + i}</power></extensions></trkpt>' for i in range(10)) + "</trkseg></trk></gpx>")
+        _, s = rb.load_file(gpx)
+        self.assertEqual(s["watts"]["data"][:3], [150, 151, 152])
+        tcx = os.path.join(d, "a.tcx")
+        ns = "http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2"
+        ext = "http://www.garmin.com/xmlschemas/ActivityExtension/v2"
+        with open(tcx, "w") as f:
+            f.write(f'<?xml version="1.0"?><TrainingCenterDatabase xmlns="{ns}" xmlns:ns3="{ext}"><Activities>'
+                    '<Activity Sport="Biking"><Lap><Track>' + "".join(
+                        f'<Trackpoint><Time>2026-01-01T08:00:{i:02d}Z</Time><DistanceMeters>{i * 8}</DistanceMeters>'
+                        f'<Extensions><ns3:TPX><ns3:Watts>{210 + i}</ns3:Watts></ns3:TPX></Extensions></Trackpoint>'
+                        for i in range(10)) + "</Track></Lap></Activity></Activities></TrainingCenterDatabase>")
+        _, s = rb.load_file(tcx)
+        self.assertEqual(s["watts"]["data"][-1], 219)
+
+
 class GpsLogic(unittest.TestCase):
     def test_fix_loss_is_spread_not_one_spike(self):
         """134 s without a fix once became a 149 km/h step and a bogus best-30 s."""
