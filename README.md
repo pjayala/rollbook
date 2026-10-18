@@ -179,10 +179,53 @@ dialog, because watches often mislabel it; HUAWEI saves skating as
 | `rollbook db query "SQL" [--csv]` | read-only SQL against your data |
 | `rollbook analyze <file>` | one activity: pauses, splits, out/back legs, grade |
 | `rollbook compare <a> <b> …` | side-by-side summary |
+| `rollbook mcp [--allow-gps]` | read-only MCP server on stdio, so an AI assistant can query your data |
 | `rollbook --version` | print the version |
 
 Use `./rollbook` on macOS/Linux and `rollbook.cmd` on Windows. All state lives
 in `./data`, which is git-ignored.
+
+### AI assistants (MCP)
+
+`rollbook mcp` exposes the database to AI assistants as Model Context
+Protocol tools (stdio, stdlib only; protocol versions 2025-06-18,
+2025-03-26 and 2024-11-05):
+
+| tool | what it does |
+|---|---|
+| `sports` | per sport: sessions, km, hours, date range, best 10-min speed |
+| `schema` | tables, views, columns, row counts |
+| `query` | one SELECT; 200 rows by default (5000 max), 30 s timeout |
+| `activities` | list sessions, filtered by sport / dates / name / min km, sorted by any key metric |
+| `activity` | one session: summary, per-km splits, out/back legs and wind-neutral speed, laps, power, HR zones |
+| `compare` | 2–10 sessions side by side |
+| `trend` | per week / month / year: volume and form |
+| `records` | personal bests: best 5–60 min speed, wind-neutral speed, distance, ascent, power |
+
+On connect, the assistant also gets the rules for which metric to trust
+(e.g. compare form with `best10min_kmh`, never compare Virtual Ride speeds
+with outdoor ones).
+
+**Setup.** The repo's `opencode.json` registers it for OpenCode as the
+`rollbook` server (`opencode mcp list` should show it connected). For other
+clients, configure a local stdio server that runs `./rollbook mcp` (use the
+absolute path); on Windows the command is `rollbook.cmd mcp`.
+
+**Read-only.** The database is opened read-only. `query` runs on its own
+connection that accepts only SELECT and introspection PRAGMAs; writes,
+`ATTACH`, temporary tables and PRAGMA changes are refused. Your dashboard
+edits (renames, sport changes, hidden sessions) apply as in the dashboard;
+`main.activities` is the unedited table. The dashboard's metrics cache is
+read but never written.
+
+**Privacy.** Whatever the tools return is sent to the assistant's model
+provider. GPS coordinates are withheld (`samples.lat/lon` read as NULL, map
+tracks and lap positions dropped) unless you pass `--allow-gps`.
+
+**Limitations.** `records` only covers sessions already in the dashboard's
+metrics cache and says how many it used; open `rollbook web` once to fill it.
+The 30 s best speed is left out of the records because a single GPS glitch
+can win it.
 
 ## Privacy
 
@@ -197,6 +240,9 @@ in `./data`, which is git-ignored.
 
   These requests reveal to those services the areas and dates involved. Start
   with `--offline` to use only what's cached.
+- `rollbook mcp` itself makes no network requests, but what it returns to an
+  AI assistant goes to that assistant's model provider (GPS withheld by
+  default, see [AI assistants](#ai-assistants-mcp)).
 - No accounts, no telemetry, no Strava API.
 
 ## How it works

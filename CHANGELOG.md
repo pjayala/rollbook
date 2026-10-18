@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.0 (2026-10-18)
+
+### MCP server (`rollbook mcp`)
+
+- Read-only Model Context Protocol server on stdio, so AI assistants can
+  work with your training data. Tools: `sports`, `schema`, `query` (one
+  SELECT), `activities`, `activity`, `compare`, `trend`, `records`.
+- Tells the assistant which metrics to trust (best 10-min speed for form,
+  no Virtual Ride vs outdoor speed comparisons, ...).
+- SQL is limited to SELECT and introspection: no writes, `ATTACH`,
+  temporary tables or PRAGMA changes; 30 s timeout and a row cap.
+- Applies your dashboard edits; never writes the dashboard's caches.
+- GPS coordinates are withheld unless started with `--allow-gps`.
+- Registered for OpenCode in `opencode.json`.
+
 ## 0.1.0 (2026-10-16)
 
 First tagged release.
