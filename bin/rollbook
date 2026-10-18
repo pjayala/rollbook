@@ -24,7 +24,7 @@ Commands
   rollbook login | whoami              OAuth setup / check           (API only)
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 import argparse
 import hashlib
@@ -1676,6 +1676,17 @@ def cmd_app(a):
     app.run(DB, os.path.join(CACHE, "web_metrics.json"), a.port, a.offline, a.mode)
 
 
+def cmd_mcp(a):
+    """MCP server on stdio (read-only); implementation lives in web/mcp_server.py."""
+    if not os.path.exists(DB):
+        die("no database yet. run: rollbook db build <archive.zip>")
+    webdir = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "web")
+    sys.path.insert(0, os.path.abspath(webdir))
+    import mcp_server
+
+    mcp_server.run(DB, os.path.join(CACHE, "web_metrics.json"), a.allow_gps, __version__)
+
+
 def main():
     # Windows consoles default to a legacy code page; never die on a "→"
     for f in (sys.stdout, sys.stderr):
@@ -1743,6 +1754,11 @@ def main():
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--offline", action="store_true", help="serve only already-cached map tiles")
     ap.set_defaults(fn=cmd_app)
+
+    mc = sub.add_parser("mcp", help="read-only Model Context Protocol server on stdio, for AI assistants")
+    mc.add_argument("--allow-gps", action="store_true",
+                    help="let SQL read samples.lat/lon (off by default: tracks reveal home)")
+    mc.set_defaults(fn=cmd_mcp)
 
     a = p.parse_args()
     a.fn(a)

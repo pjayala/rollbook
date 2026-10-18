@@ -45,7 +45,7 @@ data/rollbook.db          SQLite: 1866 activities, 4.07M samples   (gitignored)
 data/cache/archives/    extracted Strava export                  (gitignored)
 exports/*.zip           raw Strava account exports, by request date (gitignored)
 LICENSE                 GPL-3.0 text
-tests/                  unittest suite (parsing, logic, importer, app, weather, laps, FTP, end-to-end API); run in CI
+tests/                  unittest suite (parsing, logic, importer, app, weather, laps, FTP, MCP, end-to-end API); run in CI
 tools/demo.py           synthetic demo athlete (export + DB + seeded caches), never real data
 tools/screenshots.py    regenerates docs/screenshots/*.png from the demo, headless Chrome, --offline
 CHANGELOG.md            release notes; `rollbook --version` = __version__ in bin/rollbook
@@ -58,6 +58,8 @@ web/geonames.py         segment place names (Nominatim reverse geocoding, cached
 web/importer.py         Import dialog backend: uploads + background db build / enrich
 web/edits.py            session edits (data/edits.json) as a TEMP view overlay on the read-only DB
 web/app.py              `rollbook app`: desktop window (pywebview / Chrome-Edge --app / browser)
+web/mcp_server.py       `rollbook mcp`: read-only MCP tools over stdio JSON-RPC
+opencode.json           registers `./rollbook mcp` as the `rollbook` MCP server
 web/static/             index.html / app.js / map.js / style.css, vanilla JS + SVG/canvas, no CDN
 web/static/icon.svg     app icon master; favicon.svg is its 16-32 px simplification
 assets/                 rendered icons: rollbook-{128..1024}.png, rollbook.icns, rollbook.ico
@@ -76,6 +78,7 @@ NOTES.md                analysis findings so far
 | `db schema` | tables, views, row counts |
 | `analyze <file\|id>` | one activity: pauses, per-km splits, out/back legs, grade |
 | `compare <a> <b> ...` | side-by-side summary table |
+| `mcp [--allow-gps]` | read-only MCP server on stdio (`web/mcp_server.py`), registered in `opencode.json` |
 | `list <archive>` / `trend <archive>` | bulk views straight off an archive, `-t type --since --until --by week\|month\|year` |
 | `streams <file>` | which data channels a file actually carries |
 | `login` / `whoami` / `activities` | Strava API mode — unusable, see below |
@@ -360,6 +363,28 @@ changing `derive()`.
 * **Circuits** (progress page) group sessions whose lap *centre* is within
   max(60 m, 25% of lap length) and lap length within 12% — the gate itself
   moves between sessions, the centre doesn't.
+
+## MCP server
+
+`./rollbook mcp` (`web/mcp_server.py`) is MCP over stdio, newline-delimited
+JSON-RPC, stdlib only; protocol versions 2025-06-18 / 2025-03-26 /
+2024-11-05. Tools: `sports`, `schema`, `query`, `activities`, `activity`,
+`compare`, `trend`, `records`; the `initialize` instructions carry the
+"which metric to trust" rules above. Read-only throughout:
+
+* two `mode=ro` connections. Tools use the trusted one; `query` uses the
+  other, under an authorizer allowing only SELECT / functions / recursive
+  CTEs / introspection PRAGMAs (no ATTACH, TEMP objects, PRAGMA writes), a
+  30 s progress-handler timeout and a row cap. That connection has
+  `cached_statements=0` — the authorizer runs at prepare time, so a cached
+  statement would skip it.
+* `samples.lat` / `lon` read as NULL in `query` (authorizer `SQLITE_IGNORE`)
+  and `trk` / `ll0` / lap gate positions are dropped from tool output,
+  unless `--allow-gps`. Tool output goes to a model provider.
+* dashboard edits (`edits.json`) are applied with the same TEMP overlay as
+  `rollbook web`, reloaded when the file's mtime changes.
+* `web_metrics.json` is read, never written: a missing/stale entry is
+  `derive()`d in memory. `records` uses only cached entries (says how many).
 
 ## Data-quality landmines
 
