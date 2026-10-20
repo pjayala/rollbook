@@ -174,6 +174,7 @@ dialog, because watches often mislabel it; HUAWEI saves skating as
 |---|---|
 | `rollbook app [--mode auto\|webview\|chrome\|browser]` | dashboard in its own window; the server stops when the window closes |
 | `rollbook web [--port 8765] [--offline]` | dashboard on `127.0.0.1` |
+| `rollbook web --lan [--lan-write]` | also serve it to your phone over the home network, see below |
 | `rollbook db build <export.zip\|dir> [--fresh]` | import an export (incremental) |
 | `rollbook db enrich [--missing]` | best 5/10/20-min efforts |
 | `rollbook db query "SQL" [--csv]` | read-only SQL against your data |
@@ -184,6 +185,58 @@ dialog, because watches often mislabel it; HUAWEI saves skating as
 
 Use `./rollbook` on macOS/Linux and `rollbook.cmd` on Windows. All state lives
 in `./data`, which is git-ignored.
+
+### Use from your phone
+
+```sh
+./rollbook web --lan --no-open        # phone can view
+./rollbook web --lan-write --no-open  # phone can also edit, star and import
+```
+
+The dashboard stays at `http://127.0.0.1:8765/` on the computer. A second,
+HTTPS listener on port 8766 serves the phone on the same Wi-Fi. The terminal
+prints a link and a QR code for it.
+
+1. On macOS, allow the "accept incoming connections" prompt the first time.
+2. Scan the QR code with the phone's camera, or open the printed
+   `https://<computer-ip>:8766/?t=…` link.
+3. Chrome says *Your connection is not private*, because the certificate is
+   self-signed. Optionally compare the SHA-256 fingerprint the terminal printed
+   with the one under the address bar's certificate details. Then tap
+   **Advanced → Proceed**.
+4. The link signs that browser in with a cookie for a year. After that,
+   `https://<computer-ip>:8766/` is enough, and you can use
+   ⋮ → *Add to Home screen*.
+
+How it is protected:
+
+- **Access link.** Every request on the network port needs the random
+  token from the link (128-bit, kept in `data/lan_token`). The token is
+  turned into an HttpOnly cookie and removed from the address bar. Requests
+  without it get 403. `--new-token` makes a new link and signs out every
+  device.
+- **Read-only by default.** Edits, favorites, profile changes and imports
+  from the phone are refused (and hidden in the UI) unless you start with
+  `--lan-write`.
+- **Only this computer's own names and IPs** are accepted as the host,
+  which guards against DNS rebinding.
+- **HTTPS with a self-signed certificate** (`data/tls/`, valid 397 days,
+  reused across restarts). It covers the computer's LAN IPs,
+  `<hostname>.local`, `localhost` and `127.0.0.1`. Rollbook creates it with
+  `openssl` when that's installed, otherwise in pure Python. It's renewed
+  automatically when the IP changes or it nears expiry, and then the phone
+  asks again once. `--new-cert` forces a new one.
+- `--lan-http` uses plain HTTP instead. The token and your data then cross
+  the network unencrypted, so only use it if HTTPS is impossible.
+
+Only use this on a network you trust. Anyone holding the link can read your
+data, including GPS tracks, which reveal where you live. The computer must
+be awake, and if its IP changes, rescan the new QR code. Other options:
+`--lan-port`, and `--qr always|never` (QR codes print automatically only
+when output goes to a terminal).
+
+The dashboard isn't optimised for phone screens yet: some wide panels need
+sideways scrolling.
 
 ### AI assistants (MCP)
 
@@ -230,7 +283,8 @@ can win it.
 ## Privacy
 
 - Your activities, the database and caches stay in `./data` on your machine.
-  The server listens on `127.0.0.1` only.
+  The server listens on `127.0.0.1` only, unless you start it with `--lan`
+  (see [Use from your phone](#use-from-your-phone)).
 - Three things go over the network, all cached forever:
   - **map tiles** from OpenStreetMap
   - **reverse geocoding** of segment points (OpenStreetMap Nominatim, at most

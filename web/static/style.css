@@ -178,3 +178,7 @@ tr.hiddenrow td { opacity: .5; }
 .pstat { display: grid; padding: 5px 0; }
 .pstat span { color: var(--muted); font-size: 12px; }
 .pstat b { font-size: 18px; } .pstat small { color: var(--muted); }
+/* `rollbook web --lan` without --lan-write: the server refuses changes, so hide the controls */
+body.readonly #edit, body.readonly #psave, body.readonly .hiddenbar button { display: none; }
+body.readonly button.star { pointer-events: none; }
+body.readonly button.star:not(.on) { display: none; }

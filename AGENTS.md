@@ -45,7 +45,7 @@ data/rollbook.db          SQLite: 1866 activities, 4.07M samples   (gitignored)
 data/cache/archives/    extracted Strava export                  (gitignored)
 exports/*.zip           raw Strava account exports, by request date (gitignored)
 LICENSE                 GPL-3.0 text
-tests/                  unittest suite (parsing, logic, importer, app, weather, laps, FTP, MCP, end-to-end API); run in CI
+tests/                  unittest suite (parsing, logic, importer, app, weather, laps, FTP, MCP, LAN/TLS/QR, end-to-end API); run in CI
 tools/demo.py           synthetic demo athlete (export + DB + seeded caches), never real data
 tools/screenshots.py    regenerates docs/screenshots/*.png from the demo, headless Chrome, --offline
 CHANGELOG.md            release notes; `rollbook --version` = __version__ in bin/rollbook
@@ -57,6 +57,8 @@ web/weather.py          historical weather per outdoor session (Open-Meteo, cach
 web/geonames.py         segment place names (Nominatim reverse geocoding, cached)
 web/importer.py         Import dialog backend: uploads + background db build / enrich
 web/edits.py            session edits (data/edits.json) as a TEMP view overlay on the read-only DB
+web/tls.py              self-signed cert for `web --lan` (openssl, else pure-Python RSA + DER)
+web/qr.py               stdlib QR encoder (byte mode, level M, v1-10) for the --lan link
 web/app.py              `rollbook app`: desktop window (pywebview / Chrome-Edge --app / browser)
 web/mcp_server.py       `rollbook mcp`: read-only MCP tools over stdio JSON-RPC
 opencode.json           registers `./rollbook mcp` as the `rollbook` MCP server
@@ -73,6 +75,7 @@ NOTES.md                analysis findings so far
 | `db build <archive.zip\|dir>` | import an export; incremental by filename, `--fresh` to rebuild, `--no-samples` to skip per-second rows |
 | `db enrich [--windows 5,10,20] [--missing]` | compute `best<N>min_kmh` from the samples table. **Run after every build**; `--missing` only does activities that lack them |
 | `web [--port 8765] [--no-open] [--offline]` | localhost dashboard: progress, calendar, circuits, session list, map + heatmap, segments + leaderboards, per-session map/splits/laps/segments/HR zones, race predictor |
+| `web --lan [--lan-write] [--lan-port 8766] [--lan-http] [--new-token] [--new-cert] [--qr auto\|always\|never]` | also serve it to a phone on the network: HTTPS (self-signed), token link / QR, read-only unless `--lan-write` |
 | `app [--mode auto\|webview\|chrome\|browser] [--port] [--offline]` | dashboard in its own window; server stops when the window closes |
 | `db query "SQL"` | read-only query, `--csv` for machine output |
 | `db schema` | tables, views, row counts |
@@ -205,6 +208,34 @@ on first start (~1 min for all activities) and cached in
 `data/cache/web_metrics.json`. Entries invalidate when an activity's sample
 count changes or `METRICS_VERSION` in `web/server.py` is bumped; bump it after
 changing `derive()`.
+
+* **`web --lan` / `--lan-write`** (phone access): the loopback listener is
+  unchanged. A second one on `0.0.0.0:8766` (`--lan-port`) runs the same
+  handler with `make_handler(..., lan=Lan)`. It is HTTPS by default
+  (`TLSServer`: handshake in the request thread, 60 s timeout, so a stalled
+  or plain-HTTP client can't block accept). On that listener:
+  * Every request passes `_lan_gate`. Host must be in `lan.hosts` (LAN IPs
+    from `lan_ips()`, `<host>.local`, localhost, 127.0.0.1, with the port).
+  * `GET ?t=<token>` sets the `rb_lan` cookie (HttpOnly, SameSite=Lax,
+    Secure) and 302s to the URL without `t`. Otherwise the cookie must match.
+    Comparisons use `hmac.compare_digest`. The token is never accepted on a
+    POST.
+  * POSTs are 403 unless `--lan-write`; `/api/bye` is always 403.
+    `_same_origin` compares Origin with `<scheme>://<Host>`.
+  * `/api/status` carries `readonly`; `app.js` then hides import / edit /
+    stars / profile save (`body.readonly`).
+  * The token is in `data/lan_token` (0600), `--new-token` rotates it.
+  * Cert (`web/tls.py`): self-signed leaf, no CA, in `data/tls/`
+    (dir 0700, key 0600). It's made with `openssl req -x509` and a generated
+    config, else pure Python: Miller–Rabin keygen from `secrets`, PKCS#1 v1.5
+    SHA-256, hand-written DER. Both have the same profile, enforced by
+    `tests/test_tls.py` via a real verified handshake. It's reused until the
+    SAN set changes or < 30 days remain; `--new-cert` forces a new one.
+  * The banner prints per-IP URLs, the SHA-256 fingerprint and a QR code
+    (`web/qr.py`, module-for-module equal to segno 1.6.6 at full capacity,
+    golden hashes in `tests/test_qr.py`; `--qr auto` only on a TTY, `##`
+    fallback when stdout can't encode `▀▄█`). `rollbook app` never uses
+    `--lan`.
 
 * **`rollbook app`** runs the same server in a thread and opens a window: pywebview
   if importable, else a Chromium-family browser (Chrome, Edge, Chromium, Brave)
