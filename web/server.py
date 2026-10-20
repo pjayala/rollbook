@@ -12,14 +12,20 @@ activity id and invalidated when the sample count or METRICS_VERSION changes.
 """
 
 import edits
+import errno
 import geonames
 import profile as athlete
 import gzip
+import hmac
+import ipaddress
 import json
 import re
 import math
 import os
+import secrets
+import socket
 import sqlite3
+import ssl
 import statistics
 import sys
 import threading
@@ -29,6 +35,7 @@ import urllib.parse
 import urllib.request
 import weather
 from datetime import datetime, timedelta, timezone
+from http.cookies import CookieError, SimpleCookie
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -927,7 +934,166 @@ class TileCache:
         return body
 
 
-def make_handler(db_path, M, tiles):
+# ------------------------------------------------------------------ --lan
+#
+# `rollbook web --lan` adds a second listener on 0.0.0.0 (HTTPS with a
+# self-signed cert by default) for a phone on the same network. The loopback
+# listener is untouched. On the LAN listener every request needs the token:
+# `?t=<token>` once (sets an HttpOnly cookie, then redirects the token out of
+# the URL), the cookie afterwards. Host must be one of this machine's names
+# (DNS rebinding), and POSTs are refused unless --lan-write.
+
+LAN_COOKIE = "rb_lan"
+LAN_COOKIE_AGE = 365 * 86400
+TLS_TIMEOUT_S = 60  # handshake and idle keep-alive on the LAN listener
+LAN_READONLY_MSG = "read-only from the network; restart with `rollbook web --lan-write` to allow changes"
+
+
+class Lan:
+    def __init__(self, token, write=False, https=True, port=8766, names=(), cert=None):
+        self.token, self.write, self.https, self.cert = token, write, https, cert
+        self.cert_args = None  # (tls_dir, host, ips) for tls.ensure_cert, set by lan_setup
+        self.bind = "0.0.0.0"
+        self.names = list(dict.fromkeys(names))  # host names / IPs, no port
+        self.scheme = "https" if https else "http"
+        self.set_port(port)
+
+    def set_port(self, port):
+        self.port = port
+        self.hosts = {f"{n}:{port}" for n in self.names}
+        if (self.https and port == 443) or (not self.https and port == 80):
+            self.hosts |= set(self.names)
+
+    def ok_token(self, value):
+        return bool(value) and hmac.compare_digest(value.encode("utf-8", "replace"), self.token.encode())
+
+    def urls(self, with_token=True):
+        """Phone URLs, one per LAN address (not loopback / .local)."""
+        out = []
+        for n in self.names:
+            if n in ("127.0.0.1", "localhost") or n.endswith(".local"):
+                continue
+            out.append(f"{self.scheme}://{n}:{self.port}/" + (f"?t={self.token}" if with_token else ""))
+        return out
+
+
+def lan_ips():
+    """This machine's IPv4 addresses that a phone could reach (no loopback / link-local)."""
+    ips = []
+    for probe in ("10.254.254.254", "192.168.254.254"):
+        try:  # UDP connect sends nothing; it just picks the outgoing interface
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect((probe, 9))
+                ips.append(s.getsockname()[0])
+        except OSError:
+            pass
+    try:
+        ips += [a[4][0] for a in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)]
+    except OSError:
+        pass
+    good = []
+    for a in ips:
+        ip = ipaddress.ip_address(a)
+        if not (ip.is_loopback or ip.is_link_local or ip.is_unspecified) and a not in good:
+            good.append(a)
+    return good
+
+
+def lan_token(home, new=False):
+    """Random token in $ROLLBOOK_HOME/lan_token, reused across restarts."""
+    path = os.path.join(home, "lan_token")
+    if not new:
+        try:
+            with open(path, encoding="ascii") as f:
+                t = f.read().strip()
+            if re.fullmatch(r"[A-Za-z0-9_-]{22,}", t):
+                return t
+        except (OSError, UnicodeDecodeError):
+            pass
+    t = secrets.token_urlsafe(16)
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="ascii") as f:
+        f.write(t + "\n")
+    os.replace(tmp, path)
+    return t
+
+
+def lan_setup(home, port=8766, write=False, https=True, new_token=False, new_cert=False, ips=None):
+    """Token, names and (for https) the self-signed cert for a --lan listener."""
+    import tls
+
+    ips = lan_ips() if ips is None else list(ips)
+    host = tls.safe_host(socket.gethostname())
+    cert_args = (os.path.join(home, "tls"), host, ips)
+    cert = tls.ensure_cert(*cert_args, force=new_cert) if https else None
+    names = ips + [f"{host}.local", "localhost", "127.0.0.1"]
+    lan = Lan(lan_token(home, new_token), write, https, port, names, cert)
+    lan.cert_args = cert_args
+    return lan
+
+
+class TLSServer(ThreadingHTTPServer):
+    """HTTPS: the handshake runs in the request's own thread, not the accept loop,
+    so a slow or plain-HTTP client can't stall the listener."""
+
+    def __init__(self, addr, handler, ctx):
+        self.ssl_ctx = ctx
+        super().__init__(addr, handler)
+
+    def process_request_thread(self, request, client_address):
+        try:
+            request.settimeout(TLS_TIMEOUT_S)
+            request = self.ssl_ctx.wrap_socket(request, server_side=True)
+        except (ssl.SSLError, OSError):
+            self.shutdown_request(request)
+            return
+        super().process_request_thread(request, client_address)
+
+
+def tls_context(lan):
+    import tls
+
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    try:
+        ctx.load_cert_chain(lan.cert["cert"], lan.cert["key"])
+    except (ssl.SSLError, OSError):  # damaged / mismatched pair: make a new one
+        lan.cert = tls.ensure_cert(*lan.cert_args, force=True)
+        ctx.load_cert_chain(lan.cert["cert"], lan.cert["key"])
+    return ctx
+
+
+def lan_banner(lan, qr_mode="auto", out=None):
+    """What to print on start: URLs, QR codes, the cert fingerprint, the warning."""
+    import qr
+
+    out = out or sys.stdout
+    tty = hasattr(out, "isatty") and out.isatty()
+    show_qr = qr_mode == "always" or (qr_mode == "auto" and tty)
+    lines = [f"\nnetwork access ({'read-write' if lan.write else 'read-only'}), "
+             f"{lan.scheme}://<this machine>:{lan.port}/ — open on your phone:"]
+    urls = lan.urls()
+    if not urls:
+        lines.append("  no network address found (offline?); only https://localhost works")
+    for u in urls:
+        lines.append(f"  {u}")
+        if show_qr:
+            lines.append(qr.render(qr.encode(u), ansi=qr.can_render_blocks(out)))
+    if lan.cert:
+        lines += [f"certificate SHA-256 {lan.cert['fingerprint']}",
+                  "  self-signed: the phone warns about it. Check this fingerprint in the browser's",
+                  "  certificate details, then Advanced -> Proceed."]
+    else:
+        lines.append("WARNING: plain HTTP (--lan-http): the token and your data cross the network unencrypted.")
+    lines.append(f"Anyone with this link on your network can {'view and change' if lan.write else 'view'} "
+                 "your training data. Rotate it with --new-token.")
+    print("\n".join(lines), file=out, flush=True)
+
+
+def make_handler(db_path, M, tiles, lan=None):
+    """Request handler class. lan=None: the loopback listener (trusted, as always);
+    a Lan: the `--lan` listener, where every request needs the token cookie."""
     local = threading.local()
 
     def dbc():
@@ -957,6 +1123,9 @@ def make_handler(db_path, M, tiles):
                 self.send_header("Content-Encoding", "gzip")
             self.send_header("Cache-Control", "max-age=86400" if ctype in ("image/svg+xml", "image/png", "image/x-icon") else cache)
             self.send_header("X-Content-Type-Options", "nosniff")
+            if lan:
+                self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header("X-Frame-Options", "DENY")
             self.end_headers()
             self.wfile.write(body)
 
@@ -964,13 +1133,52 @@ def make_handler(db_path, M, tiles):
             self.send(code, json.dumps(obj, separators=(",", ":"), allow_nan=False,
                                        default=str))
 
+        # ---------------------------------------------------- --lan gate
+
+        def _lan_cookie(self):
+            try:
+                c = SimpleCookie(self.headers.get("Cookie") or "")
+            except CookieError:
+                return None
+            return c[LAN_COOKIE].value if LAN_COOKIE in c else None
+
+        def _lan_gate(self, u, q):
+            """LAN listener only. True = request answered here (refused or redirected)."""
+            if lan is None:
+                return False
+            if self.headers.get("Host") not in lan.hosts:
+                self._reject(403, "unknown host name: open one of the addresses printed by "
+                                  "`rollbook web --lan`\n", "text/plain")
+                return True
+            if "t" in q and self.command == "GET":
+                if not lan.ok_token(q["t"]):
+                    self.send(403, "wrong or old link: use the one printed by `rollbook web --lan`\n", "text/plain")
+                    return True
+                rest = urllib.parse.urlencode({k: v for k, v in q.items() if k != "t"})
+                self.send_response(302)
+                self.send_header("Location", u.path + (f"?{rest}" if rest else ""))
+                self.send_header("Set-Cookie", f"{LAN_COOKIE}={lan.token}; Path=/; Max-Age={LAN_COOKIE_AGE}; "
+                                               "HttpOnly; SameSite=Lax" + ("; Secure" if lan.https else ""))
+                self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return True
+            if lan.ok_token(self._lan_cookie()):
+                return False
+            self._reject(403, "not signed in: open the link (or scan the QR code) printed by "
+                              "`rollbook web --lan` once on this device\n", "text/plain")
+            return True
+
         def do_GET(self):
             now = time.monotonic()
             self.server.last_request = now
             u = urllib.parse.urlparse(self.path)
             q = {k: v[-1] for k, v in urllib.parse.parse_qs(u.query).items()}
             p = u.path
-            if "app" in q and not p.startswith(("/api/", "/tiles/")):
+            if self._lan_gate(u, q):
+                return
+            if lan is None and "app" in q and not p.startswith(("/api/", "/tiles/")):
                 # app launcher: a page load of window <token> after its bye = a reload
                 self.server.app_pages[q["app"]] = now
             try:
@@ -986,11 +1194,14 @@ def make_handler(db_path, M, tiles):
 
         def _same_origin(self):
             """Reject other websites (CSRF) and DNS-rebinding hosts."""
+            host = self.headers.get("Host")
+            origin = self.headers.get("Origin")
+            if lan is not None:
+                return host in lan.hosts and (origin is None or origin == f"{lan.scheme}://{host}")
             port = self.server.server_address[1]
             ours = (f"127.0.0.1:{port}", f"localhost:{port}")
-            if self.headers.get("Host") not in ours:
+            if host not in ours:
                 return False
-            origin = self.headers.get("Origin")
             return origin is None or origin in tuple("http://" + o for o in ours)
 
         def _reject(self, code, body, ctype="application/json"):
@@ -1007,6 +1218,12 @@ def make_handler(db_path, M, tiles):
         def do_POST(self):
             u = urllib.parse.urlparse(self.path)
             q = {k: v[-1] for k, v in urllib.parse.parse_qs(u.query).items()}
+            if lan is not None:
+                q.pop("t", None)  # the token is only accepted on a GET (link / QR code)
+                if self._lan_gate(u, q):
+                    return
+                if not lan.write or u.path == "/api/bye":  # bye: only the desktop app window
+                    return self._reject(403, json.dumps({"error": LAN_READONLY_MSG}))
             if u.path == "/api/bye":
                 # the app window's page sends it from pagehide (a beacon, so no
                 # custom header possible; Origin is always set for beacons)
@@ -1076,7 +1293,10 @@ def make_handler(db_path, M, tiles):
                       "status": api_status, "hrmax": api_hrmax, "tracks": api_tracks,
                       "segments": api_segments}
             if p in simple:
-                return self.json(clean(simple[p](db, q, M)))
+                r = clean(simple[p](db, q, M))
+                if p == "status":
+                    r["readonly"] = lan is not None and not lan.write
+                return self.json(r)
             if p == "favorites":
                 return self.json(FAVS.get())
             if p == "edits":
@@ -1130,8 +1350,18 @@ def clean(o):
     return o
 
 
-def start(db_path, cache_path, port=8765, offline=False):
-    """Bind and return (httpd, metrics, url); caller runs httpd.serve_forever()."""
+def _port_answers(port):
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+def start(db_path, cache_path, port=8765, offline=False, lan=None):
+    """Bind and return (httpd, metrics, url); caller runs httpd.serve_forever().
+    With lan (a Lan from lan_setup), httpd.lan_httpd is the network listener,
+    bound but not yet serving."""
     global SEGS, IMPORTER, FAVS, GEO, WX, PROFILE, EDITS
     import importer
     import segments  # imports this module; must come after it is fully loaded
@@ -1151,14 +1381,34 @@ def start(db_path, cache_path, port=8765, offline=False):
     httpd.daemon_threads = True
     httpd.on_bye = None  # set by the app launcher: called with the window token when a page closes
     httpd.app_pages = {}  # window token -> monotonic time of its last page load
+    httpd.lan_httpd = None
+    if lan is not None:
+        try:
+            if lan.port and _port_answers(lan.port):
+                # macOS lets 0.0.0.0:p bind (SO_REUSEADDR) while another process
+                # holds 127.0.0.1:p; the two would then split the traffic
+                raise OSError(errno.EADDRINUSE, f"port {lan.port} is already in use")
+            h = make_handler(db_path, M, tiles, lan)
+            addr = (lan.bind, lan.port)
+            srv = TLSServer(addr, h, tls_context(lan)) if lan.https else ThreadingHTTPServer(addr, h)
+        except BaseException:
+            httpd.server_close()
+            raise
+        srv.daemon_threads = True
+        srv.app_pages = {}
+        lan.set_port(srv.server_address[1])
+        httpd.lan_httpd = srv
     url = f"http://127.0.0.1:{httpd.server_address[1]}/"
     print(f"serving {url}  (db {db_path}, tiles {'cache only' if offline else 'online + cache'})")
     return httpd, M, url
 
 
-def serve(db_path, cache_path, port=8765, open_browser=True, offline=False):
-    httpd, M, url = start(db_path, cache_path, port, offline)
-    print("ctrl-c to stop")
+def serve(db_path, cache_path, port=8765, open_browser=True, offline=False, lan=None, qr="auto"):
+    httpd, M, url = start(db_path, cache_path, port, offline, lan)
+    if httpd.lan_httpd:
+        threading.Thread(target=httpd.lan_httpd.serve_forever, daemon=True).start()
+        lan_banner(lan, qr)
+    print("ctrl-c to stop", flush=True)
     if open_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
     try:
@@ -1167,6 +1417,9 @@ def serve(db_path, cache_path, port=8765, open_browser=True, offline=False):
         pass
     finally:
         M.save()
+        if httpd.lan_httpd:
+            httpd.lan_httpd.shutdown()
+            httpd.lan_httpd.server_close()
         httpd.server_close()
 
 

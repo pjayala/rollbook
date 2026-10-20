@@ -954,6 +954,7 @@ async function viewProfile() {
   derived(p);
   $("#pform").onsubmit = async e => {
     e.preventDefault();
+    if (S.readonly) return;
     const body = {};
     for (const k of ["name", "sex", "birth_year", "height_cm", "weight_kg", "hr_rest", "hr_max", "ftp"]) body[k] = $("#pf-" + k).value.trim();
     const msg = $("#pmsg"); msg.className = "small muted"; msg.textContent = "saving…";
@@ -998,6 +999,7 @@ function starBtn(kind, id, meta, onchange) {
   const paint = () => { const on = isFav(kind, id); b.classList.toggle("on", on); b.textContent = on ? "★" : "☆"; b.title = on ? "remove from favorites" : "add to favorites"; };
   b.onclick = async e => {
     e.stopPropagation(); e.preventDefault();
+    if (S.readonly) return;
     try { await setFav(kind, id, !isFav(kind, id), typeof meta === "function" ? meta() : meta); paint(); onchange && onchange(isFav(kind, id)); }
     catch (err) { b.title = "could not save: " + err.message; }
   };
@@ -2015,7 +2017,12 @@ if (new URLSearchParams(location.search).has("app"))
     "/api/bye?app=" + encodeURIComponent(new URLSearchParams(location.search).get("app"))));
 
 async function boot() {
-  [S.types, { hrmax: S.hrmax }, S.favs] = await Promise.all([api("types"), api("hrmax"), api("favorites")]);
+  let st;
+  [S.types, { hrmax: S.hrmax }, S.favs, st] = await Promise.all([api("types"), api("hrmax"), api("favorites"), api("status").catch(() => ({}))]);
+  // opened from a phone via `rollbook web --lan` (without --lan-write): the
+  // server refuses every change, so don't offer any
+  S.readonly = !!st.readonly;
+  document.body.classList.toggle("readonly", S.readonly);
   S.hrmax = S.hrmax || 185;
   if (!S.types.some(t => t.type === S.type)) S.type = S.types[0]?.type;
   const sel = $("#type");
@@ -2027,7 +2034,9 @@ async function boot() {
   navInit();
   addEventListener("hashchange", route);
   let rt; addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(() => { if (!/^#\/(map|segment)/.test(location.hash)) route(); }, 200); });
-  initImport();
+  if (!S.readonly) initImport();
+  else $("#import-btn").replaceWith(Object.assign(document.createElement("span"),
+    { className: "muted small", textContent: "read-only", title: "opened over the network; start rollbook with --lan-write to allow changes" }));
   await api("profile").then(setProfileBtn).catch(() => { });  // FTP / weight before the first page
   pollStatus();
   route();

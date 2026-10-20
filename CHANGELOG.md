@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.0 (2026-10-20)
+
+### Use from your phone (`rollbook web --lan`)
+
+- Serves the dashboard to a phone on the same network, on a second HTTPS
+  listener (port 8766). The desktop address `http://127.0.0.1:8765/` is
+  unchanged.
+- Access needs a random link, printed with a QR code in the terminal. It
+  signs the browser in with a cookie; `--new-token` signs every device out.
+- Read-only from the phone unless started with `--lan-write`.
+- Self-signed certificate made with `openssl` or, without it, in pure Python.
+  Its fingerprint is printed so you can check it before accepting the
+  browser warning. `--lan-http` drops TLS.
+
 ## 0.2.0 (2026-10-18)
 
 ### MCP server (`rollbook mcp`)
