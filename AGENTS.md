@@ -9,7 +9,8 @@ optional dependency, kept in `./.venv`). There is no API access — see
 [Why no API](#why-no-api). The network exceptions are OSM basemap tiles,
 OSM Nominatim reverse geocoding for segment names and Open-Meteo historical
 weather, all cached forever in `data/cache/` (`./rollbook web --offline`
-turns them off).
+turns them off), plus the opt-in `rollbook strava sync` (strava.com with your
+browser session cookie, see [Strava sync](#strava-sync)).
 
 ## Quick start
 
@@ -45,7 +46,7 @@ data/rollbook.db          SQLite: 1866 activities, 4.07M samples   (gitignored)
 data/cache/archives/    extracted Strava export                  (gitignored)
 exports/*.zip           raw Strava account exports, by request date (gitignored)
 LICENSE                 GPL-3.0 text
-tests/                  unittest suite (parsing, logic, importer, app, weather, laps, FTP, MCP, LAN/TLS/QR, end-to-end API); run in CI
+tests/                  unittest suite (parsing, logic, importer, Strava sync, app, weather, laps, FTP, MCP, LAN/TLS/QR, end-to-end API); run in CI
 tools/demo.py           synthetic demo athlete (export + DB + seeded caches), never real data
 tools/screenshots.py    regenerates docs/screenshots/*.png from the demo, headless Chrome, --offline
 CHANGELOG.md            release notes; `rollbook --version` = __version__ in bin/rollbook
@@ -61,6 +62,7 @@ web/tls.py              self-signed cert for `web --lan` (openssl, else pure-Pyt
 web/qr.py               stdlib QR encoder (byte mode, level M, v1-10) for the --lan link
 web/app.py              `rollbook app`: desktop window (pywebview / Chrome-Edge --app / browser)
 web/mcp_server.py       `rollbook mcp`: read-only MCP tools over stdio JSON-RPC
+web/strava_web.py       `rollbook strava`: session-cookie sync of new activities from strava.com
 opencode.json           registers `./rollbook mcp` as the `rollbook` MCP server
 web/static/             index.html / app.js / map.js / style.css, vanilla JS + SVG/canvas, no CDN
 web/static/icon.svg     app icon master; favicon.svg is its 16-32 px simplification
@@ -84,6 +86,7 @@ NOTES.md                analysis findings so far
 | `mcp [--allow-gps]` | read-only MCP server on stdio (`web/mcp_server.py`), registered in `opencode.json` |
 | `list <archive>` / `trend <archive>` | bulk views straight off an archive, `-t type --since --until --by week\|month\|year` |
 | `streams <file>` | which data channels a file actually carries |
+| `strava auth\|sync\|status\|logout` | sync new activities from strava.com with the browser session cookie, see [Strava sync](#strava-sync) |
 | `login` / `whoami` / `activities` | Strava API mode — unusable, see below |
 
 Accepts `.gpx`, `.tcx`, `.fit`, each optionally `.gz`, or a numeric Strava
@@ -95,6 +98,9 @@ activity id. Format is detected from the extension, not guessed.
    "Request your archive". Email arrives within a few hours.
 2. `mv ~/Downloads/export_*.zip exports/export_<athleteid>_$(date +%F).zip`
 3. `./rollbook db build exports/<file>.zip && ./rollbook db enrich --missing`
+
+Between exports, `./rollbook strava sync` fetches just the new activities
+(see [Strava sync](#strava-sync)).
 
 Single activities: on Strava, an activity's ⋯ menu → **Export Original**
 gives the file as the watch recorded it (HUAWEI: `Outdoor_cycle.fit`, no
@@ -395,6 +401,52 @@ changing `derive()`.
   max(60 m, 25% of lap length) and lap length within 12% — the gate itself
   moves between sessions, the centre doesn't.
 
+## Strava sync
+
+`./rollbook strava sync` (or **⟳ Sync from Strava** in the Import dialog)
+fetches activities newer than the DB without a full export. No API, no
+password: it uses the website's own endpoints with the `_strava4_session`
+cookie of a logged-in browser, stored once by `./rollbook strava auth`
+(hidden prompt or stdin, accepts the bare value or a whole `Cookie:` header,
+checked against strava.com, saved in `data/strava_cookie` 0600). **Never
+paste the cookie into a chat**: it is a full login. `strava logout` deletes
+it (log out on strava.com to kill the session itself). This is automated use
+of the website, which Strava's terms don't allow; it is kept polite.
+
+* `GET /athlete/training_activities?page=N` (XHR JSON, `models` / `total`),
+  newest first. Known = ids in the raw DB (hidden ones too) ∪
+  `data/imports/activities/strava-<id>.*` ∪ `no_file` in
+  `data/strava_sync.json`. Stops at the first page with nothing new (`--all`
+  walks every page, `--since YYYY-MM-DD` stops at older ones). Downloads
+  oldest first, `--max` (200) per run, so a capped/interrupted run is
+  continued by the next one. `--dry-run` only lists.
+* `GET /activities/<id>/export_original`, format sniffed from the bytes
+  (FIT header / `<gpx` / TrainingCenterDatabase, `.gz` kept). An HTML page or
+  404 = no original (manual entry) → remembered in `no_file`.
+* Each file goes to `data/imports/activities/strava-<id>.<ext>` with an
+  `activities.csv` row (Strava id, start, name, sport — `display_type`, else
+  the CamelCase `type` split), so the build gives it **Strava's id** and the
+  right sport. Then `db build data/imports` + `enrich --missing`.
+* No `s_*` summary columns for synced rows. The next full export has the same
+  id and replaces the row (`INSERT OR REPLACE`); afterwards `db build` skips
+  any file whose CSV id already has a row with `s_distance_m` under another
+  filename ("skipped, already imported from an export"), so rebuilding
+  `data/imports` never brings the bare copy back.
+* HTTP (`Client`): 1.5 s between requests, 429/5xx back off (Retry-After),
+  401/403 or a redirect to `/login` → `AuthExpired` (exit 3; network errors
+  exit 4). The cookie is an unredirected header, re-added on a redirect only
+  to the same origin. A rotated `_strava4_session` in `Set-Cookie` is saved.
+  `ROLLBOOK_STRAVA_BASE` (tests) is honoured only for `http://127.0.0.1|localhost:port`.
+* Dashboard: `POST /api/strava/sync` (same `X-Rollbook` / Host / Origin
+  checks; refused with `--offline`, without a cookie, and on `--lan` unless
+  `--lan-write`) runs `rollbook strava sync --no-build` as a subprocess, so the
+  server process never reads the cookie, then the normal import build; the
+  page polls `GET /api/import` (`source: "strava"`, `fetched`, `auth`).
+  `GET /api/strava` = configured / last sync / auth_expired, never the
+  cookie. The MCP server has no sync tool.
+* Endpoints are undocumented: all response parsing is `parse_list()` /
+  `sniff_ext()`, tested against a local fake in `tests/test_strava.py`.
+
 ## MCP server
 
 `./rollbook mcp` (`web/mcp_server.py`) is MCP over stdio, newline-delimited
@@ -481,7 +533,8 @@ agreement is the strongest check available:
 
 ## Why no API
 
-Both remote options are paywalled for this account, verified by probing:
+(The website itself is still usable with a session cookie, see
+[Strava sync](#strava-sync).) Both remote options are paywalled for this account, verified by probing:
 
 * `mcp.strava.com/mcp` → `401`, and the issuer's `registration_endpoint`
   only accepts a `client_name` containing "claude", always returning the same

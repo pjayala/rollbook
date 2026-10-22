@@ -27,6 +27,7 @@ import socket
 import sqlite3
 import ssl
 import statistics
+import strava_web
 import sys
 import threading
 import time
@@ -1285,6 +1286,15 @@ def make_handler(db_path, M, tiles, lan=None):
                 except Exception as e:
                     code, body = 500, {"error": f"{type(e).__name__}: {e}"}
                 return self.json(body, code)
+            if u.path == "/api/strava/sync":
+                if not self._same_origin() or self.headers.get("X-Rollbook") != "1":
+                    return self._reject(403, json.dumps({"error": "forbidden"}))
+                if IMPORTER.offline:
+                    return self.json({"error": "rollbook runs with --offline: no Strava sync"}, 400)
+                if not strava_web.status(IMPORTER.home)["configured"]:
+                    return self.json({"error": "no Strava cookie stored: in a terminal, run ./rollbook strava auth"}, 400)
+                code, body = IMPORTER.sync_strava()
+                return self.json(clean(body), code)
             self._reject(404, "not found", "text/plain")
 
         def route_api(self, p, q):
@@ -1305,6 +1315,8 @@ def make_handler(db_path, M, tiles, lan=None):
                 return self.json(clean(PROFILE.get()))
             if p == "import":
                 return self.json(clean(IMPORTER.status()))
+            if p == "strava":  # never the cookie itself
+                return self.json(clean({**strava_web.status(IMPORTER.home), "offline": IMPORTER.offline}))
             if p.startswith("activity/"):
                 tail = p[len("activity/"):]
                 if not tail.isdigit():
@@ -1371,6 +1383,7 @@ def start(db_path, cache_path, port=8765, offline=False, lan=None):
     SEGS = segments.SegmentStore(db_path, M, os.path.join(os.path.dirname(cache_path), "web_segments.json"))
     IMPORTER = importer.Importer(db_path, M)
     IMPORTER.on_store = EDITS.forget_removed
+    IMPORTER.offline = offline
     PROFILE = athlete.Profile(os.path.dirname(os.path.abspath(db_path)))
     FAVS = Favorites(os.path.join(os.path.dirname(os.path.abspath(db_path)), "favorites.json"))
     threading.Thread(target=M.warm, daemon=True).start()
