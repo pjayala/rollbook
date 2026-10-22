@@ -1864,6 +1864,7 @@ function openImport(files) {
     if (!$("#imp-sport").value) $("#imp-sport").value = S.type || "";
   }
   if (files && files.length && !Imp.busy) addImportFiles(files);
+  if (!Imp.busy) stravaStatus();
 }
 function addImportFiles(list) {
   for (const f of list) if (!Imp.files.some(g => g.name === f.name && g.size === f.size)) Imp.files.push(f);
@@ -1879,6 +1880,7 @@ function drawImportList(state = {}) {
   $("#imp-list").querySelectorAll("[data-rm]").forEach(a => a.onclick = e => { e.preventDefault(); Imp.files.splice(+a.dataset.rm, 1); drawImportList(); });
   $("#imp-sport-row").hidden = !Imp.files.length;
   $("#imp-go").disabled = Imp.busy || !Imp.files.some(kindOf);
+  if (Imp.busy) $("#imp-strava").disabled = true;
 }
 function upload(f, sport, onProgress) {
   return new Promise((resolve, reject) => {
@@ -1913,27 +1915,61 @@ async function runImport() {
     if (!ok) throw new Error("nothing could be uploaded");
     const r = await fetch("/api/import/run", { method: "POST", headers: { "X-Rollbook": "1" } });
     if (!r.ok) throw new Error((await r.json()).error || r.status);
-    let j;
-    for (;;) {
-      j = await api("import");
-      const frac = j.total ? j.done / j.total : 0;
-      bar.style.width = (30 + (j.phase && j.phase.startsWith("importing") ? frac * 55 : j.state === "running" ? 88 : 100)).toFixed(1) + "%";
-      phase.textContent = `${j.phase || ""}${j.total ? ` · ${j.done}/${j.total}` : ""}`;
-      log.textContent = (j.log || []).join("\n"); log.scrollTop = log.scrollHeight;
-      if (j.state !== "running") break;
-      await sleep(800);
-    }
-    if (j.state === "error") throw new Error(j.error);
-    bar.style.width = "100%";
-    const dups = (j.log || []).filter(l => /skipped, same session/.test(l)).length;
-    phase.innerHTML = (j.added ? `<span class="up">✓ ${j.added} new activit${j.added === 1 ? "y" : "ies"} imported.</span>` : `<span class="muted">✓ Done, nothing new: everything was already imported.</span>`) +
-      (dups ? ` <span class="muted">${dups} already in Rollbook from another file (same start time and distance), skipped.</span>` : "");
+    await finishImport(30);
     Imp.files = [];
-    if (j.added) await refreshData();
   } catch (e) {
     phase.innerHTML = `<span class="down">✕ ${esc(e.message)}</span>`;
   } finally {
-    Imp.busy = false; drawImportList(state);
+    Imp.busy = false; drawImportList(state); stravaStatus();
+  }
+}
+/** Poll a running import job (upload or Strava sync) to the end; the bar goes from `base` % to 100 %. */
+async function finishImport(base) {
+  const bar = $("#imp-bar"), phase = $("#imp-phase"), log = $("#imp-log");
+  let j;
+  for (;;) {
+    j = await api("import");
+    const frac = j.total ? j.done / j.total : 0;
+    const p = j.phase || "";
+    bar.style.width = (base + (p.startsWith("importing") || p.startsWith("checking Strava") ? frac * (85 - base) : j.state === "running" ? 88 - base : 100 - base)).toFixed(1) + "%";
+    phase.textContent = `${p}${j.total ? ` · ${j.done}/${j.total}` : ""}`;
+    log.textContent = (j.log || []).join("\n"); log.scrollTop = log.scrollHeight;
+    if (j.state !== "running") break;
+    await sleep(800);
+  }
+  if (j.state === "error") throw new Error(j.error);
+  bar.style.width = "100%";
+  const dups = (j.log || []).filter(l => /skipped, (same session|already imported)/.test(l)).length;
+  const fetched = j.source === "strava" ? `<span class="muted">${j.fetched || 0} file${j.fetched === 1 ? "" : "s"} downloaded from Strava. </span>` : "";
+  phase.innerHTML = fetched + (j.added ? `<span class="up">✓ ${j.added} new activit${j.added === 1 ? "y" : "ies"} imported.</span>` : `<span class="muted">✓ Done, nothing new: everything was already imported.</span>`) +
+    (dups ? ` <span class="muted">${dups} already in Rollbook from another file (same start time and distance), skipped.</span>` : "");
+  if (j.added) await refreshData();
+  return j;
+}
+async function stravaStatus() {
+  const btn = $("#imp-strava"), st = $("#imp-strava-st");
+  try {
+    const s = await api("strava");
+    btn.disabled = Imp.busy || !s.configured || s.offline;
+    st.textContent = s.offline ? "off: rollbook runs with --offline"
+      : !s.configured ? "not set up: run ./rollbook strava auth in a terminal (log into strava.com, copy the _strava4_session cookie)"
+      : s.auth_expired ? "Strava login expired: run ./rollbook strava auth again"
+      : s.last_sync ? `last synced ${new Date(s.last_sync).toLocaleString()}` : "never synced";
+    st.className = "small " + (s.auth_expired ? "down" : "muted");
+  } catch { btn.disabled = true; st.textContent = ""; }
+}
+async function runStravaSync() {
+  const phase = $("#imp-phase");
+  Imp.busy = true; drawImportList(); $("#imp-strava").disabled = true;
+  $("#imp-prog").hidden = false; $("#imp-log").textContent = ""; phase.textContent = "contacting Strava…"; $("#imp-bar").style.width = "0";
+  try {
+    const r = await fetch("/api/strava/sync", { method: "POST", headers: { "X-Rollbook": "1" } });
+    if (!r.ok) throw new Error((await r.json()).error || r.status);
+    await finishImport(0);
+  } catch (e) {
+    phase.innerHTML = `<span class="down">✕ ${esc(e.message)}</span>`;
+  } finally {
+    Imp.busy = false; drawImportList(); stravaStatus();
   }
 }
 /** Drop every client cache and redraw, after the DB (or its edits) changed underneath us.
@@ -1998,6 +2034,7 @@ function initImport() {
   $("#imp-close").onclick = () => $("#import-dlg").close();
   $("#imp-file").onchange = e => { addImportFiles(e.target.files); e.target.value = ""; };
   $("#imp-go").onclick = runImport;
+  $("#imp-strava").onclick = runStravaSync;
   $("#import-dlg").addEventListener("cancel", e => { if (Imp.busy) e.preventDefault(); });
   // drag files anywhere onto the page
   let depth = 0;

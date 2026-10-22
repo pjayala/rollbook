@@ -68,6 +68,10 @@ GPS: runs, rides, walks, skates, plus indoor rides from ROUVY or MyWhoosh.
   `.fit/.gpx/.tcx` files ("Export Original"). Duplicates are detected, and
   different files with the same name (HUAWEI calls every export
   `Outdoor_cycle.fit`) are all kept.
+- **Sync from Strava** (`rollbook strava sync` or a button in the Import
+  dialog): fetch new activities straight from strava.com with your browser's
+  login cookie, no export or API needed. See
+  [Sync from Strava](#sync-from-strava).
 - **Edit sessions** (✎ on a session): rename, fix the sport, hide from stats
   or delete. Edits are stored next to the database and survive rebuilds.
 - **Desktop window** (`rollbook app`) or a normal browser tab
@@ -163,10 +167,11 @@ The same from the command line:
 ./rollbook web
 ```
 
-Adding sessions later: import a newer export (only new activities are added),
-or a single activity's **⋯ → Export Original** file. Pick the sport in the
-dialog, because watches often mislabel it; HUAWEI saves skating as
-"cycling".
+Adding sessions later: run `./rollbook strava sync` (see
+[Sync from Strava](#sync-from-strava)), import a newer export (only new
+activities are added), or a single activity's **⋯ → Export Original** file.
+For single files, pick the sport in the dialog, because watches often
+mislabel it; HUAWEI saves skating as "cycling".
 
 ## Command line
 
@@ -180,11 +185,51 @@ dialog, because watches often mislabel it; HUAWEI saves skating as
 | `rollbook db query "SQL" [--csv]` | read-only SQL against your data |
 | `rollbook analyze <file>` | one activity: pauses, splits, out/back legs, grade |
 | `rollbook compare <a> <b> …` | side-by-side summary |
+| `rollbook strava auth\|sync\|status\|logout` | download new activities from strava.com, see below |
 | `rollbook mcp [--allow-gps]` | read-only MCP server on stdio, so an AI assistant can query your data |
 | `rollbook --version` | print the version |
 
 Use `./rollbook` on macOS/Linux and `rollbook.cmd` on Windows. All state lives
 in `./data`, which is git-ignored.
+
+### Sync from Strava
+
+Instead of requesting a full export every time, Rollbook can fetch new
+activities from strava.com the way the website does, with the session cookie
+of a browser where you're logged in. No API subscription and no password.
+
+1. Log into strava.com in your browser. Open the developer tools →
+   *Application* (Chrome/Edge) or *Storage* (Firefox) → *Cookies* →
+   `https://www.strava.com`, and copy the value of `_strava4_session`.
+2. In a terminal: `./rollbook strava auth` and paste it (the input is
+   hidden; a whole copied `Cookie:` header works too). It is checked against
+   strava.com and saved in `data/strava_cookie`, readable only by you.
+3. `./rollbook strava sync`, or **⇪ Import → ⟳ Sync from Strava** in the
+   dashboard.
+
+Sync walks your activity list from newest to oldest and stops at the first
+page with nothing new. It downloads each new activity's original file
+(what **Export Original** gives), with Strava's name and sport, then imports
+and enriches them. Options: `--dry-run` (only list), `--since YYYY-MM-DD`,
+`--all` (check every page), `--max N` (default 200 per run, oldest first; the
+next run continues). Manual entries without a file are skipped and
+remembered. `strava status` says whether the cookie still works; when it has
+expired, run `strava auth` again.
+
+Synced sessions lack the summary numbers only an export has (e.g. Strava's
+elevation gain). The next full export replaces them with Strava's version.
+
+Notes:
+
+- **The cookie is a full login to your Strava account.** Never paste it into
+  a chat, an issue or a shared file. `./rollbook strava logout` deletes the
+  stored copy; logging out on strava.com ends the session for good.
+- It's only sent to strava.com. The dashboard never reads it: the button
+  runs the same CLI in a subprocess. It isn't available with `--offline`, or
+  from the phone unless `--lan-write`.
+- This is automated use of the website, which Strava's terms don't allow.
+  Rollbook keeps it light (1.5 s between requests, backs off when asked), but
+  use it at your own risk. The endpoints are undocumented and may change.
 
 ### Use from your phone
 
@@ -297,6 +342,8 @@ can win it.
 - `rollbook mcp` itself makes no network requests, but what it returns to an
   AI assistant goes to that assistant's model provider (GPS withheld by
   default, see [AI assistants](#ai-assistants-mcp)).
+- `rollbook strava sync` (only when you run it) talks to strava.com with your
+  session cookie, see [Sync from Strava](#sync-from-strava).
 - No accounts, no telemetry, no Strava API.
 
 ## How it works
@@ -319,7 +366,8 @@ python3 -m unittest discover -s tests -t tests
 They cover the parsers (GPX, gzipped files, synthetic little- and big-endian
 FIT), the regression fixtures in `samples/`, GPS and elevation clean-up,
 laps and circuits, segments, the wind and slope model, the weather cache, the
-importer (uploads, duplicate detection, background build), the `rollbook app`
+importer (uploads, duplicate detection, background build), Strava sync
+(against a local fake strava.com), the `rollbook app`
 launcher, FTP choice and power zones (run under Node when it's installed), and
 an end-to-end build plus the dashboard API and its CSRF checks. GitHub Actions
 runs them on every push and pull request on Linux, macOS and Windows with

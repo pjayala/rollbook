@@ -24,7 +24,7 @@ Commands
   rollbook login | whoami              OAuth setup / check           (API only)
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 import argparse
 import hashlib
@@ -32,6 +32,7 @@ import http.server
 import json
 import math
 import os
+import re
 import statistics
 import stat
 import sys
@@ -1398,6 +1399,11 @@ def cmd_db_build(a):
 
     done = {r[0] for r in db.execute("SELECT filename FROM activities")}
     todo = [w for w in work if w[0] not in done] if not a.fresh else work
+    # ids whose row carries Strava's export summary: a bare copy of the same
+    # activity under another file (`rollbook strava sync` stores Strava's id in
+    # data/imports) must not overwrite it
+    with_meta = {r[0]: r[1] for r in db.execute(
+        "SELECT id, filename FROM activities WHERE s_distance_m IS NOT NULL")}
     print(f"importing {len(todo)} activities ({len(work) - len(todo)} already present)"
           + ("" if a.samples else "; --no-samples: skipping per-second rows"))
 
@@ -1406,6 +1412,11 @@ def cmd_db_build(a):
         fmt = rel.lower().replace(".gz", "").rsplit(".", 1)[-1]
         aid = (int(csv["id"]) if csv and csv.get("id")
                else int(hashlib.sha1(rel.encode()).hexdigest()[:12], 16) % (10**12))
+        if (aid in with_meta and with_meta[aid] != rel
+                and (csv or {}).get("s_distance_m") is None):
+            print(f"  {rel}: skipped, already imported from an export as {with_meta[aid]}", file=sys.stderr)
+            skipped += 1
+            continue
         row = {
             "id": aid, "filename": rel, "format": fmt,
             "name": (csv or {}).get("name"), "type": (csv or {}).get("type"),
@@ -1699,6 +1710,90 @@ def cmd_mcp(a):
     mcp_server.run(DB, os.path.join(CACHE, "web_metrics.json"), a.allow_gps, __version__)
 
 
+def _strava_mod():
+    webdir = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "web")
+    sys.path.insert(0, os.path.abspath(webdir))
+    import strava_web
+
+    return strava_web
+
+
+def cmd_strava_auth(a):
+    """Store the strava.com session cookie; read from a hidden prompt or stdin."""
+    import getpass
+
+    sw = _strava_mod()
+    if sys.stdin.isatty():
+        print(f"Log into strava.com in your browser, open the developer tools\n"
+              f"(Application/Storage -> Cookies -> https://www.strava.com) and copy the value\n"
+              f"of {sw.COOKIE_NAME}. Paste it here, it is not echoed. Never paste it into a chat.")
+        text = getpass.getpass(f"{sw.COOKIE_NAME}: ")
+    else:
+        text = sys.stdin.readline()
+    try:
+        value = sw.parse_cookie(text)
+    except ValueError as e:
+        die(str(e))
+    if not a.no_check:
+        try:
+            acts, total = sw.Client(value).list_page(1)
+        except sw.AuthExpired as e:
+            die(f"Strava didn't accept that cookie ({e}). Copy it again from a logged-in browser.", sw.EXIT_AUTH)
+        except sw.SyncError as e:
+            die(f"couldn't check the cookie: {e} (store it anyway with --no-check)", sw.EXIT_NET)
+        print(f"ok, logged in: {total if total is not None else len(acts)} activities on Strava")
+    sw.save_cookie(HOME, value)
+    st = sw.load_state(HOME)
+    st.pop("auth_expired", None)
+    sw.save_state(HOME, st)
+    print(f"saved to {sw.cookie_path(HOME)} (0600). `rollbook strava logout` removes it.")
+
+
+def cmd_strava_logout(a):
+    sw = _strava_mod()
+    print("removed the stored Strava cookie" if sw.forget_cookie(HOME) else "no Strava cookie stored")
+    print("(log out on strava.com too to end that browser session)")
+
+
+def cmd_strava_status(a):
+    sw = _strava_mod()
+    s = sw.status(HOME)
+    print(f"cookie     : {'stored' if s['configured'] else 'none, run: rollbook strava auth'}")
+    print(f"last sync  : {s['last_sync'] or 'never'}  {json.dumps(s['last_result']) if s['last_result'] else ''}")
+    if s["configured"] and not a.offline:
+        try:
+            acts, total = sw.Client(sw.load_cookie(HOME)).list_page(1)
+            print(f"strava.com : logged in, {total if total is not None else len(acts)} activities")
+        except sw.AuthExpired as e:
+            die(f"strava.com: session expired ({e}), run: rollbook strava auth", sw.EXIT_AUTH)
+        except sw.SyncError as e:
+            die(f"strava.com: {e}", sw.EXIT_NET)
+
+
+def cmd_strava_sync(a):
+    """List new activities on strava.com, download their original files into
+    data/imports, then build + enrich like the dashboard's Import does."""
+    sw = _strava_mod()
+    if a.since and not re.fullmatch(r"\d{4}-\d\d-\d\d", a.since):
+        die("--since wants YYYY-MM-DD")
+    cookie = sw.load_cookie(HOME)
+    if not cookie:
+        die("no Strava cookie stored. run: rollbook strava auth", sw.EXIT_AUTH)
+    client = sw.Client(cookie, delay=a.delay)
+    try:
+        r = sw.sync(HOME, DB, client, since=a.since, all_pages=a.all, max_new=a.max, dry_run=a.dry_run,
+                    log=lambda s: print(s, flush=True))
+    except sw.AuthExpired as e:
+        die(f"Strava session expired or invalid ({e}). run: rollbook strava auth", sw.EXIT_AUTH)
+    except sw.SyncError as e:
+        die(str(e), sw.EXIT_NET)
+    print(f"downloaded {r['downloaded']}, no file {r['no_file']}", flush=True)
+    if r["downloaded"] and not a.no_build and not a.dry_run:
+        imports = os.path.join(HOME, "imports")
+        cmd_db_build(argparse.Namespace(archive=imports, fresh=False, limit=None, samples=True))
+        cmd_db_enrich(argparse.Namespace(windows="5,10,20", missing=True))
+
+
 def main():
     # Windows consoles default to a legacy code page; never die on a "→"
     for f in (sys.stdout, sys.stderr):
@@ -1785,6 +1880,24 @@ def main():
     mc.add_argument("--allow-gps", action="store_true",
                     help="let SQL read samples.lat/lon (off by default: tracks reveal home)")
     mc.set_defaults(fn=cmd_mcp)
+
+    sv = sub.add_parser("strava", help="sync new activities from strava.com with your browser session cookie")
+    ssub = sv.add_subparsers(dest="stravacmd", required=True)
+    sa = ssub.add_parser("auth", help="store the _strava4_session cookie (hidden prompt or stdin)")
+    sa.add_argument("--no-check", action="store_true", help="don't verify it against strava.com")
+    sa.set_defaults(fn=cmd_strava_auth)
+    ssub.add_parser("logout", help="delete the stored cookie").set_defaults(fn=cmd_strava_logout)
+    ss = ssub.add_parser("status", help="cookie stored? last sync? still logged in?")
+    ss.add_argument("--offline", action="store_true", help="don't contact strava.com")
+    ss.set_defaults(fn=cmd_strava_status)
+    sy = ssub.add_parser("sync", help="download new activities' original files, then build + enrich")
+    sy.add_argument("--since", help="YYYY-MM-DD: ignore older activities, stop paging there")
+    sy.add_argument("--all", action="store_true", help="walk every page, not just until one with nothing new")
+    sy.add_argument("--max", type=int, default=200, help="at most N downloads per run (oldest first; default 200)")
+    sy.add_argument("--dry-run", action="store_true", help="only list what's new")
+    sy.add_argument("--no-build", action="store_true", help="download only, skip db build / enrich")
+    sy.add_argument("--delay", type=float, default=1.5, help=argparse.SUPPRESS)
+    sy.set_defaults(fn=cmd_strava_sync)
 
     a = p.parse_args()
     a.fn(a)

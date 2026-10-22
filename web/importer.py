@@ -29,12 +29,13 @@ import threading
 import time
 import zipfile
 
+from strava_web import CSV_HEAD, EXIT_AUTH  # one index format for uploads and Strava sync
+
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 EXPORTS = os.path.join(ROOT, "exports")
 TOOL = os.path.join(ROOT, "bin", "rollbook")
 ACT_EXT = (".fit", ".gpx", ".tcx", ".fit.gz", ".gpx.gz", ".tcx.gz")
 MAX_BYTES = 4 * 1024 ** 3
-CSV_HEAD = ["Activity ID", "Activity Date", "Activity Name", "Activity Type", "Filename"]
 
 
 def safe_name(name):
@@ -60,6 +61,7 @@ class Importer:
         self.pending = []  # paths to build: export zips, and/or the imports dir
         self.job: dict = {"state": "idle"}
         self.on_store = None  # called with "activities/<name>" for each newly stored file
+        self.offline = False  # `web --offline`: no Strava sync
 
     # ---------------------------------------------------------------- upload
 
@@ -193,6 +195,17 @@ class Importer:
         threading.Thread(target=self._work, args=(todo,), daemon=True).start()
         return 200, self.status()
 
+    def sync_strava(self):
+        """`rollbook strava sync --no-build` in a subprocess (the cookie never
+        enters this process), then the usual build of data/imports."""
+        with self.lock:
+            if self.job.get("state") == "running":
+                return 409, self.status()
+            self.job = {"state": "running", "phase": "starting", "done": 0, "total": 0, "log": [],
+                        "added": 0, "started": time.time(), "items": ["Strava"], "source": "strava"}
+        threading.Thread(target=self._work, args=([],), kwargs={"strava": True}, daemon=True).start()
+        return 200, self.status()
+
     def status(self):
         j = dict(self.job)
         if "log" in j:
@@ -235,10 +248,26 @@ class Importer:
                 j["phase"] = "extracting export"
         return p.wait()
 
-    def _work(self, todo):
+    def _strava(self):
+        """Download step of a Strava sync; returns how many files it stored."""
+        j = self.job
+        rc = self._cmd(["strava", "sync", "--no-build"], "checking Strava for new activities")
+        if rc == EXIT_AUTH:
+            j["auth"] = True
+            raise RuntimeError("Strava login missing or expired: in a terminal, run ./rollbook strava auth")
+        if rc:
+            raise RuntimeError(next((x[len("error: "):] for x in reversed(j["log"]) if x.startswith("error")),
+                                    "Strava sync failed"))
+        m = next((re.match(r"downloaded (\d+)", x) for x in reversed(j["log"]) if x.startswith("downloaded")), None)
+        j["fetched"] = int(m.group(1)) if m else 0
+        return j["fetched"]
+
+    def _work(self, todo, strava=False):
         j = self.job
         before = self._ids()
         try:
+            if strava and self._strava():
+                todo = [self.imports]
             for path in todo:
                 label = os.path.basename(path)
                 if self._cmd(["db", "build", path], f"importing {label}"):

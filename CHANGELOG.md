@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.0 (2026-10-22)
+
+### Sync from Strava (`rollbook strava sync`)
+
+- Downloads new activities' original files from strava.com and imports them,
+  no full account export needed. CLI and a **Sync from Strava** button in
+  the Import dialog.
+- Uses your browser's `_strava4_session` cookie, stored once with
+  `rollbook strava auth` in `data/strava_cookie` (0600); no password.
+  `strava status` / `strava logout`.
+- Synced activities keep Strava's id, name and sport; the next full export
+  replaces them with Strava's summary, and they never overwrite it afterwards.
+- Polite: requests spaced 1.5 s, backs off on 429, stops paging at the first
+  page with nothing new. Automated website access is against Strava's terms.
+
 ## 0.3.0 (2026-10-20)
 
 ### Use from your phone (`rollbook web --lan`)

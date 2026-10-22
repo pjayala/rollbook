@@ -46,6 +46,10 @@
     <span class="muted small">A Strava account export (<code>export_….zip</code>), single <code>.fit</code> / <code>.gpx</code> / <code>.tcx</code> files (also <code>.gz</code>) such as an activity's <b>Export Original</b>, or a zip of those</span>
   </label>
   <div id="imp-list"></div>
+  <div class="toolbar" id="imp-strava-row">
+    <button class="btn small" id="imp-strava" title="Download new activities' original files from strava.com, then import them">⟳ Sync from Strava</button>
+    <span class="muted small" id="imp-strava-st"></span>
+  </div>
   <div class="toolbar" id="imp-sport-row" hidden>
     <label class="muted small">Sport for single files (the file's own sport is often wrong, e.g. HUAWEI saves skating as "cycling") <input id="imp-sport" list="imp-types" style="width:180px"></label>
     <datalist id="imp-types"></datalist>
