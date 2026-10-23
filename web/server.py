@@ -1179,6 +1179,11 @@ def make_handler(db_path, M, tiles, lan=None):
             p = u.path
             if self._lan_gate(u, q):
                 return
+            if lan is None and self.headers.get("Host") not in self._local_hosts():
+                # DNS rebinding: a website whose name now resolves to 127.0.0.1 would
+                # otherwise read every response (GPS tracks included) as same-origin
+                return self.send(403, "unknown host name: open http://127.0.0.1:"
+                                      f"{self.server.server_address[1]}/\n", "text/plain")
             if lan is None and "app" in q and not p.startswith(("/api/", "/tiles/")):
                 # app launcher: a page load of window <token> after its bye = a reload
                 self.server.app_pages[q["app"]] = now
@@ -1193,14 +1198,17 @@ def make_handler(db_path, M, tiles, lan=None):
             except Exception as e:  # keep the server alive, report to client
                 self.json({"error": f"{type(e).__name__}: {e}"}, 500)
 
+        def _local_hosts(self):
+            port = self.server.server_address[1]
+            return (f"127.0.0.1:{port}", f"localhost:{port}")
+
         def _same_origin(self):
             """Reject other websites (CSRF) and DNS-rebinding hosts."""
             host = self.headers.get("Host")
             origin = self.headers.get("Origin")
             if lan is not None:
                 return host in lan.hosts and (origin is None or origin == f"{lan.scheme}://{host}")
-            port = self.server.server_address[1]
-            ours = (f"127.0.0.1:{port}", f"localhost:{port}")
+            ours = self._local_hosts()
             if host not in ours:
                 return False
             return origin is None or origin in tuple("http://" + o for o in ours)

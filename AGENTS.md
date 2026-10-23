@@ -207,7 +207,10 @@ Icons: edit `web/static/icon.svg` / `favicon.svg`, then re-render `assets/`
 favicon art at 16-64 px) and copy `icon-256.png`, `favicon-32.png`,
 `favicon.ico` into `web/static/`.
 
-`./rollbook web` binds to 127.0.0.1 only and opens the DB read-only. Metrics the
+`./rollbook web` binds to 127.0.0.1 only and opens the DB read-only. Every
+request on that listener, GET included, needs `Host: 127.0.0.1:<port>` or
+`localhost:<port>` (else 403): a DNS-rebinding page would otherwise read the
+whole API, GPS tracks included, as same-origin. Metrics the
 DB doesn't hold — best 30/45/60 min, out/back legs, **wind-neutral** speed,
 route kind, HR histogram — are derived from `samples` in a background thread
 on first start (~1 min for all activities) and cached in

@@ -3,6 +3,7 @@
 """End to end: build a database from a small export, then hit the dashboard API."""
 
 import csv
+import http.client
 import json
 import os
 import shutil
@@ -159,6 +160,32 @@ class Api(Build):
         self.assertEqual(self.post("/api/bye")[0], 403)
         self.assertEqual(self.post("/api/bye", b"", {"Origin": "https://evil.example"})[0], 403)
         self.assertEqual(self.post("/api/bye", b"", {"Origin": f"http://127.0.0.1:{self.port}"})[0], 204)
+
+    def get_host(self, path, host):
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=60)
+        try:
+            c.putrequest("GET", path, skip_host=True)
+            if host is not None:
+                c.putheader("Host", host)
+            c.endheaders()
+            r = c.getresponse()
+            return r.status, r.read()
+        finally:
+            c.close()
+
+    def test_get_refuses_foreign_host(self):
+        """DNS rebinding: evil.example resolving to 127.0.0.1 must not read the API."""
+        paths = ("/", "/app.js", "/api/status", "/api/activities?type=Inline%20Skate",
+                 "/api/activity/1001", "/api/import", "/tiles/osm/1/1/1.png")
+        for p in paths:
+            for h in (f"evil.example:{self.port}", "evil.example", f"127.0.0.1:{self.port + 1}",
+                      f"127.0.0.1.evil.example:{self.port}", None):
+                code, body = self.get_host(p, h)
+                self.assertEqual(code, 403, (p, h))
+                self.assertNotIn(b"series", body)
+        for h in (f"127.0.0.1:{self.port}", f"localhost:{self.port}"):
+            self.assertEqual(self.get_host("/api/status", h)[0], 200, h)
+            self.assertEqual(self.get_host("/?app=tok", h)[0], 200, h)  # app launcher URL
 
     def test_profile_api(self):
         h = {"X-Rollbook": "1", "Content-Type": "application/json"}

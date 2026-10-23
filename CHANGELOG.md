@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.1 (2026-10-23)
+
+### Security
+
+- The desktop listener (`http://127.0.0.1:8765/`) now refuses any request
+  whose `Host` isn't `127.0.0.1:<port>` or `localhost:<port>`, GETs included.
+  Before, only POSTs were checked, so a website using DNS rebinding could
+  read the dashboard's data, GPS tracks included.
+
 ## 0.4.0 (2026-10-22)
 
 ### Sync from Strava (`rollbook strava sync`)
