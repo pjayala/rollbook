@@ -124,15 +124,23 @@ NODE_HARNESS = r"""
 const fs = require("fs");
 const src = fs.readFileSync(process.argv[2], "utf8").replace(/\r\n/g, "\n");
 const acts = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
-const i = src.indexOf("function circuits(");
-const j = src.indexOf("\n}\n", i);
-if (i < 0 || j < 0) throw new Error("circuits() not found in app.js");
+const cut = name => {  // a top-level function, up to its closing brace in column 0
+  const a = src.indexOf("function " + name + "("), b = src.indexOf("\n}\n", a);
+  if (a < 0 || b < 0) throw new Error(name + "() not found in app.js");
+  return src.slice(a, b + 2);
+};
+const konst = name => {
+  const m = src.match(new RegExp("^const " + name + " = .*;$", "m"));
+  if (!m) throw new Error(name + " not found in app.js");
+  return m[0];
+};
 let captured = null;
 const median = a => { const s = [...a].sort((x, y) => x - y), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
 const stubs = { $: () => ({}), chart: (h, o) => { captured = o; }, median,
   f0: String, f2: String, dur: String, fdate: String, esc: String, go: () => {}, DAY: 86400000,
   CIRC_COLORS: ["a", "b", "c", "d", "e", "f"] };
-const circuits = new Function(...Object.keys(stubs), src.slice(i, j + 2) + "\nreturn circuits;")(...Object.values(stubs));
+const body = [konst("whenOf"), konst("cmpWhen"), cut("groupCircuits"), cut("circuits")].join("\n");
+const circuits = new Function(...Object.keys(stubs), body + "\nreturn circuits;")(...Object.values(stubs));
 const host = { hidden: false, innerHTML: "" };
 circuits(host, acts.map(a => Object.assign({}, a, { _d: new Date(a._t) })));
 const groups = captured ? captured.series.filter(s => s.kind === "dot").map(s => s.data.map(p => p.ref).sort()) : [];
@@ -179,6 +187,13 @@ class Circuits(unittest.TestCase):
 
     def test_sessions_without_centre_ignored(self):
         self.assertEqual(self.groups([self.act(1), self.act(2), self.act(3, center=False)]), [[1, 2]])
+
+    def test_grouping_does_not_depend_on_input_order(self):
+        # the oldest session anchors the circuit: 2 is 90 m from 1, 3 is 90 m from 2 but 180 m from 1
+        acts = [self.act(1), self.act(2, north_m=90), self.act(3, north_m=180)]
+        want = self.groups(acts)
+        self.assertEqual(self.groups(acts[::-1]), want)
+        self.assertEqual(want, [[1, 2], [3]])
 
 
 @unittest.skipUnless(REAL_FIT, "real export not present (data/cache/archives/*/activities/21363091415.fit.gz)")

@@ -410,6 +410,13 @@ class ImporterJob(unittest.TestCase):
                                  ["db", "enrich", "--missing"]])
         self.assertEqual((st["state"], st["fetched"], st["added"], st["source"]), ("done", 1, 1, "strava"))
 
+    def test_summary_source_is_strava(self):
+        import lastimport
+        self.imp.last = lastimport.LastImport(os.path.join(self.home, "last_import.json"))
+        self.go(0, ["downloaded 1, no file 0"], [{1}, {1, 2}])
+        d = self.imp.last.get()
+        self.assertEqual((d["source"], d["items"], d["new_ids"]), ("strava", ["Strava"], [2]))
+
     def test_nothing_new_no_build(self):
         calls, st = self.go(0, ["0 new on Strava", "downloaded 0, no file 0"], [{1}, {1}])
         self.assertEqual(calls, [["strava", "sync", "--no-build"]])

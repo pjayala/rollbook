@@ -23,6 +23,10 @@ const hours = s => isNum(s) ? (s / 3600).toFixed(s >= 360000 ? 0 : 1) + " h" : "
 const pace = kmh => isNum(kmh) && kmh > 0 ? dur(3600 / kmh) : "–";  // min:ss per km
 const pct = v => isNum(v) ? (v > 0 ? "+" : "") + v.toFixed(1) + "%" : "–";
 const dateOf = a => new Date(a.date + "T12:00:00");
+/** Start time in ms (`datetime` is ISO with offset); `_t` is noon of the day, too coarse
+ * to order two sessions of one day. */
+const whenOf = a => { const t = Date.parse(a.datetime || ""); return isFinite(t) ? t : a._t; };
+const cmpWhen = (a, b) => whenOf(a) - whenOf(b) || (+a.id) - (+b.id);
 const DAY = 86400000;
 const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const fdate = d => `${d.getDate()} ${MON[d.getMonth()]} ${d.getFullYear()}`;
@@ -401,7 +405,7 @@ function sessionMap(host, series, opt = {}) {
 
 // ------------------------------------------------------------------ state
 
-const S = { segs: {}, tracks: {}, mapView: {}, types: [], type: localStorage.type || "Inline Skate", range: localStorage.range || "all", acts: {}, hrmax: null, sort: { k: "date", dir: -1 }, q: "" };
+const S = { segs: {}, segsP: {}, lastImport: null, tracks: {}, mapView: {}, types: [], type: localStorage.type || "Inline Skate", range: localStorage.range || "all", acts: {}, hrmax: null, sort: { k: "date", dir: -1 }, q: "" };
 /** Sessions of one sport; withHidden also lists hidden / deleted ones (flagged a.hidden / a.deleted). */
 async function loadActs(type, withHidden) {
   const key = withHidden ? type + "\u0000hidden" : type;
@@ -482,6 +486,7 @@ async function viewProgress() {
       ...(hasPw ? [{ k: "Best 20-min power", v: f0(p20?.pw20m) + " W", s: link(p20), hl: 1 },
         { k: FT && FT.src === "estimate" ? "FTP estimate" : "FTP", v: isNum(ftp) ? f0(ftp) + " W" : "–", s: (FT ? FT.note : "") + (ftp && S.profile?.weight_kg ? ` · ${(ftp / S.profile.weight_kg).toFixed(2)} W/kg` : "") }] : []),
     ])}
+    <div class="panel" id="p-new" hidden></div>
     <div class="panel"><h2>Calendar <span class="muted">km per day · click a day to open it</span></h2><div id="cal"></div></div>
     <div class="grid g2">
       <div class="panel"><h2>Form: best 10-min speed <span class="muted">click a dot to open the session</span></h2><div id="c-form"></div>
@@ -629,12 +634,8 @@ async function viewProgress() {
   if (!zm.length) $("#c-zones").innerHTML = `<p class="muted">No heart-rate data in this range.</p>`;
 
   // records
-  const recs = [["Best 5 min", "best5min_kmh", "km/h"], ["Best 10 min", "best10min_kmh", "km/h"], ["Best 20 min", "best20min_kmh", "km/h"],
-    ["Best 30 min", "b30", "km/h"], ["Best 60 min", "b60", "km/h"], ["Best wind-neutral 10 min", "wind_neutral", "km/h"],
-    ["Fastest avg (≥10 km)", "kmh_moving", "km/h", acts.filter(a => a.km >= 10)], ["Longest", "km", "km"], ["Longest moving time", "moving_s", ""], ["Most climbing", "ascent_m", "m"],
-    ...(hasPw ? [["Best 5 s power", "pw5s", "W"], ["Best 30 s power", "pw30s", "W"], ["Best 1 min power", "pw1m", "W"], ["Best 5 min power", "pw5m", "W"], ["Best 20 min power", "pw20m", "W"], ["Best 30 min power", "pw30m", "W"], ["Best 60 min power", "pw60m", "W"], ["Highest weighted power", "np", "W"]] : [])];
   $("#t-rec").innerHTML = `<table><thead><tr><th>record</th><th>value</th><th class="l">date</th><th>km</th><th class="l">route</th></tr></thead><tbody>` +
-    recs.map(([n, k, u, xs]) => { const a = best(k, xs); if (!a) return ""; return `<tr class="click" data-id="${a.id}"><td class="l">${n}</td><td>${k === "moving_s" ? dur(a[k], true) : u === "W" ? f0(a[k]) : f2(a[k])} ${u}</td><td class="l">${fdate(a._d)}</td><td>${fkm(a.km)}</td><td class="l">${routePill(a.route)}</td></tr>`; }).join("") + `</tbody></table>`;
+    RECORD_METRICS.filter(m => !m.power || hasPw).map(m => { const a = best(m.k, m.minKm ? acts.filter(a => a.km >= m.minKm) : acts); if (!a) return ""; return `<tr class="click" data-id="${a.id}"><td class="l">${m.n}</td><td>${recFmt(m, a[m.k])} ${m.u}</td><td class="l">${fdate(a._d)}</td><td>${fkm(a.km)}</td><td class="l">${routePill(a.route)}</td></tr>`; }).join("") + `</tbody></table>`;
   $("#t-mon").innerHTML = `<table><thead><tr><th>month</th><th>n</th><th>km</th><th>moving</th><th>km/h</th><th>best10 max</th><th>best10 med</th><th>wind-neutral</th><th>HR</th><th>kcal</th></tr></thead><tbody>` +
     mons.slice().reverse().map(m => `<tr><td class="l">${fmon(new Date(m.x))}</td><td>${m.n}</td><td>${fkm(m.km)}</td><td>${hours(m.mv)}</td><td>${f1(m.kmh)}</td><td>${f2(m.b10)}</td><td>${f2(m.b10med)}</td><td>${f2(m.wn)}</td><td>${f0(m.hr)}</td><td>${m.kcal ? f0(m.kcal) : "–"}</td></tr>`).join("") + `</tbody></table>`;
   app.querySelectorAll("tr[data-id]").forEach(tr => tr.onclick = () => go(tr.dataset.id));
@@ -642,6 +643,7 @@ async function viewProgress() {
   calendar($("#cal"), acts);
   circuits($("#p-circ"), acts);
   favPanel($("#p-favs"), all);
+  newRecordsPanel($("#p-new"), { dismiss: true });
 }
 
 function predictor(host, all) {
@@ -671,19 +673,205 @@ function predictor(host, all) {
   $("#pk").oninput = render; render();
 }
 
+// ------------------------------------------------------------------ records, and new ones after an import (#17)
+
+/** Higher-is-better per-session records. grp orders the new-records list; news:false
+ * = never announced as new (kmh_moving isn't comparable across 2025-08, watch
+ * climbing runs 2-10x high); speed = speed/distance, meaningless on Virtual sports
+ * (simulated gradients). */
+const RECORD_METRICS = [
+  { k: "best5min_kmh", n: "Best 5 min", u: "km/h", grp: 6, speed: true },
+  { k: "best10min_kmh", n: "Best 10 min", u: "km/h", grp: 1, speed: true },
+  { k: "best20min_kmh", n: "Best 20 min", u: "km/h", grp: 6, speed: true },
+  { k: "b30", n: "Best 30 min", u: "km/h", grp: 6, speed: true },
+  { k: "b60", n: "Best 60 min", u: "km/h", grp: 6, speed: true },
+  { k: "wind_neutral", n: "Best wind-neutral 10 min", u: "km/h", grp: 2, speed: true },
+  { k: "kmh_moving", n: "Fastest avg (≥10 km)", u: "km/h", minKm: 10, news: false },
+  { k: "km", n: "Longest", u: "km", grp: 7, speed: true },
+  { k: "moving_s", n: "Longest moving time", u: "", news: false },
+  { k: "ascent_m", n: "Most climbing", u: "m", news: false },
+  { k: "pw5s", n: "Best 5 s power", u: "W", grp: 5, power: true },
+  { k: "pw30s", n: "Best 30 s power", u: "W", grp: 5, power: true },
+  { k: "pw1m", n: "Best 1 min power", u: "W", grp: 5, power: true },
+  { k: "pw5m", n: "Best 5 min power", u: "W", grp: 5, power: true },
+  { k: "pw20m", n: "Best 20 min power", u: "W", grp: 5, power: true },
+  { k: "pw30m", n: "Best 30 min power", u: "W", grp: 5, power: true },
+  { k: "pw60m", n: "Best 60 min power", u: "W", grp: 5, power: true },
+  { k: "np", n: "Highest weighted power", u: "W", grp: 5, power: true },
+];
+const recFmt = (m, v) => m.k === "moving_s" ? dur(v, true) : m.u === "W" ? f0(v) : f2(v);
+/** A value as shown: a record must still be better after this rounding. */
+const recRound = (u, v) => u === "W" || u === "s" ? Math.round(v) : Math.round(v * 100) / 100;
+const NR = { minPrior: 5, minPriorLap: 3, segMinOthers: 5, thenDays: 30, segPerSession: 2, cap: 10 };
+
+/** Records set by newly imported sessions, best first, uncapped.
+ * acts: every loaded session of the sports involved; newIds: ids of the import;
+ * segsByType: {type: segments from loadSegs} (efforts {aid, el, a}).
+ * scope "all" = best of the sport now, strictly beating every older session's best;
+ * "then" = faster than everything dated before it (not all-time), only for sessions
+ * within NR.thenDays of the newest older one, so a backfill of old files stays quiet.
+ * Nothing is claimed against fewer than NR.minPrior older sessions with the value. */
+function newRecords(acts, newIds, segsByType) {
+  const isNew = new Set([...newIds].map(Number)), out = [], segRecs = [];
+  const byType = new Map();
+  for (const a of acts) { if (!byType.has(a.type)) byType.set(a.type, []); byType.get(a.type).push(a); }
+  // items: [{a, v}] of one sport, oldest first
+  const judge = (base, items, minPrior, lower) => {
+    const r = [], old = items.filter(i => !isNew.has(+i.a.id)), fresh = items.filter(i => isNew.has(+i.a.id));
+    if (!fresh.length) return r;
+    const beats = (x, y) => lower ? recRound(base.u, x) < recRound(base.u, y) : recRound(base.u, x) > recRound(base.u, y);
+    const pick = xs => xs.reduce((b, i) => !b || (lower ? i.v < b.v : i.v > b.v) ? i : b, null);  // tie: earliest
+    const rec = (scope, i, p) => ({ ...base, scope, aid: i.a.id, a: i.a, value: i.v, prev: p.v, prevAid: p.a.id, lower: !!lower });
+    let top = null;
+    if (old.length < minPrior) return r;  // no history (e.g. a first import of this sport): no claims at all
+    const p = pick(old), c = pick(fresh);
+    if (beats(c.v, p.v)) r.push(rec("all", top = c, p));
+    const lastOld = whenOf(old[old.length - 1].a);
+    for (const n of fresh) {
+      if (n === top || whenOf(n.a) < lastOld - NR.thenDays * DAY) continue;
+      const before = items.filter(i => i !== n && cmpWhen(i.a, n.a) < 0);
+      if (before.length < minPrior) continue;
+      const p = pick(before);
+      if (beats(n.v, p.v)) r.push(rec("then", n, p));
+    }
+    return r;
+  };
+  for (const [type, list0] of byType) {
+    const list = list0.slice().sort(cmpWhen);
+    if (!list.some(a => isNew.has(+a.id))) continue;
+    const virtual = /^Virtual/.test(type || "");
+    for (const m of RECORD_METRICS) {
+      if (m.news === false || (virtual && m.speed)) continue;
+      const items = list.filter(a => isNum(a[m.k]) && a[m.k] > 0).map(a => ({ a, v: a[m.k] }));
+      out.push(...judge({ kind: "metric", k: m.k, n: m.n, u: m.u, grp: m.grp, type }, items, NR.minPrior, false));
+    }
+    if (!virtual) for (const c of groupCircuits(list)) {
+      const items = c.a.map(a => ({ a, v: a.best_lap_s }));
+      out.push(...judge({ kind: "lap", k: "best_lap_s", n: "Best lap", u: "s", grp: 4, type, lap_km: median(c.a.map(a => a.lap_km)) }, items, NR.minPriorLap, true));
+    }
+    for (const sg of (segsByType && segsByType[type]) || []) {
+      const per = new Map();
+      for (const e of sg.efforts) if (e.a) { const b = per.get(e.aid); if (!b || e.el < b.el) per.set(e.aid, e); }
+      const items = [...per.values()].sort((x, y) => cmpWhen(x.a, y.a)).map(e => ({ a: e.a, v: e.el }));
+      segRecs.push(...judge({ kind: "segment", k: "el", n: "Segment", u: "s", grp: 3, type, sgid: sg.id, sg, m: sg.m, full: !!sg.full }, items, NR.segMinOthers, true));
+    }
+  }
+  // "Full" segments overlap each other and the pieces: one fast session would PR on
+  // a dozen. Keep NR.segPerSession per session and scope, pieces first, then longest.
+  const kept = new Map();
+  for (const s of segRecs.sort((x, y) => (x.full - y.full) || (y.m - x.m))) {
+    const key = s.aid + "/" + s.scope, n = kept.get(key) || 0;
+    if (n < NR.segPerSession) { kept.set(key, n + 1); out.push(s); }
+  }
+  return out.sort((x, y) => ((x.scope === "all" ? 0 : 1) - (y.scope === "all" ? 0 : 1)) || (x.grp - y.grp) || (whenOf(y.a) - whenOf(x.a)));
+}
+
+const okAid = id => /^\d{1,16}$/.test(String(id));
+const okSgid = id => /^[0-9A-Za-z_-]{1,64}$/.test(String(id));
+/** Segments of a sport, fetched once per data version (refreshData clears it), so
+ * redraws don't start one poll loop each. */
+const segsOnce = type => S.segsP[type] ||= loadSegs(type).catch(e => { delete S.segsP[type]; throw e; });
+/** Sport switch that sticks: selector, state and storage agree. */
+function setSport(t) {
+  const sel = $("#type");
+  if (sel && ![...sel.options].some(o => o.value === t)) return;
+  S.type = localStorage.type = t;
+  if (sel) sel.value = t;
+}
+async function postDismiss(finished) {
+  const r = await fetch("/api/last_import/dismiss", { method: "POST", headers: { "X-Rollbook": "1", "Content-Type": "application/json" }, body: JSON.stringify({ finished }) });
+  if (r.status === 409) return "stale";
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.status);
+  return "ok";
+}
+
+/** Hide a records panel and void any draw still in flight for it (segments load late). */
+function nrCancel(host) { if (host) { host._nrGen = (host._nrGen || 0) + 1; host.hidden = true; } }
+
+/** The last import's summary in host (Import dialog, or the Progress page with
+ * opt.dismiss). Ids from the server only select among sessions and segments the
+ * API returned; every name is escaped (Strava, OSM and file names are not ours).
+ * Resolves after the first draw; segment PRs are added when segments are ready. */
+async function newRecordsPanel(host, opt = {}) {
+  if (!host) return;
+  const gen = host._nrGen = (host._nrGen || 0) + 1, live = () => host._nrGen === gen && host.isConnected;
+  let li;
+  try { li = S.lastImport ||= await api("last_import"); } catch { if (live()) host.hidden = true; return; }
+  if (!live()) return;
+  if (!li || !li.finished || (opt.dismiss && li.dismissed)) { host.hidden = true; return; }
+  const news = (li.new || []).filter(x => okAid(x.id));
+  const total = li.new_total || 0;
+  if (!news.length && !total && !li.replaced) { host.hidden = true; return; }
+  const ids = news.map(x => Number(x.id)), types = [...new Set(news.map(x => x.type).filter(t => typeof t === "string"))];
+  const when = new Date(li.finished * 1000);
+  const head = `<div class="toolbar"><h2 style="margin:0">New since the last import <span class="muted">${esc(fdate(when))} · ${total} session${total === 1 ? "" : "s"} imported${li.replaced ? ` · ${li.replaced} replaced by the export's copy` : ""}</span></h2>
+    ${opt.dismiss ? `<button class="btn small nr-x" title="dismiss">✕</button>` : ""}</div>`;
+  let acts = [];
+  try { acts = (await Promise.all(types.map(t => loadActs(t)))).flat(); } catch { }
+  const segs = {};
+  const draw = pending => {
+    if (!live()) return;
+    let body;
+    if (li.partial) body = `<p class="muted small">The import stopped with an error before it finished, so these sessions weren't compared for records.</p>`;
+    else if (li.first && !news.length) body = `<p class="muted small">First import: nothing to compare with yet. Records start with the next one.</p>`;
+    else {
+      const recs = newRecords(acts, ids, segs), shown = recs.slice(0, NR.cap);
+      const val = r => r.u === "s" ? dur(r.value, r.value >= 3600) : `${r.u === "W" ? f0(r.value) : f2(r.value)} ${esc(r.u)}`;
+      const gain = r => r.u === "s" ? `−${dur(r.prev - r.value)}` : `+${r.u === "W" ? f0(r.value - r.prev) : f2(r.value - r.prev)} ${esc(r.u)}`;
+      const what = r => r.kind === "segment" ? (n => `${esc(n)}${n.includes(flen(r.m)) ? "" : ` <span class="muted small">${flen(r.m)}</span>`}`)(segName(r.sg))
+        : r.kind === "lap" ? `Best lap <span class="muted small">${r.lap_km < 1 ? f0(r.lap_km * 1000) + " m" : f2(r.lap_km) + " km"} circuit</span>` : esc(r.n);
+      body = recs.length ? `<table><thead><tr><th class="l"></th><th class="l">record</th><th class="l">sport</th><th>value</th><th>gain</th><th class="l">session</th></tr></thead><tbody>` +
+        shown.map((r, i) => `<tr class="click" data-i="${i}"><td class="l"><span class="pill ${r.scope === "all" ? "ob" : ""}">${r.scope === "all" ? "record" : "best at the time"}</span></td>
+          <td class="l">${what(r)}</td><td class="l muted">${esc(r.type)}</td><td>${val(r)}</td><td class="up">${gain(r)}</td><td class="l">${esc(fdate(r.a._d))} · ${esc(r.a.name)}</td></tr>`).join("") + `</tbody></table>` +
+        (recs.length > shown.length ? `<p class="muted small">+${recs.length - shown.length} more</p>` : "")
+        : `<p class="muted small">No new records${pending ? " yet" : ""}.</p>`;
+      if (pending) body += `<p class="muted small">checking segments…</p>`;
+      body += `<div class="note">"record" = best of that sport now; "best at the time" = faster than every earlier session. Virtual rides: power only.</div>`;
+      host._recs = shown;
+    }
+    host.hidden = false;
+    host.innerHTML = head + body;
+    host.querySelectorAll("tr[data-i]").forEach(tr => tr.onclick = () => {
+      const r = host._recs[+tr.dataset.i]; if (!r) return;
+      if ($("#import-dlg").open) $("#import-dlg").close();
+      if (r.kind === "segment" && okSgid(r.sgid)) { setSport(r.type); location.hash = "#/segment/" + r.sgid; }
+      else if (okAid(r.aid)) go(r.aid);
+    });
+    const x = host.querySelector(".nr-x");
+    if (x) x.onclick = async () => {
+      if (S.readonly) return;
+      try {
+        const res = await postDismiss(li.finished);
+        S.lastImport = null;
+        nrCancel(host);  // also voids the segments redraw still pending
+        if (res === "stale") return newRecordsPanel(host, opt);  // a newer import: show that one
+      } catch (e) { x.title = "could not dismiss: " + e.message; }
+    };
+  };
+  draw(!li.partial && types.length > 0);
+  if (li.partial || !types.length) return;
+  // in the background: the Import dialog must not stay busy while segments compute
+  Promise.all(types.map(t => segsOnce(t).then(s => { segs[t] = s; }).catch(() => { }))).then(() => draw(false));
+}
+
 // ------------------------------------------------------------------ circuits (repeated-lap venues)
 
 const CIRC_COLORS = ["#ff7a1a", "#3fb6ff", "#3ecf8e", "#f5c542", "#c77dff", "#ff4d4d"];
-function circuits(host, acts) {
+/** Sessions grouped by the circuit they lapped: lap centre within max(60 m, 25% of
+ * a lap) and lap length within 12%. Oldest first, so the first session of a
+ * circuit anchors it whatever order the list came in. */
+function groupCircuits(acts) {
   const near = (a, b) => { const dy = (a[0] - b[0]) * 111320, dx = (a[1] - b[1]) * 111320 * Math.cos(a[0] * Math.PI / 180); return Math.hypot(dx, dy); };
   const cs = [];
-  for (const a of acts.filter(a => a.laps_n && a.lap_center && a.best_lap_s)) {
-    // same circuit: centre within 25% of a lap length (min 60 m) and lap length within 12%
+  for (const a of acts.filter(a => a.laps_n && a.lap_center && a.best_lap_s).sort(cmpWhen)) {
     let c = cs.find(c => near(c.center, a.lap_center) < Math.max(60, 250 * c.km) && Math.abs(a.lap_km / c.km - 1) < 0.12);
     if (!c) cs.push(c = { center: a.lap_center, km: a.lap_km, a: [] });
     c.a.push(a);
   }
-  const list = cs.filter(c => c.a.length >= 2 || c.a[0].laps_n >= 5).sort((x, y) => y.a.length - x.a.length).slice(0, CIRC_COLORS.length);
+  return cs.filter(c => c.a.length >= 2 || c.a[0].laps_n >= 5);
+}
+function circuits(host, acts) {
+  const list = groupCircuits(acts).sort((x, y) => y.a.length - x.a.length).slice(0, CIRC_COLORS.length);
   if (!list.length) { host.hidden = true; return; }
   host.hidden = false;
   list.forEach((c, i) => {
@@ -1899,7 +2087,7 @@ async function runImport() {
   if (files.some(f => kindOf(f) === "activity") && !sport) { $("#imp-sport").focus(); return; }
   Imp.busy = true;
   const state = {}, bar = $("#imp-bar"), phase = $("#imp-phase"), log = $("#imp-log");
-  $("#imp-prog").hidden = false; log.textContent = ""; phase.textContent = ""; bar.style.width = "0"; drawImportList(state);
+  $("#imp-prog").hidden = false; log.textContent = ""; phase.textContent = ""; bar.style.width = "0"; nrCancel($("#imp-records")); drawImportList(state);
   const total = files.reduce((s, f) => s + f.size, 0) || 1;
   let sent = 0, ok = 0;
   try {
@@ -1937,13 +2125,21 @@ async function finishImport(base) {
     if (j.state !== "running") break;
     await sleep(800);
   }
-  if (j.state === "error") throw new Error(j.error);
+  if (j.state === "error") {
+    if (j.changed) {  // an earlier step committed rows: show them anyway
+      await refreshData();
+      if (j.new_total || j.replaced) await newRecordsPanel($("#imp-records"));
+    }
+    throw new Error(j.error);
+  }
   bar.style.width = "100%";
   const dups = (j.log || []).filter(l => /skipped, (same session|already imported)/.test(l)).length;
   const fetched = j.source === "strava" ? `<span class="muted">${j.fetched || 0} file${j.fetched === 1 ? "" : "s"} downloaded from Strava. </span>` : "";
   phase.innerHTML = fetched + (j.added ? `<span class="up">✓ ${j.added} new activit${j.added === 1 ? "y" : "ies"} imported.</span>` : `<span class="muted">✓ Done, nothing new: everything was already imported.</span>`) +
     (dups ? ` <span class="muted">${dups} already in Rollbook from another file (same start time and distance), skipped.</span>` : "");
-  if (j.added) await refreshData();
+  // `added` is a count: an export replacing an uploaded copy swaps ids at the same count
+  if (j.added || j.changed) await refreshData();
+  if (j.new_total || j.replaced) await newRecordsPanel($("#imp-records"));
   return j;
 }
 async function stravaStatus() {
@@ -1961,7 +2157,7 @@ async function stravaStatus() {
 async function runStravaSync() {
   const phase = $("#imp-phase");
   Imp.busy = true; drawImportList(); $("#imp-strava").disabled = true;
-  $("#imp-prog").hidden = false; $("#imp-log").textContent = ""; phase.textContent = "contacting Strava…"; $("#imp-bar").style.width = "0";
+  $("#imp-prog").hidden = false; $("#imp-log").textContent = ""; nrCancel($("#imp-records")); phase.textContent = "contacting Strava…"; $("#imp-bar").style.width = "0";
   try {
     const r = await fetch("/api/strava/sync", { method: "POST", headers: { "X-Rollbook": "1" } });
     if (!r.ok) throw new Error((await r.json()).error || r.status);
@@ -1975,7 +2171,7 @@ async function runStravaSync() {
 /** Drop every client cache and redraw, after the DB (or its edits) changed underneath us.
  * With `dest`, navigate there instead of redrawing the current page. */
 async function refreshData(dest) {
-  S.acts = {}; S.tracks = {}; S.segs = {}; S.mapView = {};
+  S.acts = {}; S.tracks = {}; S.segs = {}; S.segsP = {}; S.lastImport = null; S.mapView = {};
   [S.types, { hrmax: S.hrmax }, S.favs] = await Promise.all([api("types"), api("hrmax"), api("favorites")]);
   S.hrmax = S.hrmax || 185;
   const sel = $("#type"), cur = S.type;

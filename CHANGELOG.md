@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.5.0 (2026-10-23)
+
+### New records after an import (#17)
+
+- When an import or Strava sync finishes, the Import dialog lists the
+  records it set, with links to the sessions and segments; the Progress page
+  shows the same panel until you dismiss it (✕).
+- Covered: best 5/10/20/30/60 min, wind-neutral 10 min, longest, power
+  (best 5 s – 60 min, weighted), segment PRs and best laps per circuit.
+  "record" = best of that sport now; "best at the time" = faster than every
+  earlier session (only for sessions near your latest, so an old backfill
+  stays quiet).
+- No claims without history: at least 5 earlier sessions with the value
+  (3 for a circuit, 5 other sessions on a segment); a first import only
+  counts sessions. Virtual rides get power records only. A session an
+  export copy replaced isn't announced again.
+- Stored in `data/last_import.json` (0600, validated on load); an import
+  before you dismiss adds to the summary rather than replacing it. Read-only
+  over `--lan`; the MCP server doesn't read it.
+
 ## 0.4.1 (2026-10-23)
 
 ### Security

@@ -68,6 +68,10 @@ GPS: runs, rides, walks, skates, plus indoor rides from ROUVY or MyWhoosh.
   `.fit/.gpx/.tcx` files ("Export Original"). Duplicates are detected, and
   different files with the same name (HUAWEI calls every export
   `Outdoor_cycle.fit`) are all kept.
+- **New records after an import:** when an import or sync finishes, the
+  dialog and the Progress page list what it changed: personal records (best
+  5–60 min, wind-neutral, longest, power), segment PRs and best laps, as
+  all-time records or "best at the time". Shown until you dismiss it.
 - **Sync from Strava** (`rollbook strava sync` or a button in the Import
   dialog): fetch new activities straight from strava.com with your browser's
   login cookie, no export or API needed. See
