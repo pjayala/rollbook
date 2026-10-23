@@ -264,7 +264,8 @@ How it is protected:
   from the phone are refused (and hidden in the UI) unless you start with
   `--lan-write`.
 - **Only this computer's own names and IPs** are accepted as the host,
-  which guards against DNS rebinding.
+  which guards against DNS rebinding. The desktop address does the same:
+  only `127.0.0.1:<port>` and `localhost:<port>`.
 - **HTTPS with a self-signed certificate** (`data/tls/`, valid 397 days,
   reused across restarts). It covers the computer's LAN IPs,
   `<hostname>.local`, `localhost` and `127.0.0.1`. Rollbook creates it with
