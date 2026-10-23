@@ -179,6 +179,11 @@ tr.hiddenrow td { opacity: .5; }
 .pstat span { color: var(--muted); font-size: 12px; }
 .pstat b { font-size: 18px; } .pstat small { color: var(--muted); }
 /* `rollbook web --lan` without --lan-write: the server refuses changes, so hide the controls */
-body.readonly #edit, body.readonly #psave, body.readonly .hiddenbar button { display: none; }
+body.readonly #edit, body.readonly #psave, body.readonly .hiddenbar button, body.readonly .nr-x { display: none; }
 body.readonly button.star { pointer-events: none; }
 body.readonly button.star:not(.on) { display: none; }
+/* new records after an import (Import dialog + Progress page) */
+#p-new { border-color: #ff7a1a66; }
+#p-new .nr-x { margin-left: auto; }
+.imp-records { margin-top: 12px; max-height: 320px; overflow: auto; }
+.imp-records h2 { font-size: 14px; }

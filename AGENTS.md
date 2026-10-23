@@ -58,6 +58,7 @@ web/weather.py          historical weather per outdoor session (Open-Meteo, cach
 web/geonames.py         segment place names (Nominatim reverse geocoding, cached)
 web/importer.py         Import dialog backend: uploads + background db build / enrich
 web/edits.py            session edits (data/edits.json) as a TEMP view overlay on the read-only DB
+web/lastimport.py       what the last import added (data/last_import.json), for the new-records summary
 web/tls.py              self-signed cert for `web --lan` (openssl, else pure-Python RSA + DER)
 web/qr.py               stdlib QR encoder (byte mode, level M, v1-10) for the --lan link
 web/app.py              `rollbook app`: desktop window (pywebview / Chrome-Edge --app / browser)
@@ -368,6 +369,38 @@ changing `derive()`.
   segments store sport/start/end/length; when regenerated segments get new
   ids, `loadSegs` re-attaches the star (and a custom name) to the segment
   whose ends are within 80 m and length within 10%.
+* **New records after an import** (#17; `web/lastimport.py`, `newRecords()`
+  in app.js): `Importer._work` diffs raw-DB ids before/after and stores the
+  new ones, oldest first, in `data/last_import.json`. A new id whose start is
+  within 2 min of a removed id's start is a dedup replacement: it is counted
+  in `replaced`, not announced. The job dict carries only `new_total` /
+  `replaced` / `changed`, never the ids. A first import (empty DB) stores no
+  ids (`first`); others store the newest 500. On an error after rows
+  committed, the file gets `partial`, and no records are compared.
+  Undismissed summaries merge with the next import.
+  * Store: lock, in memory (a GET never opens the file), 0600 atomic write
+    + fsync, one retry, never raises. On load it's untrusted: ≤ 256 KiB and
+    every field type-checked, else ignored.
+  * `GET /api/last_import` returns `new:[{id,type}]` through the edits
+    overlay.
+  * `POST /api/last_import/dismiss {finished}`: the usual
+    X-Rollbook/Host/Origin checks, body ≤ 4 KiB. It returns 409 unless
+    `finished` matches (a stale tab can't hide a newer import). There is no
+    GET form. The MCP server never reads it.
+  * The page computes the records from loaded sessions and segments, so
+    they follow edits:
+    * "all": best of the sport now, strictly above the older best after
+      display rounding.
+    * "then": beats everything earlier by `datetime` (not `_t`, which is
+      noon). Only within 30 days of the newest older session.
+    * At least 5 older sessions with the value (laps 3, segments 5 other
+      sessions). Virtual sports: power only. Never `kmh_moving`,
+      `ascent_m`, `moving_s`.
+    * At most 2 segment PRs per session (pieces before Full); the list is
+      capped at 10.
+  * `RECORD_METRICS` is shared with the records table; `groupCircuits()`
+    with the Circuits panel.
+  * Every name is `esc()`d; ids select only among API-returned rows.
 * **Session edits** (✎ edit on the session page; `web/edits.py`): name,
   sport, hidden, deleted, stored as overrides in `data/edits.json` keyed by
   activity id (Strava's, or the SHA-1-of-path id of an import — both stable,

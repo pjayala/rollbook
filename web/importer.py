@@ -62,6 +62,7 @@ class Importer:
         self.job: dict = {"state": "idle"}
         self.on_store = None  # called with "activities/<name>" for each newly stored file
         self.offline = False  # `web --offline`: no Strava sync
+        self.last = None  # lastimport.LastImport: what the last import added (new-records summary)
 
     # ---------------------------------------------------------------- upload
 
@@ -214,16 +215,64 @@ class Importer:
 
     def _ids(self):
         """Activity ids in the DB. A set, not a count: an export replacing a bare
-        import (dedup) swaps one id for another and leaves the count unchanged."""
+        import (dedup) swaps one id for another and leaves the count unchanged.
+        Raw table, hidden sessions included: this is about what the build did.
+        No DB yet = empty set; a DB that can't be read = None (unknown, not empty)."""
         import sqlite3
+        if not os.path.exists(self.db_path):
+            return set()
         try:
             db = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
             try:
                 return {r[0] for r in db.execute("SELECT id FROM activities")}
             finally:
                 db.close()
+        except sqlite3.OperationalError as e:
+            # a DB file with no activities table yet (an aborted first build) is empty;
+            # anything else (locked, corrupt) is unknown
+            return set() if "no such table" in str(e) else None
         except sqlite3.Error:
-            return set()
+            return None
+
+    def _starts(self):
+        """{id: julian day of the start}. Taken before and after a build to tell a
+        replacement (same session, new id, from an export) from a new session."""
+        import sqlite3
+        try:
+            db = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+            try:
+                return {r[0]: r[1] for r in db.execute("SELECT id, julianday(datetime) FROM activities")}
+            finally:
+                db.close()
+        except sqlite3.Error:
+            return {}
+
+    def _record(self, before, starts0, after, partial=False):
+        """Hand what this import added to the summary store; never raises.
+        A new id whose start is within 2 min of a removed id's start is the
+        same session from an export (`db build` dedup), so it isn't announced;
+        if the removed one is in an unseen summary, the summary follows it."""
+        if self.last is None or before is None or after is None or after == before:
+            return
+        try:
+            starts = self._starts()
+            gone = {i: starts0[i] for i in before - after if starts0.get(i) is not None}
+            new, remap = [], {}
+            for i in after - before:
+                t = starts.get(i)
+                old = next((g for g, tg in gone.items() if t is not None and abs(t - tg) * 86400 < 120), None)
+                if old is not None:
+                    remap[old] = i
+                else:
+                    new.append(i)
+            new.sort(key=lambda i: (starts.get(i) or 0, i))  # oldest first: the store keeps the newest
+            j = self.job
+            if new or remap:
+                self.last.record(new, j.get("items", []), j.get("source", "upload"), len(remap),
+                                 partial=partial, first=not before, remap=remap)
+            j["new_total"], j["replaced"] = len(new), len(remap)  # only once stored: the page then fetches it
+        except Exception as e:  # the summary is a nicety: the import itself succeeded
+            self.job.setdefault("log", []).append(f"new-records summary not saved: {e}")
 
     def _cmd(self, args, phase):
         j = self.job
@@ -264,7 +313,9 @@ class Importer:
 
     def _work(self, todo, strava=False):
         j = self.job
+        n = lambda s: len(s) if s is not None else 0  # noqa: E731  (None = DB unreadable)
         before = self._ids()
+        starts0 = self._starts()
         try:
             if strava and self._strava():
                 todo = [self.imports]
@@ -274,13 +325,20 @@ class Importer:
                     raise RuntimeError(next((x for x in reversed(j["log"]) if x.startswith("error")),
                                             f"db build failed for {label}"))
             after = self._ids()
-            j["added"] = len(after) - len(before)
+            j["added"] = max(0, n(after) - n(before))
+            j["changed"] = after != before  # also true for a replacement (same count, new id)
             if after != before:  # new rows, or a replacement with a new id
                 j["done"] = j["total"] = 0
                 if self._cmd(["db", "enrich", "--missing"], "computing best efforts"):
                     raise RuntimeError("db enrich failed")
                 j["phase"] = "computing dashboard metrics"
                 self.M.warm()  # new activities only; cached ones are kept
+            self._record(before, starts0, after)
             j.update(state="done", phase="done", finished=time.time())
         except Exception as e:
-            j.update(state="error", phase="failed", error=str(e), added=len(self._ids()) - len(before))
+            after = self._ids()
+            # rows an earlier step committed are in the DB: list them, but without
+            # records (enrich / metrics may not have run)
+            self._record(before, starts0, after, partial=True)
+            j.update(state="error", phase="failed", error=str(e), added=max(0, n(after) - n(before)),
+                     changed=after != before)
