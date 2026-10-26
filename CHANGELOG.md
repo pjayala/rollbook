@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.5.0 (2026-10-26)
+
+### A new look for the dashboard
+
+- Dark, flat design on a neutral near-black: panels one shade up, no borders
+  or shadows; the Inter typeface, bundled so it stays offline (OFL,
+  `web/static/Inter-OFL.txt`), with tabular figures everywhere.
+- A sidebar with Progress, Sessions, Map, Segments and your profile replaces
+  the top navigation. It folds to an icon rail on a tablet and a bottom bar on
+  a phone, and can be hidden with the button left of back / forward or
+  ⌘\ / Ctrl+\ (remembered).
+- Colour only on data: the wheel's orange for the main series, white for its
+  trend, greys for context, rose for heart rate. Speed, heart-rate and power
+  zones, the calendar and the heatmap are shades of those instead of rainbows.
+- Summary cards are one divided strip that never leaves an orphan card; rows of
+  panels no longer stretch over empty space; indoor sessions drop the empty
+  route panel; the splits chart stays in view beside its table.
+- One outline icon set replaces the ☆ ✎ ⤢ ✕ ⇪ symbols; icon buttons have
+  accessible names; a skip link; the current page is marked for screen readers.
+
+### New records after an import (#17)
+
+- When an import or Strava sync finishes, the Import dialog lists the
+  records it set, with links to the sessions and segments; the Progress page
+  shows the same panel until you dismiss it.
+- Covered: best 5/10/20/30/60 min, wind-neutral 10 min, longest, power
+  (best 5 s – 60 min, weighted), segment PRs and best laps per circuit.
+  "record" = best of that sport now; "best at the time" = faster than every
+  earlier session (only for sessions near your latest, so an old backfill
+  stays quiet).
+- No claims without history: at least 5 earlier sessions with the value
+  (3 for a circuit, 5 other sessions on a segment); a first import only
+  counts sessions. Virtual rides get power records only. A session an
+  export copy replaced isn't announced again.
+- Stored in `data/last_import.json` (0600, validated on load); an import
+  before you dismiss adds to the summary rather than replacing it. Read-only
+  over `--lan`; the MCP server doesn't read it.
+
+## 0.4.1 (2026-10-23)
+
+### Security
+
+- The desktop listener (`http://127.0.0.1:8765/`) now refuses any request
+  whose `Host` isn't `127.0.0.1:<port>` or `localhost:<port>`, GETs included.
+  Before, only POSTs were checked, so a website using DNS rebinding could
+  read the dashboard's data, GPS tracks included.
+
 ## 0.4.0 (2026-10-22)
 
 ### Sync from Strava (`rollbook strava sync`)

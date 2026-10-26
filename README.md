@@ -62,17 +62,21 @@ GPS: runs, rides, walks, skates, plus indoor rides from ROUVY or MyWhoosh.
   speed-based METs for skating and outdoor rides. Watches and Strava differ
   wildly on this. A **Profile** screen holds your weight, height, birth year
   and heart-rate limits.
-- **Race predictor**, **favorites (☆)** for sessions and segments, and
+- **Race predictor**, **favorites (star)** for sessions and segments, and
   back/forward navigation.
 - **Import** from the UI: drop in a full Strava export `.zip` or single
   `.fit/.gpx/.tcx` files ("Export Original"). Duplicates are detected, and
   different files with the same name (HUAWEI calls every export
   `Outdoor_cycle.fit`) are all kept.
+- **New records after an import:** when an import or sync finishes, the
+  dialog and the Progress page list what it changed: personal records (best
+  5–60 min, wind-neutral, longest, power), segment PRs and best laps, as
+  all-time records or "best at the time". Shown until you dismiss it.
 - **Sync from Strava** (`rollbook strava sync` or a button in the Import
   dialog): fetch new activities straight from strava.com with your browser's
   login cookie, no export or API needed. See
   [Sync from Strava](#sync-from-strava).
-- **Edit sessions** (✎ on a session): rename, fix the sport, hide from stats
+- **Edit sessions** (**Edit** on a session): rename, fix the sport, hide from stats
   or delete. Edits are stored next to the database and survive rebuilds.
 - **Desktop window** (`rollbook app`) or a normal browser tab
   (`rollbook web`).
@@ -153,7 +157,7 @@ Windows. No download is needed.
 
 1. Start Rollbook: `./rollbook app` (Windows: `rollbook.cmd app`), or
    `./rollbook web` for a browser tab at <http://127.0.0.1:8765/>.
-2. Click **⇪ Import** (or drag files onto the window) and drop your
+2. Click **Import** (or drag files onto the window) and drop your
    `export_….zip`. A few thousand activities import in about a minute.
    Rollbook then computes its metrics in the background, which takes about
    another minute the first time.
@@ -204,7 +208,7 @@ of a browser where you're logged in. No API subscription and no password.
 2. In a terminal: `./rollbook strava auth` and paste it (the input is
    hidden; a whole copied `Cookie:` header works too). It is checked against
    strava.com and saved in `data/strava_cookie`, readable only by you.
-3. `./rollbook strava sync`, or **⇪ Import → ⟳ Sync from Strava** in the
+3. `./rollbook strava sync`, or **Import → Sync from Strava** in the
    dashboard.
 
 Sync walks your activity list from newest to oldest and stops at the first
@@ -264,7 +268,8 @@ How it is protected:
   from the phone are refused (and hidden in the UI) unless you start with
   `--lan-write`.
 - **Only this computer's own names and IPs** are accepted as the host,
-  which guards against DNS rebinding.
+  which guards against DNS rebinding. The desktop address does the same:
+  only `127.0.0.1:<port>` and `localhost:<port>`.
 - **HTTPS with a self-signed certificate** (`data/tls/`, valid 397 days,
   reused across restarts). It covers the computer's LAN IPs,
   `<hostname>.local`, `localhost` and `127.0.0.1`. Rollbook creates it with

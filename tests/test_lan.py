@@ -128,6 +128,18 @@ class ReadOnly(LanBase):
         r, _ = self.post(f"/api/favorites?t={self.lan.token}", {}, cookie=False)
         self.assertEqual(r.status, 403)  # the token is never accepted on a POST
 
+    def test_last_import_readable_but_not_dismissable(self):
+        d = server.LAST.record([1001], ["x"])
+        r, body = self.req("GET", "/api/last_import")
+        self.assertEqual(r.status, 200)
+        self.assertEqual(json.loads(body)["new"], [{"id": 1001, "type": "Inline Skate"}])
+        r, _ = self.req("GET", "/api/last_import", cookie=False)
+        self.assertEqual(r.status, 403)
+        r, out = self.post("/api/last_import/dismiss", {"finished": d["finished"]})
+        self.assertEqual(r.status, 403)
+        self.assertIn("lan-write", json.loads(out)["error"])
+        self.assertFalse(server.LAST.get()["dismissed"])
+
     def test_plain_http_to_tls_port_does_not_stall(self):
         with socket.create_connection(("127.0.0.1", self.port), timeout=10) as s:
             s.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
@@ -184,6 +196,17 @@ class ReadWrite(LanBase):
         self.assertEqual(r.status, 403)  # only the desktop app window may stop the server
         r, body = self.req("GET", "/api/status")
         self.assertIs(json.loads(body)["readonly"], False)
+
+    def test_last_import_dismiss_with_lan_write(self):
+        d = server.LAST.record([1001], ["x"])
+        r, _ = self.post("/api/last_import/dismiss", {"finished": d["finished"]}, headers={"Origin": "https://evil.example"})
+        self.assertEqual(r.status, 403)
+        r, _ = self.post("/api/last_import/dismiss", {"finished": d["finished"]}, cookie=False)
+        self.assertEqual(r.status, 403)
+        self.assertFalse(server.LAST.get()["dismissed"])
+        r, body = self.post("/api/last_import/dismiss", {"finished": d["finished"]})
+        self.assertEqual(r.status, 200, body)
+        self.assertTrue(server.LAST.get()["dismissed"])
 
 
 class PlainHttp(LanBase):

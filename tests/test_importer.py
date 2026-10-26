@@ -25,6 +25,7 @@ from helpers import TOOL, WEB, line_points, tmpdir, write_fit
 
 import edits
 import importer
+import lastimport
 import server
 
 T0 = datetime(2026, 5, 1, 8, 0, tzinfo=timezone.utc)
@@ -329,6 +330,129 @@ class Job(StoreBase):
         st = self.imp.status()
         self.assertEqual((len(st["log"]), st["log"][-1], len(self.imp.job["log"])), (40, "99", 100))
 
+    # ---- what the import added, for the new-records summary (#17)
+
+    def store(self):
+        path = os.path.join(self.home, "last_import.json")
+        self.imp.last = lastimport.LastImport(path)
+        return path
+
+    def build_with_starts(self, ids, starts, **kw):
+        with mock.patch.object(self.imp, "_starts", side_effect=starts):
+            return self.build(ids, **kw)
+
+    def test_new_ids_recorded(self):
+        path = self.store()
+        calls, st = self.build([{1}, {1, 2}])
+        self.assertEqual((st["state"], st["changed"], st["new_total"], st["replaced"]), ("done", True, 1, 0))
+        self.assertNotIn("new_ids", st)  # polled every 800 ms, readable on --lan: the count only
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+        self.assertEqual((d["new_ids"], d["new_total"], d["dismissed"], d["source"], d["items"], d["partial"], d["first"]),
+                         ([2], 1, False, "upload", ["imports"], False, False))
+        self.assertGreater(d["finished"], 0)
+
+    def test_nothing_new_keeps_previous_file(self):
+        path = self.store()
+        self.imp.last.record([7], ["older"])
+        with open(path, "rb") as f:
+            before = f.read()
+        _, st = self.build([{1, 7}, {1, 7}])
+        self.assertEqual((st["state"], st["changed"]), ("done", False))
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), before)
+
+    def test_replacement_not_announced(self):
+        # export row 5001 replaced bare import 2: same start -> not a new session
+        path = self.store()
+        t = 2460000.5
+        _, st = self.build_with_starts([{1, 2}, {1, 5001}], [{1: t - 9, 2: t}, {1: t - 9, 5001: t + 30 / 86400}])
+        self.assertEqual((st["added"], st["changed"], st["new_total"], st["replaced"]), (0, True, 0, 1))
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+        self.assertEqual((d["new_ids"], d["new_total"], d["replaced"]), ([], 0, 1))
+
+    def test_mixed_new_and_replacement(self):
+        self.store()
+        t = 2460000.5
+        _, st = self.build_with_starts([{1, 2}, {1, 5001, 9}],
+                                       [{1: t - 9, 2: t}, {1: t - 9, 5001: t + 60 / 86400, 9: t + 1}])
+        self.assertEqual((st["added"], st["new_total"], st["replaced"]), (1, 1, 1))
+        self.assertEqual(self.imp.last.get()["new_ids"], [9])
+
+    def test_replacement_follows_an_unseen_session(self):
+        self.store()
+        t = 2460000.5
+        self.imp.last.record([2], ["imports"])  # the bare upload, not yet dismissed
+        _, st = self.build_with_starts([{1, 2}, {1, 5001}], [{1: t - 9, 2: t}, {1: t - 9, 5001: t + 30 / 86400}])
+        d = self.imp.last.get()
+        self.assertEqual((st["new_total"], st["replaced"]), (0, 1))
+        self.assertEqual((d["new_ids"], d["new_total"], d["replaced"]), ([5001], 1, 0))
+
+    def test_unreadable_db_is_unknown_not_empty(self):
+        self.store()
+        _, st = self.build([None, {1, 2, 3}])  # a transient read error before the build
+        self.assertEqual((st["state"], st["changed"]), ("done", True))
+        self.assertIsNone(self.imp.last.get())  # not mistaken for a first import of 3 sessions
+
+    def test_ids_none_on_corrupt_db(self):
+        with open(self.imp.db_path, "wb") as f:
+            f.write(b"not a database" * 100)
+        self.assertIsNone(self.imp._ids())
+        os.remove(self.imp.db_path)
+        sqlite3.connect(self.imp.db_path).close()  # empty DB file, no table yet
+        self.assertEqual(self.imp._ids(), set())
+
+    def test_replacement_window_is_two_minutes(self):
+        self.store()
+        t = 2460000.5
+        _, st = self.build_with_starts([{2}, {5001}], [{2: t}, {5001: t + 130 / 86400}])
+        self.assertEqual((st["new_total"], st["replaced"]), (1, 0))
+
+    def test_new_ids_oldest_first(self):
+        self.store()
+        _, st = self.build_with_starts([{1}, {1, 3, 4, 5}], [{1: 1.0}, {1: 1.0, 3: 9.0, 4: 2.0, 5: 5.0}])
+        self.assertEqual(self.imp.last.get()["new_ids"], [4, 5, 3])
+
+    def test_first_import_stores_no_ids(self):
+        self.store()
+        _, st = self.build([set(), {1, 2, 3}])
+        d = self.imp.last.get()
+        self.assertEqual((d["first"], d["new_ids"], d["new_total"]), (True, [], 3))
+
+    def test_build_error_with_committed_rows_writes_partial(self):
+        self.store()
+
+        def cmd(args, phase):
+            return 1 if args[:2] == ["db", "enrich"] else 0
+        self.up("a.gpx", b"x", "Ride")
+        with mock.patch.object(self.imp, "_cmd", side_effect=cmd), \
+                mock.patch.object(self.imp, "_ids", side_effect=[{1}, {1, 2}, {1, 2}]):
+            self.imp.run()
+            st = self.wait()
+        self.assertEqual((st["state"], st["changed"], st["added"], st["new_total"]), ("error", True, 1, 1))
+        d = self.imp.last.get()
+        self.assertEqual((d["partial"], d["new_ids"]), (True, [2]))
+
+    def test_error_without_new_rows_writes_nothing(self):
+        path = self.store()
+        _, st = self.build([{1}, {1}], rc=1, log="error: boom")
+        self.assertEqual(st["state"], "error")
+        self.assertFalse(os.path.exists(path))
+        self.assertIsNone(self.imp.last.get())
+
+    def test_store_failure_does_not_fail_the_import(self):
+        self.store()
+        with mock.patch.object(self.imp.last, "record", side_effect=OSError("disk full")):
+            _, st = self.build([{1}, {1, 2}])
+        self.assertEqual(st["state"], "done")
+        self.assertTrue(any("summary not saved" in x for x in self.imp.job["log"]))
+
+    def test_without_store_nothing_happens(self):
+        self.assertIsNone(self.imp.last)
+        _, st = self.build([{1}, {1, 2}])
+        self.assertEqual((st["state"], st["new_total"] if "new_total" in st else None), ("done", None))
+
 
 class StableId(unittest.TestCase):
     """Id of a CSV-less file: SHA-1 of its path, not Python's salted hash()."""
@@ -523,11 +647,24 @@ class ImportApi(unittest.TestCase):
         self.assertEqual(set(acts) - before, {aid})
         self.assertEqual((acts[aid]["name"], acts[aid]["type"]), ("Evening Skate", "Inline Skate"))
         self.assertIsNotNone(acts[aid]["best10min_kmh"])  # enrich --missing ran
+        # the new-records summary: this session, as a JSON number, with its sport
+        li = self.get("/api/last_import")
+        self.assertEqual((li["new"], li["new_total"], li["dismissed"]), ([{"id": aid, "type": "Inline Skate"}], 1, False))
+        self.assertNotIn("new_ids", li)
+        self.assertEqual((st["new_total"], st["changed"]), (1, True))
+        mode = os.stat(os.path.join(self.home, "last_import.json")).st_mode & 0o777
+        if os.name == "posix":
+            self.assertEqual(mode, 0o600)
         # same file again: re-queued, built, nothing new
         self.assertTrue(json.loads(self.post(up, data, hdr)[1]).get("duplicate"))
         self.assertEqual(self.post("/api/import/run", b"", hdr)[0], 200)
         st = self.poll()
         self.assertEqual((st["state"], st["added"]), ("done", 0), st)
+        self.assertEqual(self.get("/api/last_import")["finished"], li["finished"])  # untouched
+        jh = {**hdr, "Content-Type": "application/json"}
+        code, _ = self.post("/api/last_import/dismiss", json.dumps({"finished": li["finished"]}).encode(), jh)
+        self.assertEqual(code, 200)
+        self.assertTrue(self.get("/api/last_import")["dismissed"])
 
 
 if __name__ == "__main__":

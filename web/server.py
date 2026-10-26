@@ -72,7 +72,7 @@ TILE_MAXZ = 19
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
         ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml",
-        ".png": "image/png", ".ico": "image/x-icon"}
+        ".png": "image/png", ".ico": "image/x-icon", ".woff2": "font/woff2"}
 
 # columns added later — by `db build` migrations, or by `db enrich` (best<N>min_kmh,
 # absent until the first enrich): listed when the DB has them, else NULL
@@ -740,6 +740,7 @@ def api_tracks(db, q, M):
 
 SEGS = None  # segments.SegmentStore, set in start()
 IMPORTER = None  # importer.Importer, set in start()
+LAST = None  # lastimport.LastImport, set in start()
 FAVS = None  # Favorites, set in start()
 GEO = None  # geonames.Geonames, set in start()
 WX = None  # weather.Weather, set in start()
@@ -886,6 +887,26 @@ def fit_wind(typ, rows, ms):
 
 def api_status(db, q, M):
     return dict(M.progress, cached=len(M.data), weather_pending=WX.pending() if WX else 0)
+
+
+def api_last_import(db, store):
+    """The last import's summary (see web/lastimport.py), {} if none. `new` lists
+    {id, type} read through the edits overlay: hidden sessions drop out and a
+    later sport change shows, so the page knows which sports to load. `items`
+    (file names, an export's carries the athlete id) stays on disk: the page
+    doesn't need it and this is readable over --lan."""
+    d = store.get() if store else None
+    if not d:
+        return {}
+    d.pop("items", None)
+    ids, new = d.pop("new_ids"), []
+    for k in range(0, len(ids), 500):  # old SQLite builds: <= 999 variables
+        part = ids[k:k + 500]
+        new += db.execute(f"SELECT id, type FROM activities WHERE id IN ({','.join('?' * len(part))})",
+                          part).fetchall()
+    order = {x: n for n, x in enumerate(ids)}
+    d["new"] = [{"id": i, "type": t} for i, t in sorted(new, key=lambda r: order[r[0]])]
+    return d
 
 
 def api_hrmax(db, q, M):
@@ -1122,7 +1143,7 @@ def make_handler(db_path, M, tiles, lan=None):
             self.send_header("Content-Length", str(len(body)))
             if gz:
                 self.send_header("Content-Encoding", "gzip")
-            self.send_header("Cache-Control", "max-age=86400" if ctype in ("image/svg+xml", "image/png", "image/x-icon") else cache)
+            self.send_header("Cache-Control", "max-age=86400" if ctype in ("image/svg+xml", "image/png", "image/x-icon", "font/woff2") else cache)
             self.send_header("X-Content-Type-Options", "nosniff")
             if lan:
                 self.send_header("Referrer-Policy", "no-referrer")
@@ -1179,6 +1200,11 @@ def make_handler(db_path, M, tiles, lan=None):
             p = u.path
             if self._lan_gate(u, q):
                 return
+            if lan is None and self.headers.get("Host") not in self._local_hosts():
+                # DNS rebinding: a website whose name now resolves to 127.0.0.1 would
+                # otherwise read every response (GPS tracks included) as same-origin
+                return self.send(403, "unknown host name: open http://127.0.0.1:"
+                                      f"{self.server.server_address[1]}/\n", "text/plain")
             if lan is None and "app" in q and not p.startswith(("/api/", "/tiles/")):
                 # app launcher: a page load of window <token> after its bye = a reload
                 self.server.app_pages[q["app"]] = now
@@ -1193,14 +1219,17 @@ def make_handler(db_path, M, tiles, lan=None):
             except Exception as e:  # keep the server alive, report to client
                 self.json({"error": f"{type(e).__name__}: {e}"}, 500)
 
+        def _local_hosts(self):
+            port = self.server.server_address[1]
+            return (f"127.0.0.1:{port}", f"localhost:{port}")
+
         def _same_origin(self):
             """Reject other websites (CSRF) and DNS-rebinding hosts."""
             host = self.headers.get("Host")
             origin = self.headers.get("Origin")
             if lan is not None:
                 return host in lan.hosts and (origin is None or origin == f"{lan.scheme}://{host}")
-            port = self.server.server_address[1]
-            ours = (f"127.0.0.1:{port}", f"localhost:{port}")
+            ours = self._local_hosts()
             if host not in ours:
                 return False
             return origin is None or origin in tuple("http://" + o for o in ours)
@@ -1208,7 +1237,10 @@ def make_handler(db_path, M, tiles, lan=None):
         def _reject(self, code, body, ctype="application/json"):
             """Refuse a POST without breaking the connection: read (and drop) a
             small request body first, otherwise close instead of keeping alive."""
-            n = int(self.headers.get("Content-Length") or 0)
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                n = -1  # unparseable: can't drain it, so close
             if 0 < n <= 32 * 1024 * 1024:
                 while n > 0:
                     n -= len(self.rfile.read(min(n, 1 << 20)) or b"x" * n)
@@ -1270,6 +1302,27 @@ def make_handler(db_path, M, tiles, lan=None):
                     return self.json(FAVS.set(b.get("kind"), b.get("id"), bool(b.get("on")), b.get("meta")))
                 except (ValueError, TypeError) as e:
                     return self.json({"error": str(e)}, 400)
+            if u.path == "/api/last_import/dismiss":  # POST only: viewing never dismisses
+                if not self._same_origin() or self.headers.get("X-Rollbook") != "1":
+                    return self._reject(403, json.dumps({"error": "forbidden"}))
+                try:
+                    n = int(self.headers.get("Content-Length") or 0)
+                except ValueError:
+                    n = -1
+                if not 0 <= n <= 4096:  # drained or closed by _reject: the connection stays sane
+                    return self._reject(413 if n > 0 else 400, json.dumps({"error": "body must be 0-4096 bytes"}))
+                try:
+                    b = json.loads(self.rfile.read(n) or b"{}")
+                    if not isinstance(b, dict):
+                        raise ValueError("expected an object")
+                except (ValueError, TypeError) as e:
+                    return self.json({"error": str(e)}, 400)
+                r = LAST.dismiss(b.get("finished")) if LAST else None
+                if r is None:
+                    return self.json({"error": "nothing to dismiss"}, 404)
+                if r is False:  # a page from before a newer import: it must not hide that one unseen
+                    return self.json({"error": "a newer import arrived, reload"}, 409)
+                return self.json({"dismissed": True})
             if u.path.startswith("/api/import/"):
                 # custom header: a cross-site page can't send it without a CORS
                 # preflight, which this server never approves
@@ -1315,6 +1368,8 @@ def make_handler(db_path, M, tiles, lan=None):
                 return self.json(clean(PROFILE.get()))
             if p == "import":
                 return self.json(clean(IMPORTER.status()))
+            if p == "last_import":
+                return self.json(clean(api_last_import(db, LAST)))
             if p == "strava":  # never the cookie itself
                 return self.json(clean({**strava_web.status(IMPORTER.home), "offline": IMPORTER.offline}))
             if p.startswith("activity/"):
@@ -1374,8 +1429,9 @@ def start(db_path, cache_path, port=8765, offline=False, lan=None):
     """Bind and return (httpd, metrics, url); caller runs httpd.serve_forever().
     With lan (a Lan from lan_setup), httpd.lan_httpd is the network listener,
     bound but not yet serving."""
-    global SEGS, IMPORTER, FAVS, GEO, WX, PROFILE, EDITS
+    global SEGS, IMPORTER, FAVS, GEO, WX, PROFILE, EDITS, LAST
     import importer
+    import lastimport
     import segments  # imports this module; must come after it is fully loaded
 
     EDITS = edits.Edits(os.path.dirname(os.path.abspath(db_path)))
@@ -1384,6 +1440,8 @@ def start(db_path, cache_path, port=8765, offline=False, lan=None):
     IMPORTER = importer.Importer(db_path, M)
     IMPORTER.on_store = EDITS.forget_removed
     IMPORTER.offline = offline
+    LAST = lastimport.LastImport(os.path.join(os.path.dirname(os.path.abspath(db_path)), "last_import.json"))
+    IMPORTER.last = LAST
     PROFILE = athlete.Profile(os.path.dirname(os.path.abspath(db_path)))
     FAVS = Favorites(os.path.join(os.path.dirname(os.path.abspath(db_path)), "favorites.json"))
     threading.Thread(target=M.warm, daemon=True).start()

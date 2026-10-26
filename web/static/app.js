@@ -3,6 +3,20 @@
 "use strict";
 /* Rollbook dashboard. Vanilla JS, no dependencies, talks to web/server.py. */
 
+// ------------------------------------------------------------------ palette
+// One data hue, the urethane orange of the wheel, on the series that answers a
+// chart's question; white for its trend; greys for context; red only for heart
+// rate. Ordered ramps of a hue stand in for rainbow scales (speed, zones).
+const PAL = { hue: "#ff7a1a", tint: "#ffb27a", deep: "#b5530d", ink: "#f2f2f2", soft: "#c8c8c8", grey: "#8c8c8c", dim: "#5a5a5a",
+  hr: "#ff5c8a", start: "#3fc07a", end: "#e5484d", none: "#1c1c1c", na: "#4a4a4a" };
+
+// outline icons, 16 px, 1.5 px stroke (style.css sizes them)
+const ICON = {
+  star: '<svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.9l1.85 3.85 4.2.55-3.07 2.93.77 4.17L8 11.37 4.25 13.4l.77-4.17L1.95 6.3l4.2-.55z"/></svg>',
+  expand: '<svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M9.5 2.5h4v4M6.5 13.5h-4v-4M13.5 2.5L9 7M2.5 13.5L7 9"/></svg>',
+  close: '<svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/></svg>',
+};
+
 // ------------------------------------------------------------------ utils
 
 const $ = (s, el = document) => el.querySelector(s);
@@ -23,6 +37,10 @@ const hours = s => isNum(s) ? (s / 3600).toFixed(s >= 360000 ? 0 : 1) + " h" : "
 const pace = kmh => isNum(kmh) && kmh > 0 ? dur(3600 / kmh) : "–";  // min:ss per km
 const pct = v => isNum(v) ? (v > 0 ? "+" : "") + v.toFixed(1) + "%" : "–";
 const dateOf = a => new Date(a.date + "T12:00:00");
+/** Start time in ms (`datetime` is ISO with offset); `_t` is noon of the day, too coarse
+ * to order two sessions of one day. */
+const whenOf = a => { const t = Date.parse(a.datetime || ""); return isFinite(t) ? t : a._t; };
+const cmpWhen = (a, b) => whenOf(a) - whenOf(b) || (+a.id) - (+b.id);
 const DAY = 86400000;
 const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const fdate = d => `${d.getDate()} ${MON[d.getMonth()]} ${d.getFullYear()}`;
@@ -37,8 +55,9 @@ function rolling(pts, n) {  // rolling median over the previous n points with a 
 const api = async p => { const r = await fetch("/api/" + p); const j = await r.json(); if (!r.ok) throw new Error(j.error || r.status); return j; };
 
 // HR zones as % of HRmax; bounds are lower edges of Z2..Z5
-const ZONES = [{ n: "Z1", lo: 0, c: "#4a90d9" }, { n: "Z2", lo: .75, c: "#3ecf8e" }, { n: "Z3", lo: .84, c: "#f5c542" },
-  { n: "Z4", lo: .90, c: "#ff8a3d" }, { n: "Z5", lo: .95, c: "#ff4d4d" }];
+// grey warming into the heart-rate rose (PAL.hr), so a zone reads as intensity
+const ZONES = [{ n: "Z1", lo: 0, c: "#5c5c5c" }, { n: "Z2", lo: .75, c: "#86636f" }, { n: "Z3", lo: .84, c: "#b05d7a" },
+  { n: "Z4", lo: .90, c: "#d95a82" }, { n: "Z5", lo: .95, c: "#ff5c8a" }];
 function zoneSecs(hist, hrmax) {
   const z = ZONES.map(() => 0);
   if (!hist || !hrmax) return z;
@@ -128,7 +147,7 @@ function chart(host, opt, heightOverride) {
   }
   const svg = el("svg", { class: "chart", viewBox: `0 0 ${W} ${H}`, height: H });
   host.appendChild(svg);
-  if (!ser.length) { el("text", { x: W / 2, y: H / 2, "text-anchor": "middle", fill: "#8a94a3" }, svg).textContent = "no data"; return; }
+  if (!ser.length) { el("text", { x: W / 2, y: H / 2, "text-anchor": "middle", fill: PAL.grey }, svg).textContent = "no data"; return; }
 
   // stacking
   const stacks = {};
@@ -180,12 +199,11 @@ function chart(host, opt, heightOverride) {
   if (Y.y2) labels(Y.y2.ticks, opt.y2.fmt).forEach((l, i) => { el("text", { x: m.l + iw + 6, y: Y.y2.f(Y.y2.ticks[i]) + 4 }, ax).textContent = l; });
   const xt = opt.x.type === "time" ? timeTicks(xlo, xhi) : niceTicks(xlo, xhi, Math.max(3, Math.floor(iw / 80))).ticks.filter(v => v >= xlo && v <= xhi).map(v => ({ v, l: (opt.x.fmt || String)(v) }));
   for (const t of xt) {
-    el("line", { x1: X(t.v), x2: X(t.v), y1: m.t, y2: m.t + ih, opacity: .45 }, g);
     el("text", { x: X(t.v), y: H - 6, "text-anchor": "middle" }, ax).textContent = t.l;
   }
   if (opt.y.label) el("text", { x: 4, y: 10 }, ax).textContent = opt.y.label;
   if (opt.y2 && opt.y2.label) el("text", { x: W - 4, y: 10, "text-anchor": "end" }, ax).textContent = opt.y2.label;
-  if (opt.refY != null && Y.y) el("line", { x1: m.l, x2: m.l + iw, y1: Y.y.f(opt.refY), y2: Y.y.f(opt.refY), stroke: "#8a94a3" }, svg);
+  if (opt.refY != null && Y.y) el("line", { x1: m.l, x2: m.l + iw, y1: Y.y.f(opt.refY), y2: Y.y.f(opt.refY), stroke: PAL.grey, "stroke-dasharray": "3 3" }, svg);
 
   // selection band, behind the series
   const bandEl = el("rect", { y: m.t, height: ih, fill: "#fff", opacity: .13, visibility: "hidden" }, svg);
@@ -305,7 +323,8 @@ function chart(host, opt, heightOverride) {
 
 // ------------------------------------------------------------------ session map (tiles + speed-coloured track)
 
-const SPEED_COLORS = ["#3b6fd9", "#3fb6ff", "#3ecf8e", "#c6e04a", "#f5c542", "#ff8a3d", "#ff4d4d"];
+// slow → fast: grey warming into the hue, then lighter (reads on dark and light tiles)
+const SPEED_COLORS = ["#6e6e6e", "#8f7563", "#b07a52", "#d27a3a", "#ff7a1a", "#ffa05a", "#ffcb9a"];
 function sessionMap(host, series, opt = {}) {
   const pts = [];
   series.forEach((r, i) => { if (r[5] != null) { const m = merc(r[5], r[6]); pts.push({ i, x: m[0], y: m[1], v: r[2] }); } });
@@ -332,7 +351,7 @@ function sessionMap(host, series, opt = {}) {
       for (let j = 1; j < pts.length; j++) { const nb = bucket(pts[j].v); if (nb !== b) { flush(j); j0 = j; b = nb; } }
       flush(pts.length - 1);
       const dot = ([x, y], c, r) => { ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fillStyle = c; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = "#000"; ctx.stroke(); };
-      dot(S[0], "#3ecf8e", 7); dot(S[S.length - 1], "#ff4d4d", 6);
+      dot(S[0], PAL.start, 7); dot(S[S.length - 1], PAL.end, 6);
       if (turnJ != null) dot(S[turnJ], "#fff", 6);
       if (range) {
         ctx.beginPath(); let pen = false;
@@ -342,15 +361,15 @@ function sessionMap(host, series, opt = {}) {
       if (gate) {
         const [x, y] = mp.toScreen(gate[0], gate[1]);
         ctx.beginPath(); ctx.moveTo(x, y - 9); ctx.lineTo(x + 9, y); ctx.lineTo(x, y + 9); ctx.lineTo(x - 9, y); ctx.closePath();
-        ctx.fillStyle = "#ff7a1a"; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = "#000"; ctx.stroke();
+        ctx.fillStyle = PAL.ink; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = "#000"; ctx.stroke();
       }
       if (opt.wind && isNum(opt.wind.wd) && isNum(opt.wind.ws)) {  // wind compass, top-left: arrow points where it blows to
         const cx = 34, cy = 34, a = (opt.wind.wd + 180) * Math.PI / 180, L = 16;
-        ctx.save(); ctx.fillStyle = "#0f1216d8"; ctx.beginPath(); ctx.arc(cx, cy, 26, 0, 7); ctx.fill();
-        ctx.translate(cx, cy); ctx.rotate(a); ctx.strokeStyle = "#3fb6ff"; ctx.fillStyle = "#3fb6ff"; ctx.lineWidth = 3;
+        ctx.save(); ctx.fillStyle = "#000000c8"; ctx.beginPath(); ctx.arc(cx, cy, 26, 0, 7); ctx.fill();
+        ctx.translate(cx, cy); ctx.rotate(a); ctx.strokeStyle = PAL.ink; ctx.fillStyle = PAL.ink; ctx.lineWidth = 3;
         ctx.beginPath(); ctx.moveTo(0, L); ctx.lineTo(0, -L + 4); ctx.stroke();
         ctx.beginPath(); ctx.moveTo(0, -L - 2); ctx.lineTo(-6, -L + 7); ctx.lineTo(6, -L + 7); ctx.closePath(); ctx.fill(); ctx.restore();
-        ctx.fillStyle = "#e6e9ee"; ctx.font = "11px sans-serif"; ctx.textAlign = "center"; ctx.fillText(`${Math.round(opt.wind.ws)} km/h`, cx, cy + 40);
+        ctx.fillStyle = PAL.ink; ctx.font = "500 12px Inter, system-ui, sans-serif"; ctx.textAlign = "center"; ctx.fillText(`${Math.round(opt.wind.ws)} km/h`, cx, cy + 40);
       }
       if (hover != null) { ctx.beginPath(); ctx.arc(...S[hover], 9, 0, 7); ctx.lineWidth = 3; ctx.strokeStyle = "#fff"; ctx.stroke(); }
     }
@@ -369,9 +388,9 @@ function sessionMap(host, series, opt = {}) {
   });
   const leg = document.createElement("div"); leg.className = "legend"; leg.style.marginTop = "6px";
   leg.innerHTML = `<span>speed</span>` + SPEED_COLORS.map((c, i) => `<span><i style="background:${c}"></i>${f1(lo + (hi - lo) * i / SPEED_COLORS.length)}</span>`).join("") +
-    `<span>km/h</span><span><i style="background:#3ecf8e;border-radius:50%"></i>start</span><span><i style="background:#ff4d4d;border-radius:50%"></i>end</span>` +
+    `<span>km/h</span><span><i style="background:${PAL.start};border-radius:50%"></i>start</span><span><i style="background:${PAL.end};border-radius:50%"></i>end</span>` +
     (turnJ != null ? `<span><i style="background:#fff;border-radius:50%"></i>turnaround</span>` : "") +
-    (gate ? `<span><i style="background:#ff7a1a;transform:rotate(45deg)"></i>lap gate</span>` : "");
+    (gate ? `<span><i style="background:${PAL.ink};transform:rotate(45deg)"></i>lap gate</span>` : "");
   host.appendChild(leg);
   return {
     highlight(t0, t1, fit) { this.highlightBy(0, t0, t1, fit); },
@@ -401,7 +420,7 @@ function sessionMap(host, series, opt = {}) {
 
 // ------------------------------------------------------------------ state
 
-const S = { segs: {}, tracks: {}, mapView: {}, types: [], type: localStorage.type || "Inline Skate", range: localStorage.range || "all", acts: {}, hrmax: null, sort: { k: "date", dir: -1 }, q: "" };
+const S = { segs: {}, segsP: {}, lastImport: null, tracks: {}, mapView: {}, types: [], type: localStorage.type || "Inline Skate", range: localStorage.range || "all", acts: {}, hrmax: null, sort: { k: "date", dir: -1 }, q: "" };
 /** Sessions of one sport; withHidden also lists hidden / deleted ones (flagged a.hidden / a.deleted). */
 async function loadActs(type, withHidden) {
   const key = withHidden ? type + "\u0000hidden" : type;
@@ -430,9 +449,9 @@ function ftpAt(acts, t = Date.now(), self) {
 }
 const ftpEst = (acts, t, self) => (ftpAt(acts, t, self) || {}).w ?? null;
 // Power zones as % of FTP (Coggan's 7 levels); hi = upper edge
-const PZONES = [{ n: "Z1", hi: .55, c: "#8a94a3", d: "active recovery" }, { n: "Z2", hi: .75, c: "#4a90d9", d: "endurance" },
-  { n: "Z3", hi: .90, c: "#3ecf8e", d: "tempo" }, { n: "Z4", hi: 1.05, c: "#f5c542", d: "threshold" }, { n: "Z5", hi: 1.20, c: "#ff8a3d", d: "VO2max" },
-  { n: "Z6", hi: 1.50, c: "#ff4d4d", d: "anaerobic" }, { n: "Z7", hi: Infinity, c: "#c77dff", d: "neuromuscular" }];
+const PZONES = [{ n: "Z1", hi: .55, c: "#5a5a5a", d: "active recovery" }, { n: "Z2", hi: .75, c: "#7d7166", d: "endurance" },
+  { n: "Z3", hi: .90, c: "#a0785a", d: "tempo" }, { n: "Z4", hi: 1.05, c: "#c77a42", d: "threshold" }, { n: "Z5", hi: 1.20, c: "#ff7a1a", d: "VO2max" },
+  { n: "Z6", hi: 1.50, c: "#ffa25e", d: "anaerobic" }, { n: "Z7", hi: Infinity, c: "#ffd0a6", d: "neuromuscular" }];
 /** Seconds per power zone from the server's {watts: s} histogram (1 W bins). */
 function pzSecs(hist, ftp) {
   const z = PZONES.map(() => 0);
@@ -450,8 +469,11 @@ function zoneStrip(secs, zones, label) {
 
 // ------------------------------------------------------------------ views
 
+/** KPI strip: one surface split into equal cells. The column count comes from
+ * the item count (8 → 4 + 4, 10 → 5 + 5, 17 → 6 + 6 + 5), so no row ends with an orphan. */
 function cards(items) {
-  return `<div class="cards">` + items.map(c => `<div class="card ${c.hl ? "hl" : ""}"><div class="k">${esc(c.k)}</div><div class="v">${c.v}</div>${c.s ? `<div class="s">${c.s}</div>` : ""}</div>`).join("") + `</div>`;
+  const n = items.length, fit = max => Math.max(1, Math.ceil(n / Math.ceil(n / max)));
+  return `<div class="cards" style="--c:${fit(6)};--ct:${fit(4)}">` + items.map(c => `<div class="card ${c.hl ? "hl" : ""}"><div class="k">${esc(c.k)}</div><div class="v">${c.v}</div>${c.s ? `<div class="s">${c.s}</div>` : ""}</div>`).join("") + `</div>`;
 }
 const go = id => { location.hash = "#/session/" + id; };
 const routePill = r => r ? `<span class="pill ${r === "out-back" ? "ob" : r === "loop" ? "loop" : r === "one-way" ? "ow" : ""}">${esc(r)}</span>` : "";
@@ -482,17 +504,19 @@ async function viewProgress() {
       ...(hasPw ? [{ k: "Best 20-min power", v: f0(p20?.pw20m) + " W", s: link(p20), hl: 1 },
         { k: FT && FT.src === "estimate" ? "FTP estimate" : "FTP", v: isNum(ftp) ? f0(ftp) + " W" : "–", s: (FT ? FT.note : "") + (ftp && S.profile?.weight_kg ? ` · ${(ftp / S.profile.weight_kg).toFixed(2)} W/kg` : "") }] : []),
     ])}
+    <div class="panel" id="p-new" hidden></div>
     <div class="panel"><h2>Calendar <span class="muted">km per day · click a day to open it</span></h2><div id="cal"></div></div>
     <div class="grid g2">
       <div class="panel"><h2>Form: best 10-min speed <span class="muted">click a dot to open the session</span></h2><div id="c-form"></div>
         <div class="note">Wind-neutral = mean of the best 10 min on the out leg and on the back leg, so tail/head wind cancels. Only for out-and-back routes. Lines are rolling medians of 8 sessions.</div></div>
-      <div class="panel"><h2>Volume per month</h2><div id="c-vol"></div></div>
+      <div class="panel"><h2>Volume per month</h2><div id="c-vol"></div><div class="note" id="vol-note"></div></div>
       <div class="panel"><h2>Energy per month <span class="muted">kcal, Rollbook's per-sport estimate</span></h2><div id="c-kcal"></div>
         <div class="note" id="kcal-note"></div></div>
       <div class="panel"><h2>Endurance: best sustained speed <span class="muted">30 / 60 min windows</span></h2><div id="c-endu"></div></div>
       <div class="panel"><h2>Average moving speed per session</h2><div id="c-avg"></div>
         <div class="note">Not comparable across 2025-08: the watch sample rate dropped then and inflates moving speed. Use best-10 for long-term form.</div></div>
-      <div class="panel"><h2>Efficiency: best 10-min ÷ avg HR <span class="muted">km/h per 100 bpm</span></h2><div id="c-eff"></div></div>
+      <div class="panel"><h2>Efficiency: best 10-min ÷ avg HR <span class="muted">km/h per 100 bpm</span></h2><div id="c-eff"></div>
+        <div class="note" id="eff-note"></div></div>
       ${hasPw ? `<div class="panel"><h2>Power: best 5 / 20 min <span class="muted">click a dot to open the session</span></h2><div id="c-pow"></div>
         <div class="note">Recorded by the trainer or power meter, the most reliable fitness signal here. FTP: your profile's if set, else the one your training app used (ROUVY stores it in each ride), else 95% of the best 20 min over the previous ${FTP_DAYS / 30} months.</div></div>
       <div class="panel"><h2>Time in power zones per month <span class="muted">% of FTP at the time of each ride</span></h2><div id="c-pzones"></div></div>
@@ -500,13 +524,14 @@ async function viewProgress() {
         <div class="note">More watts for the same heart rate = fitter. Only sessions with both.</div></div>` : ""}
       <div class="panel"><h2>Out-leg vs back-leg speed <span class="muted">out/back routes · bars = measured, dots = explained by wind + slope</span></h2><div id="c-wind"></div>
         <div class="note">Positive = out leg faster. Dots use the hourly wind at each leg and the leg's grade; the rest is pacing, fatigue and gusts.</div></div>
-      <div class="panel"><h2>Heat: speed vs temperature <span class="muted">best 10-min (adjusted where available)</span></h2><div id="c-heat"></div></div>
+      <div class="panel"><h2>Heat: speed vs temperature <span class="muted">best 10-min (adjusted where available)</span></h2><div id="c-heat"></div>
+        <div class="note" id="heat-note"></div></div>
       <div class="panel"><h2>Time in HR zones per month <span class="muted">HRmax ${S.hrmax ?? "?"} bpm</span></h2><div id="c-zones"></div></div>
       <div class="panel" id="p-pred"></div>
     </div>
     <div class="panel" id="p-favs" hidden></div>
     <div class="panel" id="p-circ" hidden></div>
-    <div class="grid g2">
+    <div class="grid g2 top">
       <div class="panel"><h2>Personal records</h2><div id="t-rec"></div></div>
       <div class="panel"><h2>Monthly summary</h2><div class="scroll" id="t-mon"></div></div>
     </div>`;
@@ -520,10 +545,10 @@ async function viewProgress() {
   chart($("#c-form"), {
     x: { type: "time" }, y: { fmt: v => v.toFixed(0), label: "km/h" }, tip: tipAct, onClick: go,
     series: [
-      { name: "raw best 10-min", kind: "dot", color: "#8a94a3", r: 2.5, opacity: .6, data: P("best10min_kmh", acts.filter(a => isNum(a.best10min_kmh) && a.best10min_kmh > 0)) },
-      { name: "wind-neutral", kind: "dot", color: "#ff7a1a", r: 3, data: P("wind_neutral") },
-      { name: "raw, rolling", kind: "line", color: "#c9d1dc", width: 1.5, opacity: .7, data: rolling(P("best10min_kmh"), 8), gapX: 45 * DAY },
-      { name: "wind-neutral, rolling", kind: "line", color: "#ffd166", width: 2.5, data: rolling(P("wind_neutral"), 8), gapX: 45 * DAY },
+      { name: "raw best 10-min", kind: "dot", color: PAL.dim, r: 2.5, opacity: .8, data: P("best10min_kmh", acts.filter(a => isNum(a.best10min_kmh) && a.best10min_kmh > 0)) },
+      { name: "wind-neutral", kind: "dot", color: PAL.hue, r: 3, opacity: .75, data: P("wind_neutral") },
+      { name: "raw, rolling", kind: "line", color: PAL.grey, width: 1.5, data: rolling(P("best10min_kmh"), 8), gapX: 45 * DAY },
+      { name: "wind-neutral, rolling", kind: "line", color: PAL.ink, width: 2.5, data: rolling(P("wind_neutral"), 8), gapX: 45 * DAY },
     ]
   });
 
@@ -545,14 +570,16 @@ async function viewProgress() {
   }
   chart($("#c-vol"), {
     x: { type: "time" }, y: { zero: true, fmt: v => v.toFixed(0), label: "km" }, y2: { zero: true, fmt: v => v.toFixed(0), label: "sessions" },
-    series: [{ name: "km", kind: "bar", color: "#3fb6ff", data: mons.map(m => ({ x: m.x, y: m.km })) },
-      { name: "sessions", kind: "line", color: "#ff7a1a", axis: "y2", data: mons.map(m => ({ x: m.x, y: m.n })) }],
+    series: [{ name: "km", kind: "bar", color: PAL.hue, data: mons.map(m => ({ x: m.x, y: m.km })) },
+      { name: "sessions", kind: "line", color: PAL.ink, axis: "y2", data: mons.map(m => ({ x: m.x, y: m.n })) }],
     tip: x => { const m = mons.find(m => m.x === x); return m ? `<b>${fmon(new Date(m.x))}</b><div class="row"><span>distance</span><span>${fkm(m.km)} km</span></div><div class="row"><span>sessions</span><span>${m.n}</span></div><div class="row"><span>moving</span><span>${hours(m.mv)}</span></div>` : ""; }
   });
+  const busy = mons.reduce((b, m) => !b || m.km > b.km ? m : b, null);
+  $("#vol-note").textContent = busy ? `${fkm(km)} km in ${acts.length} sessions over ${mons.length} months. Busiest: ${fmon(new Date(busy.x))}, ${fkm(busy.km)} km in ${busy.n} sessions.` : "";
   if (mons.some(m => m.kcal)) {
     chart($("#c-kcal"), {
       x: { type: "time" }, y: { zero: true, fmt: v => v >= 1000 ? (v / 1000).toFixed(0) + "k" : v.toFixed(0), label: "kcal" },
-      series: [{ name: "kcal", kind: "bar", color: "#ff7a1a", data: mons.map(m => ({ x: m.x, y: m.kcal })) }], legend: false,
+      series: [{ name: "kcal", kind: "bar", color: PAL.hue, data: mons.map(m => ({ x: m.x, y: m.kcal })) }], legend: false,
       tip: x => { const m = mons.find(m => m.x === x); return m ? `<b>${fmon(new Date(m.x))}</b><div class="row"><span>energy</span><span>${f0(m.kcal)} kcal</span></div><div class="row"><span>per session</span><span>${f0(m.kcal / m.n)}</span></div><div class="row"><span>per hour</span><span>${m.mv ? f0(m.kcal / (m.mv / 3600)) : "–"}</span></div>` : ""; },
     });
     const tot = acts.reduce((t, a) => t + (a.kcal || 0), 0), src = [...new Set(acts.map(a => (a.kcal_src || "").split(" ")[0]).filter(Boolean))];
@@ -560,21 +587,22 @@ async function viewProgress() {
   } else $("#c-kcal").innerHTML = `<p class="muted">Enter your weight in the <a href="#/profile">profile</a> to estimate calories.</p>`;
   chart($("#c-endu"), {
     x: { type: "time" }, y: { fmt: v => v.toFixed(0), label: "km/h" }, tip: tipAct, onClick: go,
-    series: [{ name: "best 30 min", kind: "dot", color: "#3fb6ff", data: P("b30", acts.filter(a => a.b30 > 5)) },
-      { name: "best 60 min", kind: "dot", color: "#ff7a1a", r: 3.5, data: P("b60", acts.filter(a => a.b60 > 5)) },
-      { name: "60 min, rolling", kind: "line", color: "#ffd166", width: 2.5, data: rolling(P("b60", acts.filter(a => a.b60 > 5)), 6), gapX: 60 * DAY }]
+    series: [{ name: "best 30 min", kind: "dot", color: PAL.dim, data: P("b30", acts.filter(a => a.b30 > 5)) },
+      { name: "best 60 min", kind: "dot", color: PAL.hue, r: 3.5, opacity: .8, data: P("b60", acts.filter(a => a.b60 > 5)) },
+      { name: "60 min, rolling", kind: "line", color: PAL.ink, width: 2.5, data: rolling(P("b60", acts.filter(a => a.b60 > 5)), 6), gapX: 60 * DAY }]
   });
   chart($("#c-avg"), {
     x: { type: "time" }, y: { fmt: v => v.toFixed(0), label: "km/h" }, tip: tipAct, onClick: go,
-    series: [{ name: "moving avg", kind: "dot", color: "#3ecf8e", r: 2.5, data: P("kmh_moving", acts.filter(a => a.kmh_moving > 0)) },
-      { name: "moving avg, rolling", kind: "line", color: "#b8f5d6", width: 2.5, data: rolling(P("kmh_moving"), 8), gapX: 45 * DAY },
-      { name: "elapsed avg, rolling", kind: "line", color: "#8a94a3", width: 1.5, dash: "4 3", data: rolling(P("kmh_elapsed"), 8), gapX: 45 * DAY }]
+    series: [{ name: "moving avg", kind: "dot", color: PAL.hue, r: 2.5, opacity: .7, data: P("kmh_moving", acts.filter(a => a.kmh_moving > 0)) },
+      { name: "moving avg, rolling", kind: "line", color: PAL.ink, width: 2.5, data: rolling(P("kmh_moving"), 8), gapX: 45 * DAY },
+      { name: "elapsed avg, rolling", kind: "line", color: PAL.grey, width: 1.5, dash: "4 3", data: rolling(P("kmh_elapsed"), 8), gapX: 45 * DAY }]
   });
   const withHr = acts.filter(a => a.hr_avg > 60 && a.best10min_kmh > 0);
+  $("#eff-note").textContent = withHr.length ? `Higher = more speed for the same heart rate. ${withHr.length} of ${acts.length} sessions have heart rate.` : "Needs sessions with heart rate.";
   chart($("#c-eff"), {
     x: { type: "time" }, y: { fmt: v => v.toFixed(0) }, y2: { fmt: v => v.toFixed(0), label: "bpm" }, tip: tipAct, onClick: go,
-    series: [{ name: "efficiency", kind: "dot", color: "#ff7a1a", r: 3.5, data: withHr.map(a => ({ x: a._t, y: a.best10min_kmh / a.hr_avg * 100, ref: a.id })) },
-      { name: "avg HR", kind: "dot", color: "#ff4d4d", axis: "y2", r: 2, opacity: .45, data: withHr.map(a => ({ x: a._t, y: a.hr_avg, ref: a.id })) }]
+    series: [{ name: "efficiency", kind: "dot", color: PAL.hue, r: 3.5, data: withHr.map(a => ({ x: a._t, y: a.best10min_kmh / a.hr_avg * 100, ref: a.id })) },
+      { name: "avg HR", kind: "dot", color: PAL.hr, axis: "y2", r: 2, opacity: .45, data: withHr.map(a => ({ x: a._t, y: a.hr_avg, ref: a.id })) }]
   });
   if (hasPw) {
     const pw = acts.filter(a => isNum(a.pw20m));
@@ -582,9 +610,9 @@ async function viewProgress() {
     const tipPw = (x, hits, b) => { const a = acts.find(a => a.id === b.p.ref); return a ? `<b>${fdate(a._d)}</b> · ${esc(a.name)}<div class="row"><span>best 5 min</span><span>${f0(a.pw5m)} W</span></div><div class="row"><span>best 20 min</span><span>${f0(a.pw20m)} W</span></div><div class="row"><span>weighted</span><span>${f0(a.np)} W</span></div><div class="row"><span>avg</span><span>${f0(pwAvg(a))} W</span></div>` : ""; };
     chart($("#c-pow"), {
       x: { type: "time" }, y: { fmt: v => v.toFixed(0), label: "W" }, tip: tipPw, onClick: go,
-      series: [{ name: "best 5 min", kind: "dot", color: "#8a94a3", r: 2.5, opacity: .7, data: P("pw5m", pw) },
-        { name: "best 20 min", kind: "dot", color: "#ff7a1a", r: 3.5, data: P("pw20m", pw) },
-        { name: "FTP", kind: "line", color: "#ffd166", width: 2.5, data: ftpLine, gapX: 60 * DAY }],
+      series: [{ name: "best 5 min", kind: "dot", color: PAL.dim, r: 2.5, opacity: .9, data: P("pw5m", pw) },
+        { name: "best 20 min", kind: "dot", color: PAL.hue, r: 3.5, data: P("pw20m", pw) },
+        { name: "FTP", kind: "line", color: PAL.ink, width: 2.5, data: ftpLine, gapX: 60 * DAY }],
     });
     const pzm = mons.map(mo => ({ x: mo.x, z: mo.a.reduce((z, a) => pzSecs(a.pw_hist, ftpEst(all, a._t, a)).map((v, i) => z[i] + v), PZONES.map(() => 0)) })).filter(mo => mo.z.some(v => v > 0));
     if (pzm.length) chart($("#c-pzones"), {
@@ -597,26 +625,27 @@ async function viewProgress() {
     if (ph.length) chart($("#c-pwhr"), {
       x: { type: "time" }, y: { fmt: v => v.toFixed(2), label: "W/bpm" }, onClick: go, legend: false,
       tip: (x, h, b) => { const a = acts.find(a => a.id === b.p.ref); return a ? `<b>${fdate(a._d)}</b><div class="row"><span>avg power</span><span>${f0(pwAvg(a))} W</span></div><div class="row"><span>avg HR</span><span>${f0(a.hr_avg)} bpm</span></div><div class="row"><span>W per bpm</span><span>${(pwAvg(a) / a.hr_avg).toFixed(2)}</span></div>` : ""; },
-      series: [{ name: "W per bpm", kind: "dot", color: "#3ecf8e", r: 3, data: ph.map(a => ({ x: a._t, y: pwAvg(a) / a.hr_avg, ref: a.id })) },
-        { name: "rolling", kind: "line", color: "#b8f5d6", width: 2.5, data: rolling(ph.map(a => ({ x: a._t, y: pwAvg(a) / a.hr_avg })), 6), gapX: 45 * DAY }],
+      series: [{ name: "W per bpm", kind: "dot", color: PAL.hue, r: 3, data: ph.map(a => ({ x: a._t, y: pwAvg(a) / a.hr_avg, ref: a.id })) },
+        { name: "rolling", kind: "line", color: PAL.ink, width: 2.5, data: rolling(ph.map(a => ({ x: a._t, y: pwAvg(a) / a.hr_avg })), 6), gapX: 45 * DAY }],
     });
     else $("#c-pwhr").innerHTML = `<p class="muted">No sessions with both power and heart rate in this range.</p>`;
   }
   const ob = acts.filter(a => isNum(a.asym_pct));
   chart($("#c-wind"), {
     x: { type: "time" }, y: { fmt: v => v.toFixed(0) + "%" }, refY: 0, tip: tipAct, onClick: go,
-    series: [{ name: "explained", kind: "dot", color: "#fff", r: 2.5, data: ob.filter(a => a.cond && a.cond.legs).map(a => ({ x: a._t, y: a.cond.gap_wind + a.cond.gap_slope, ref: a.id })) },
-      { name: "out vs back", kind: "bar", color: "#3fb6ff", data: ob.map(a => ({ x: a._t, y: a.asym_pct, ref: a.id, color: Math.abs(a.asym_pct) < 6 ? "#3ecf8e" : Math.abs(a.asym_pct) < 15 ? "#f5c542" : "#ff4d4d" })) }],
+    series: [{ name: "explained", kind: "dot", color: PAL.ink, r: 2.5, data: ob.filter(a => a.cond && a.cond.legs).map(a => ({ x: a._t, y: a.cond.gap_wind + a.cond.gap_slope, ref: a.id })) },
+      { name: "out vs back", kind: "bar", color: PAL.hue, data: ob.map(a => ({ x: a._t, y: a.asym_pct, ref: a.id, color: Math.abs(a.asym_pct) < 6 ? PAL.dim : Math.abs(a.asym_pct) < 15 ? PAL.deep : PAL.hue })) }],
     legend: false
   });
   const hot = acts.filter(a => isNum(a.temp) && a.best10min_kmh > 5);
   if (hot.length > 5) {
-    const pts = hot.map(a => ({ x: a.temp, y: a.adj_neutral || a.best10min_kmh, ref: a.id, color: a.hr_avg ? "#ff4d4d" : null }));
+    const pts = hot.map(a => ({ x: a.temp, y: a.adj_neutral || a.best10min_kmh, ref: a.id, color: null }));
     const bins = {}; for (const p of pts) (bins[Math.round(p.x / 3) * 3] ||= []).push(p.y);
+    $("#heat-note").textContent = `${hot.length} outdoor sessions with weather; the line is the median of each 3 °C band with at least 3 sessions.`;
     chart($("#c-heat"), {
       x: { type: "linear", fmt: v => v.toFixed(0) + "°" }, y: { fmt: v => v.toFixed(0), label: "km/h" }, onClick: go,
-      series: [{ name: "session", kind: "dot", color: "#ff7a1a", r: 2.5, opacity: .7, data: pts },
-        { name: "median per 3 °C", kind: "line", color: "#ffd166", width: 2.5, data: Object.entries(bins).filter(([, v]) => v.length >= 3).map(([k, v]) => ({ x: +k, y: median(v) })).sort((p, q) => p.x - q.x) }],
+      series: [{ name: "session", kind: "dot", color: PAL.hue, r: 2.5, opacity: .7, data: pts },
+        { name: "median per 3 °C", kind: "line", color: PAL.ink, width: 2.5, data: Object.entries(bins).filter(([, v]) => v.length >= 3).map(([k, v]) => ({ x: +k, y: median(v) })).sort((p, q) => p.x - q.x) }],
       tip: (x, h, b) => { const a = acts.find(a => a.id === b.p.ref); return a ? `<b>${fdate(a._d)}</b> · ${f0(a.temp)}°C<div class="row"><span>best 10</span><span>${f2(b.p.y)}</span></div>${a.hr_avg ? `<div class="row"><span>HR</span><span>${f0(a.hr_avg)}</span></div>` : ""}` : `${f0(x)}°C`; },
     });
   } else $("#c-heat").innerHTML = `<p class="muted">Weather is loading (or no outdoor sessions in range).</p>`;
@@ -629,19 +658,18 @@ async function viewProgress() {
   if (!zm.length) $("#c-zones").innerHTML = `<p class="muted">No heart-rate data in this range.</p>`;
 
   // records
-  const recs = [["Best 5 min", "best5min_kmh", "km/h"], ["Best 10 min", "best10min_kmh", "km/h"], ["Best 20 min", "best20min_kmh", "km/h"],
-    ["Best 30 min", "b30", "km/h"], ["Best 60 min", "b60", "km/h"], ["Best wind-neutral 10 min", "wind_neutral", "km/h"],
-    ["Fastest avg (≥10 km)", "kmh_moving", "km/h", acts.filter(a => a.km >= 10)], ["Longest", "km", "km"], ["Longest moving time", "moving_s", ""], ["Most climbing", "ascent_m", "m"],
-    ...(hasPw ? [["Best 5 s power", "pw5s", "W"], ["Best 30 s power", "pw30s", "W"], ["Best 1 min power", "pw1m", "W"], ["Best 5 min power", "pw5m", "W"], ["Best 20 min power", "pw20m", "W"], ["Best 30 min power", "pw30m", "W"], ["Best 60 min power", "pw60m", "W"], ["Highest weighted power", "np", "W"]] : [])];
   $("#t-rec").innerHTML = `<table><thead><tr><th>record</th><th>value</th><th class="l">date</th><th>km</th><th class="l">route</th></tr></thead><tbody>` +
-    recs.map(([n, k, u, xs]) => { const a = best(k, xs); if (!a) return ""; return `<tr class="click" data-id="${a.id}"><td class="l">${n}</td><td>${k === "moving_s" ? dur(a[k], true) : u === "W" ? f0(a[k]) : f2(a[k])} ${u}</td><td class="l">${fdate(a._d)}</td><td>${fkm(a.km)}</td><td class="l">${routePill(a.route)}</td></tr>`; }).join("") + `</tbody></table>`;
+    RECORD_METRICS.filter(m => !m.power || hasPw).map(m => { const a = best(m.k, m.minKm ? acts.filter(a => a.km >= m.minKm) : acts); if (!a) return ""; return `<tr class="click" data-id="${a.id}"><td class="l">${m.n}</td><td>${recFmt(m, a[m.k])} ${m.u}</td><td class="l">${fdate(a._d)}</td><td>${fkm(a.km)}</td><td class="l">${routePill(a.route)}</td></tr>`; }).join("") + `</tbody></table>`;
   $("#t-mon").innerHTML = `<table><thead><tr><th>month</th><th>n</th><th>km</th><th>moving</th><th>km/h</th><th>best10 max</th><th>best10 med</th><th>wind-neutral</th><th>HR</th><th>kcal</th></tr></thead><tbody>` +
     mons.slice().reverse().map(m => `<tr><td class="l">${fmon(new Date(m.x))}</td><td>${m.n}</td><td>${fkm(m.km)}</td><td>${hours(m.mv)}</td><td>${f1(m.kmh)}</td><td>${f2(m.b10)}</td><td>${f2(m.b10med)}</td><td>${f2(m.wn)}</td><td>${f0(m.hr)}</td><td>${m.kcal ? f0(m.kcal) : "–"}</td></tr>`).join("") + `</tbody></table>`;
   app.querySelectorAll("tr[data-id]").forEach(tr => tr.onclick = () => go(tr.dataset.id));
+  // the monthly table scrolls inside a frame as tall as the records beside it
+  if (innerWidth > 1100) $("#t-mon").style.maxHeight = Math.max(320, $("#t-rec").offsetHeight) + "px";
   predictor($("#p-pred"), all);
   calendar($("#cal"), acts);
   circuits($("#p-circ"), acts);
   favPanel($("#p-favs"), all);
+  newRecordsPanel($("#p-new"), { dismiss: true });
 }
 
 function predictor(host, all) {
@@ -671,19 +699,205 @@ function predictor(host, all) {
   $("#pk").oninput = render; render();
 }
 
+// ------------------------------------------------------------------ records, and new ones after an import (#17)
+
+/** Higher-is-better per-session records. grp orders the new-records list; news:false
+ * = never announced as new (kmh_moving isn't comparable across 2025-08, watch
+ * climbing runs 2-10x high); speed = speed/distance, meaningless on Virtual sports
+ * (simulated gradients). */
+const RECORD_METRICS = [
+  { k: "best5min_kmh", n: "Best 5 min", u: "km/h", grp: 6, speed: true },
+  { k: "best10min_kmh", n: "Best 10 min", u: "km/h", grp: 1, speed: true },
+  { k: "best20min_kmh", n: "Best 20 min", u: "km/h", grp: 6, speed: true },
+  { k: "b30", n: "Best 30 min", u: "km/h", grp: 6, speed: true },
+  { k: "b60", n: "Best 60 min", u: "km/h", grp: 6, speed: true },
+  { k: "wind_neutral", n: "Best wind-neutral 10 min", u: "km/h", grp: 2, speed: true },
+  { k: "kmh_moving", n: "Fastest avg (≥10 km)", u: "km/h", minKm: 10, news: false },
+  { k: "km", n: "Longest", u: "km", grp: 7, speed: true },
+  { k: "moving_s", n: "Longest moving time", u: "", news: false },
+  { k: "ascent_m", n: "Most climbing", u: "m", news: false },
+  { k: "pw5s", n: "Best 5 s power", u: "W", grp: 5, power: true },
+  { k: "pw30s", n: "Best 30 s power", u: "W", grp: 5, power: true },
+  { k: "pw1m", n: "Best 1 min power", u: "W", grp: 5, power: true },
+  { k: "pw5m", n: "Best 5 min power", u: "W", grp: 5, power: true },
+  { k: "pw20m", n: "Best 20 min power", u: "W", grp: 5, power: true },
+  { k: "pw30m", n: "Best 30 min power", u: "W", grp: 5, power: true },
+  { k: "pw60m", n: "Best 60 min power", u: "W", grp: 5, power: true },
+  { k: "np", n: "Highest weighted power", u: "W", grp: 5, power: true },
+];
+const recFmt = (m, v) => m.k === "moving_s" ? dur(v, true) : m.u === "W" ? f0(v) : f2(v);
+/** A value as shown: a record must still be better after this rounding. */
+const recRound = (u, v) => u === "W" || u === "s" ? Math.round(v) : Math.round(v * 100) / 100;
+const NR = { minPrior: 5, minPriorLap: 3, segMinOthers: 5, thenDays: 30, segPerSession: 2, cap: 10 };
+
+/** Records set by newly imported sessions, best first, uncapped.
+ * acts: every loaded session of the sports involved; newIds: ids of the import;
+ * segsByType: {type: segments from loadSegs} (efforts {aid, el, a}).
+ * scope "all" = best of the sport now, strictly beating every older session's best;
+ * "then" = faster than everything dated before it (not all-time), only for sessions
+ * within NR.thenDays of the newest older one, so a backfill of old files stays quiet.
+ * Nothing is claimed against fewer than NR.minPrior older sessions with the value. */
+function newRecords(acts, newIds, segsByType) {
+  const isNew = new Set([...newIds].map(Number)), out = [], segRecs = [];
+  const byType = new Map();
+  for (const a of acts) { if (!byType.has(a.type)) byType.set(a.type, []); byType.get(a.type).push(a); }
+  // items: [{a, v}] of one sport, oldest first
+  const judge = (base, items, minPrior, lower) => {
+    const r = [], old = items.filter(i => !isNew.has(+i.a.id)), fresh = items.filter(i => isNew.has(+i.a.id));
+    if (!fresh.length) return r;
+    const beats = (x, y) => lower ? recRound(base.u, x) < recRound(base.u, y) : recRound(base.u, x) > recRound(base.u, y);
+    const pick = xs => xs.reduce((b, i) => !b || (lower ? i.v < b.v : i.v > b.v) ? i : b, null);  // tie: earliest
+    const rec = (scope, i, p) => ({ ...base, scope, aid: i.a.id, a: i.a, value: i.v, prev: p.v, prevAid: p.a.id, lower: !!lower });
+    let top = null;
+    if (old.length < minPrior) return r;  // no history (e.g. a first import of this sport): no claims at all
+    const p = pick(old), c = pick(fresh);
+    if (beats(c.v, p.v)) r.push(rec("all", top = c, p));
+    const lastOld = whenOf(old[old.length - 1].a);
+    for (const n of fresh) {
+      if (n === top || whenOf(n.a) < lastOld - NR.thenDays * DAY) continue;
+      const before = items.filter(i => i !== n && cmpWhen(i.a, n.a) < 0);
+      if (before.length < minPrior) continue;
+      const p = pick(before);
+      if (beats(n.v, p.v)) r.push(rec("then", n, p));
+    }
+    return r;
+  };
+  for (const [type, list0] of byType) {
+    const list = list0.slice().sort(cmpWhen);
+    if (!list.some(a => isNew.has(+a.id))) continue;
+    const virtual = /^Virtual/.test(type || "");
+    for (const m of RECORD_METRICS) {
+      if (m.news === false || (virtual && m.speed)) continue;
+      const items = list.filter(a => isNum(a[m.k]) && a[m.k] > 0).map(a => ({ a, v: a[m.k] }));
+      out.push(...judge({ kind: "metric", k: m.k, n: m.n, u: m.u, grp: m.grp, type }, items, NR.minPrior, false));
+    }
+    if (!virtual) for (const c of groupCircuits(list)) {
+      const items = c.a.map(a => ({ a, v: a.best_lap_s }));
+      out.push(...judge({ kind: "lap", k: "best_lap_s", n: "Best lap", u: "s", grp: 4, type, lap_km: median(c.a.map(a => a.lap_km)) }, items, NR.minPriorLap, true));
+    }
+    for (const sg of (segsByType && segsByType[type]) || []) {
+      const per = new Map();
+      for (const e of sg.efforts) if (e.a) { const b = per.get(e.aid); if (!b || e.el < b.el) per.set(e.aid, e); }
+      const items = [...per.values()].sort((x, y) => cmpWhen(x.a, y.a)).map(e => ({ a: e.a, v: e.el }));
+      segRecs.push(...judge({ kind: "segment", k: "el", n: "Segment", u: "s", grp: 3, type, sgid: sg.id, sg, m: sg.m, full: !!sg.full }, items, NR.segMinOthers, true));
+    }
+  }
+  // "Full" segments overlap each other and the pieces: one fast session would PR on
+  // a dozen. Keep NR.segPerSession per session and scope, pieces first, then longest.
+  const kept = new Map();
+  for (const s of segRecs.sort((x, y) => (x.full - y.full) || (y.m - x.m))) {
+    const key = s.aid + "/" + s.scope, n = kept.get(key) || 0;
+    if (n < NR.segPerSession) { kept.set(key, n + 1); out.push(s); }
+  }
+  return out.sort((x, y) => ((x.scope === "all" ? 0 : 1) - (y.scope === "all" ? 0 : 1)) || (x.grp - y.grp) || (whenOf(y.a) - whenOf(x.a)));
+}
+
+const okAid = id => /^\d{1,16}$/.test(String(id));
+const okSgid = id => /^[0-9A-Za-z_-]{1,64}$/.test(String(id));
+/** Segments of a sport, fetched once per data version (refreshData clears it), so
+ * redraws don't start one poll loop each. */
+const segsOnce = type => S.segsP[type] ||= loadSegs(type).catch(e => { delete S.segsP[type]; throw e; });
+/** Sport switch that sticks: selector, state and storage agree. */
+function setSport(t) {
+  const sel = $("#type");
+  if (sel && ![...sel.options].some(o => o.value === t)) return;
+  S.type = localStorage.type = t;
+  if (sel) sel.value = t;
+}
+async function postDismiss(finished) {
+  const r = await fetch("/api/last_import/dismiss", { method: "POST", headers: { "X-Rollbook": "1", "Content-Type": "application/json" }, body: JSON.stringify({ finished }) });
+  if (r.status === 409) return "stale";
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.status);
+  return "ok";
+}
+
+/** Hide a records panel and void any draw still in flight for it (segments load late). */
+function nrCancel(host) { if (host) { host._nrGen = (host._nrGen || 0) + 1; host.hidden = true; } }
+
+/** The last import's summary in host (Import dialog, or the Progress page with
+ * opt.dismiss). Ids from the server only select among sessions and segments the
+ * API returned; every name is escaped (Strava, OSM and file names are not ours).
+ * Resolves after the first draw; segment PRs are added when segments are ready. */
+async function newRecordsPanel(host, opt = {}) {
+  if (!host) return;
+  const gen = host._nrGen = (host._nrGen || 0) + 1, live = () => host._nrGen === gen && host.isConnected;
+  let li;
+  try { li = S.lastImport ||= await api("last_import"); } catch { if (live()) host.hidden = true; return; }
+  if (!live()) return;
+  if (!li || !li.finished || (opt.dismiss && li.dismissed)) { host.hidden = true; return; }
+  const news = (li.new || []).filter(x => okAid(x.id));
+  const total = li.new_total || 0;
+  if (!news.length && !total && !li.replaced) { host.hidden = true; return; }
+  const ids = news.map(x => Number(x.id)), types = [...new Set(news.map(x => x.type).filter(t => typeof t === "string"))];
+  const when = new Date(li.finished * 1000);
+  const head = `<div class="toolbar"><h2 style="margin:0">New since the last import <span class="muted">${esc(fdate(when))} · ${total} session${total === 1 ? "" : "s"} imported${li.replaced ? ` · ${li.replaced} replaced by the export's copy` : ""}</span></h2>
+    ${opt.dismiss ? `<button class="btn small nr-x" title="Dismiss" aria-label="Dismiss">${ICON.close}</button>` : ""}</div>`;
+  let acts = [];
+  try { acts = (await Promise.all(types.map(t => loadActs(t)))).flat(); } catch { }
+  const segs = {};
+  const draw = pending => {
+    if (!live()) return;
+    let body;
+    if (li.partial) body = `<p class="muted small">The import stopped with an error before it finished, so these sessions weren't compared for records.</p>`;
+    else if (li.first && !news.length) body = `<p class="muted small">First import: nothing to compare with yet. Records start with the next one.</p>`;
+    else {
+      const recs = newRecords(acts, ids, segs), shown = recs.slice(0, NR.cap);
+      const val = r => r.u === "s" ? dur(r.value, r.value >= 3600) : `${r.u === "W" ? f0(r.value) : f2(r.value)} ${esc(r.u)}`;
+      const gain = r => r.u === "s" ? `−${dur(r.prev - r.value)}` : `+${r.u === "W" ? f0(r.value - r.prev) : f2(r.value - r.prev)} ${esc(r.u)}`;
+      const what = r => r.kind === "segment" ? (n => `${esc(n)}${n.includes(flen(r.m)) ? "" : ` <span class="muted small">${flen(r.m)}</span>`}`)(segName(r.sg))
+        : r.kind === "lap" ? `Best lap <span class="muted small">${r.lap_km < 1 ? f0(r.lap_km * 1000) + " m" : f2(r.lap_km) + " km"} circuit</span>` : esc(r.n);
+      body = recs.length ? `<table><thead><tr><th class="l"></th><th class="l">record</th><th class="l">sport</th><th>value</th><th>gain</th><th class="l">session</th></tr></thead><tbody>` +
+        shown.map((r, i) => `<tr class="click" data-i="${i}"><td class="l"><span class="pill ${r.scope === "all" ? "ob" : ""}">${r.scope === "all" ? "record" : "best at the time"}</span></td>
+          <td class="l">${what(r)}</td><td class="l muted">${esc(r.type)}</td><td>${val(r)}</td><td class="up">${gain(r)}</td><td class="l">${esc(fdate(r.a._d))} · ${esc(r.a.name)}</td></tr>`).join("") + `</tbody></table>` +
+        (recs.length > shown.length ? `<p class="muted small">+${recs.length - shown.length} more</p>` : "")
+        : `<p class="muted small">No new records${pending ? " yet" : ""}.</p>`;
+      if (pending) body += `<p class="muted small">checking segments…</p>`;
+      body += `<div class="note">"record" = best of that sport now; "best at the time" = faster than every earlier session. Virtual rides: power only.</div>`;
+      host._recs = shown;
+    }
+    host.hidden = false;
+    host.innerHTML = head + body;
+    host.querySelectorAll("tr[data-i]").forEach(tr => tr.onclick = () => {
+      const r = host._recs[+tr.dataset.i]; if (!r) return;
+      if ($("#import-dlg").open) $("#import-dlg").close();
+      if (r.kind === "segment" && okSgid(r.sgid)) { setSport(r.type); location.hash = "#/segment/" + r.sgid; }
+      else if (okAid(r.aid)) go(r.aid);
+    });
+    const x = host.querySelector(".nr-x");
+    if (x) x.onclick = async () => {
+      if (S.readonly) return;
+      try {
+        const res = await postDismiss(li.finished);
+        S.lastImport = null;
+        nrCancel(host);  // also voids the segments redraw still pending
+        if (res === "stale") return newRecordsPanel(host, opt);  // a newer import: show that one
+      } catch (e) { x.title = "could not dismiss: " + e.message; }
+    };
+  };
+  draw(!li.partial && types.length > 0);
+  if (li.partial || !types.length) return;
+  // in the background: the Import dialog must not stay busy while segments compute
+  Promise.all(types.map(t => segsOnce(t).then(s => { segs[t] = s; }).catch(() => { }))).then(() => draw(false));
+}
+
 // ------------------------------------------------------------------ circuits (repeated-lap venues)
 
-const CIRC_COLORS = ["#ff7a1a", "#3fb6ff", "#3ecf8e", "#f5c542", "#c77dff", "#ff4d4d"];
-function circuits(host, acts) {
+const CIRC_COLORS = [PAL.hue, PAL.ink, PAL.tint, PAL.grey, PAL.deep, PAL.dim];
+/** Sessions grouped by the circuit they lapped: lap centre within max(60 m, 25% of
+ * a lap) and lap length within 12%. Oldest first, so the first session of a
+ * circuit anchors it whatever order the list came in. */
+function groupCircuits(acts) {
   const near = (a, b) => { const dy = (a[0] - b[0]) * 111320, dx = (a[1] - b[1]) * 111320 * Math.cos(a[0] * Math.PI / 180); return Math.hypot(dx, dy); };
   const cs = [];
-  for (const a of acts.filter(a => a.laps_n && a.lap_center && a.best_lap_s)) {
-    // same circuit: centre within 25% of a lap length (min 60 m) and lap length within 12%
+  for (const a of acts.filter(a => a.laps_n && a.lap_center && a.best_lap_s).sort(cmpWhen)) {
     let c = cs.find(c => near(c.center, a.lap_center) < Math.max(60, 250 * c.km) && Math.abs(a.lap_km / c.km - 1) < 0.12);
     if (!c) cs.push(c = { center: a.lap_center, km: a.lap_km, a: [] });
     c.a.push(a);
   }
-  const list = cs.filter(c => c.a.length >= 2 || c.a[0].laps_n >= 5).sort((x, y) => y.a.length - x.a.length).slice(0, CIRC_COLORS.length);
+  return cs.filter(c => c.a.length >= 2 || c.a[0].laps_n >= 5);
+}
+function circuits(host, acts) {
+  const list = groupCircuits(acts).sort((x, y) => y.a.length - x.a.length).slice(0, CIRC_COLORS.length);
   if (!list.length) { host.hidden = true; return; }
   host.hidden = false;
   list.forEach((c, i) => {
@@ -717,7 +931,7 @@ function calendar(host, acts, opt = {}) {
   for (const a of acts) { const d = byDay.get(a.date) || { km: 0, n: 0, mv: 0, a: [] }; d.km += a.km || 0; d.mv += a.moving_s || 0; d.n++; d.a.push(a); byDay.set(a.date, d); }
   const years = [...new Set(acts.map(a => a._d.getFullYear()))].sort((a, b) => b - a);
   const vmax = quantile([...byDay.values()].map(d => d.km), .95) || 1;
-  const color = km => km > 0 ? CAL_COLORS[Math.min(CAL_COLORS.length - 1, Math.floor(km / vmax * (CAL_COLORS.length - 0.001)))] : "#1e232b";
+  const color = km => km > 0 ? CAL_COLORS[Math.min(CAL_COLORS.length - 1, Math.floor(km / vmax * (CAL_COLORS.length - 0.001)))] : PAL.none;
   const C = 12, G = 3, L = 30, T = 16;
   const show = opt.all ? years : years.slice(0, 3);
   host.innerHTML = "";
@@ -826,10 +1040,10 @@ async function viewMap() {
     const lo = quantile(vals, .05), hi = quantile(vals, .95);
     for (const t of tracks) {
       const v = t.a[key];
-      t.color = isNum(v) ? SPEED_COLORS[Math.max(0, Math.min(SPEED_COLORS.length - 1, Math.floor((v - lo) / ((hi - lo) || 1) * SPEED_COLORS.length)))] : "#555";
+      t.color = isNum(v) ? SPEED_COLORS[Math.max(0, Math.min(SPEED_COLORS.length - 1, Math.floor((v - lo) / ((hi - lo) || 1) * SPEED_COLORS.length)))] : PAL.na;
     }
     const lab = key === "_t" ? v => fmon(new Date(v)) : key === "km" ? v => f0(v) : v => f1(v);
-    return `<span>${$("#mcolor").selectedOptions[0].text}</span>` + SPEED_COLORS.map((c, i) => `<span><i style="background:${c}"></i>${lab(lo + (hi - lo) * i / SPEED_COLORS.length)}</span>`).join("") + `<span><i style="background:#555"></i>n/a</span>`;
+    return `<span>${$("#mcolor").selectedOptions[0].text}</span>` + SPEED_COLORS.map((c, i) => `<span><i style="background:${c}"></i>${lab(lo + (hi - lo) * i / SPEED_COLORS.length)}</span>`).join("") + `<span><i style="background:${PAL.na}"></i>n/a</span>`;
   };
   const render = () => {
     $("#mmode").querySelectorAll("button").forEach(b => b.classList.toggle("on", b.dataset.m === mode));
@@ -916,7 +1130,7 @@ async function viewProfile() {
   const field = (k, label, attrs, help = "") => `<label class="pfield"><span>${label}</span><input id="pf-${k}" ${attrs} value="${esc(p[k] ?? "")}">${help ? `<small class="muted">${help}</small>` : ""}</label>`;
   app.innerHTML = `
     <div class="head"><div><h1>Profile</h1><div class="muted">Used for calories, heart-rate zones and resting energy. Stored only on this computer (<code>data/profile.json</code>).</div></div></div>
-    <div class="grid g2">
+    <div class="grid g2 top">
       <div class="panel"><h2>You</h2>
         <form id="pform" class="pform">
           ${field("name", "Name", `type="text" maxlength="80" autocomplete="name"`)}
@@ -928,7 +1142,7 @@ async function viewProfile() {
           ${field("hr_rest", "Resting HR (bpm)", `type="number" min="25" max="120" step="1"`, "optional")}
           ${field("ftp", "FTP (W)", `type="number" min="50" max="600" step="1"`, "optional threshold power for power zones and intensity; otherwise the one your training app used (ROUVY), or 95% of your best 20 min")}
           ${field("hr_max", "Max HR (bpm)", `type="number" min="100" max="240" step="1"`, `optional, otherwise the highest recorded in the last 12 months (${S.hrmax ?? "?"} bpm) is used for zones`)}
-          <div class="toolbar"><button class="btn" type="submit" id="psave">Save</button><span id="pmsg" class="small"></span></div>
+          <div class="toolbar"><button class="btn primary" type="submit" id="psave">Save</button><span id="pmsg" class="small"></span></div>
         </form>
         ${p.from_export ? `<div class="note">Prefilled from your Strava export's profile. Check it and save.</div>` : ""}
       </div>
@@ -962,18 +1176,21 @@ async function viewProfile() {
       const r = await fetch("/api/profile", { method: "POST", headers: { "X-Rollbook": "1", "Content-Type": "application/json" }, body: JSON.stringify(body) });
       const j = await r.json();
       if (!r.ok) throw new Error(j.error || r.status);
-      msg.className = "small up"; msg.textContent = "✓ saved; calories and zones updated";
+      msg.className = "small up"; msg.textContent = "Saved. Calories and zones updated.";
       S.profile = j;
       S.acts = {};  // recompute calories in every view
       ({ hrmax: S.hrmax } = await api("hrmax"));
       derived(j); setProfileBtn(j);
-    } catch (err) { msg.className = "small down"; msg.textContent = "✕ " + err.message; }
+    } catch (err) { msg.className = "small down"; msg.textContent = "Could not save: " + err.message; }
   };
 }
 function setProfileBtn(p) {
   S.profile = p || null;  // weight for W/kg
   const b = $("#profile-btn"); if (!b) return;
-  b.textContent = p && p.name ? p.name.split(" ")[0] : "Profile";
+  const name = p && p.name ? p.name.trim() : "";
+  $("#profile-name").textContent = name || "Your profile";
+  $("#profile-init").textContent = (name || "?").slice(0, 1).toUpperCase();
+  $("#profile-sub").textContent = p && p.weight_kg ? `${f1(p.weight_kg)} kg${p.ftp ? ` · FTP ${f0(p.ftp)} W` : ""}` : "Add your weight";
   b.classList.toggle("warn", !(p && p.weight_kg));
   b.title = p && p.weight_kg ? "Your profile" : "Add your weight to estimate calories";
 }
@@ -996,7 +1213,7 @@ const segMeta = sg => ({ type: S.type, start: sg.pts[0], end: sg.pts[sg.pts.leng
 function starBtn(kind, id, meta, onchange) {
   const b = document.createElement("button");
   b.className = "star"; b.type = "button";
-  const paint = () => { const on = isFav(kind, id); b.classList.toggle("on", on); b.textContent = on ? "★" : "☆"; b.title = on ? "remove from favorites" : "add to favorites"; };
+  const paint = () => { const on = isFav(kind, id); b.classList.toggle("on", on); b.innerHTML = ICON.star; b.title = on ? "Remove from favorites" : "Add to favorites"; b.setAttribute("aria-label", b.title); b.setAttribute("aria-pressed", on); };
   b.onclick = async e => {
     e.stopPropagation(); e.preventDefault();
     if (S.readonly) return;
@@ -1020,9 +1237,9 @@ function favPanel(host, all) {
   const segs = Object.entries(S.favs.segments).filter(([, f]) => f.type === S.type);
   if (!fav.length && !segs.length) { host.hidden = true; return; }
   host.hidden = false;
-  host.innerHTML = `<h2>★ Favorites</h2><div class="grid g2"><div>${fav.length ? `<table><thead><tr><th>date</th><th class="l">session</th><th>km</th><th>moving</th><th>avg km/h</th><th>best 10</th></tr></thead><tbody>` +
-    fav.map(a => `<tr class="click" data-id="${a.id}"><td class="l">${fdate(a._d)}</td><td class="l">${esc(a.name)}</td><td>${fkm(a.km)}</td><td>${dur(a.moving_s, true)}</td><td>${f2(a.kmh_moving)}</td><td>${f2(a.best10min_kmh)}</td></tr>`).join("") + `</tbody></table>` : `<p class="muted small">No starred ${esc(S.type)} sessions. Use ☆ in the session list or on a session.</p>`}</div>
-    <div id="fav-segs">${segs.length ? `<p class="muted small">loading segments…</p>` : `<p class="muted small">No starred segments. Use ☆ on the Segments page.</p>`}</div></div>`;
+  host.innerHTML = `<h2>Favorites</h2><div class="grid g2"><div>${fav.length ? `<table><thead><tr><th>date</th><th class="l">session</th><th>km</th><th>moving</th><th>avg km/h</th><th>best 10</th></tr></thead><tbody>` +
+    fav.map(a => `<tr class="click" data-id="${a.id}"><td class="l">${fdate(a._d)}</td><td class="l">${esc(a.name)}</td><td>${fkm(a.km)}</td><td>${dur(a.moving_s, true)}</td><td>${f2(a.kmh_moving)}</td><td>${f2(a.best10min_kmh)}</td></tr>`).join("") + `</tbody></table>` : `<p class="muted small">No starred ${esc(S.type)} sessions. Star one in the session list or on a session page.</p>`}</div>
+    <div id="fav-segs">${segs.length ? `<p class="muted small">loading segments…</p>` : `<p class="muted small">No starred segments yet. Star one on the Segments page.</p>`}</div></div>`;
   host.querySelectorAll("tr[data-id]").forEach(tr => tr.onclick = () => go(tr.dataset.id));
   if (!segs.length) return;
   loadSegs(S.type).then(list => {
@@ -1145,7 +1362,7 @@ function segMap(host, segs, opt = {}) {
         ctx.save(); ctx.translate(...c); ctx.rotate(ang);
         ctx.beginPath(); ctx.moveTo(8, 0); ctx.lineTo(-6, -6); ctx.lineTo(-6, 6); ctx.closePath();
         ctx.fillStyle = "#fff"; ctx.strokeStyle = "#000"; ctx.lineWidth = 1.5; ctx.fill(); ctx.stroke(); ctx.restore();
-        for (const [q, col] of [[a, "#3ecf8e"], [b, "#ff4d4d"]]) { ctx.beginPath(); ctx.arc(...q, 6, 0, 7); ctx.fillStyle = col; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = "#000"; ctx.stroke(); }
+        for (const [q, col] of [[a, PAL.start], [b, PAL.end]]) { ctx.beginPath(); ctx.arc(...q, 6, 0, 7); ctx.fillStyle = col; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = "#000"; ctx.stroke(); }
       }
     }
   });
@@ -1170,10 +1387,10 @@ async function viewSegments() {
     <div class="head"><div><h1>${esc(S.type)} segments</h1><div class="muted">${rows.length} segments found automatically from the roads and loops you use most · best time per session</div></div></div>
     <div class="panel"><div id="segmap" class="map" style="height:460px"></div>
       <div class="note">Arrows show direction: out and back legs are separate segments, so their times reflect wind. Hover a line or a row to match them; click to open. "Full" segments chain several shorter ones into a whole leg.</div></div>
-    <div class="panel"><div class="toolbar"><label class="muted small"><input type="checkbox" id="segfav" ${favOnly ? "checked" : ""}> ★ favorites only</label><span class="muted small" id="segcnt"></span></div>
+    <div class="panel"><div class="toolbar"><label class="muted small"><input type="checkbox" id="segfav" ${favOnly ? "checked" : ""}> Favorites only</label><span class="muted small" id="segcnt"></span></div>
       <div class="scroll" style="max-height:640px"><table id="segtbl"></table></div></div>`;
   const sm = segMap($("#segmap"), rows.map(r => r.sg), { width: 3 });
-  const cols = [["fav", "★", r => starSlot("segments", r.sg.id)], ["name", "segment", r => `${esc(segName(r.sg))}${r.sg.place && r.sg.place.roads.length ? `<div class="muted small">${esc(r.sg.place.roads.slice(0, 2).join(", "))}</div>` : ""}${r.sg.kind === "loop" ? ` <span class="pill loop">loop</span>` : ""}`, "l"],
+  const cols = [["fav", `<span class="star on" title="Favorite">${ICON.star}</span>`, r => starSlot("segments", r.sg.id)], ["name", "segment", r => `${esc(segName(r.sg))}${r.sg.place && r.sg.place.roads.length ? `<div class="muted small">${esc(r.sg.place.roads.slice(0, 2).join(", "))}</div>` : ""}${r.sg.kind === "loop" ? ` <span class="pill loop">loop</span>` : ""}`, "l"],
     ["m", "length", r => flen(r.sg.m)], ["n", "sessions", r => r.st.n],
     ["pr", "best", r => dur(r.st.pr.el, r.st.pr.el >= 3600)], ["prk", "km/h", r => f2(r.st.pr.kmh)], ["prd", "best on", r => fdate(r.st.pr.a._d), "l"],
     ["last", "latest", r => `${dur(r.st.latest.el, r.st.latest.el >= 3600)} <span class="${r.st.latest === r.st.pr ? "up" : "muted"} small">${r.st.latest === r.st.pr ? "PR" : "+" + dur(r.st.latest.el - r.st.pr.el)}</span>`],
@@ -1217,9 +1434,9 @@ async function viewSegment(id) {
   const last5 = st.best.slice().sort((a, b) => b.a._t - a.a._t).slice(0, 5);
   const trendRecent = median(last5.map(e => e.kmh)), trendPrev = median(st.best.slice().sort((a, b) => b.a._t - a.a._t).slice(5, 15).map(e => e.kmh));
   app.innerHTML = `
-    <div class="head"><div><h1>${starSlot("segments", sg.id)} <span id="sgname">${esc(segName(sg))}</span> <button class="btn small" id="rename" title="rename">✎</button></h1>
+    <div class="head"><div><h1>${starSlot("segments", sg.id)} <span id="sgname">${esc(segName(sg))}</span> <button class="btn small" id="rename" title="Rename this segment">Rename</button></h1>
       <div class="muted">${sg.place && sg.place.roads.length ? `via ${esc(sg.place.roads.slice(0, 3).join(", "))}${sg.place.city ? ` · ${esc(sg.place.city)}` : ""} · ` : ""}${sg.kind === "loop" ? "loop" : `heading ${compass(sg.bearing)} (${f0(sg.bearing)}°)`} · starts ${sg.pts[0][0].toFixed(4)}, ${sg.pts[0][1].toFixed(4)}${sg.parts?.length ? ` · made of ${sg.parts.length} shorter segments` : ""}</div></div>
-      <div class="nav">${sg.reverse ? `<a class="btn" href="#/segment/${sg.reverse.id}">⇄ opposite direction</a>` : ""}<a class="btn" href="#/segments">all segments</a></div></div>
+      <div class="headnav">${sg.reverse ? `<a class="btn" href="#/segment/${sg.reverse.id}">⇄ opposite direction</a>` : ""}<a class="btn" href="#/segments">all segments</a></div></div>
     ${st.n ? cards([
       { k: "Length", v: flen(sg.m) },
       { k: "Sessions", v: st.n, s: `${st.effs.length} efforts` },
@@ -1229,7 +1446,7 @@ async function viewSegment(id) {
       { k: "Last 5 vs previous 10", v: isNum(trendRecent) && isNum(trendPrev) ? `<span class="${trendRecent >= trendPrev ? "up" : "down"}">${pct((trendRecent / trendPrev - 1) * 100)}</span>` : "–", s: "median speed" },
       ...(sg.reverse ? (() => { const r = segStats(sg.reverse); return r.n ? [{ k: "Opposite direction best", v: dur(r.pr.el, r.pr.el >= 3600), s: `${f2(r.pr.kmh)} km/h · ${pct((st.pr.kmh / r.pr.kmh - 1) * 100)} this way` }] : []; })() : []),
     ]) : `<p class="muted">No efforts in this date range.</p>`}
-    <div class="grid g2">
+    <div class="grid g2 top">
       <div class="panel"><h2>Map</h2><div id="sgmap" class="map"></div></div>
       <div class="panel"><h2>Speed over time <span class="muted">best effort per session · click to open</span></h2><div id="c-seg"></div>
         <div class="note">${sg.kind === "line" ? "One-way segment: a tailwind day makes a fast time here. Compare with the opposite direction before reading a PR as fitness." : "Loop: wind mostly cancels out, so times here are a fair fitness comparison."}</div></div>
@@ -1243,13 +1460,13 @@ async function viewSegment(id) {
     const names = segNames(); if (n.trim()) names[sg.id] = n.trim(); else delete names[sg.id];
     localStorage.segNames = JSON.stringify(names); $("#sgname").textContent = segName(sg);
   };
-  const sm = segMap($("#sgmap"), [sg], { markers: true, width: 5, color: () => "#ff7a1a" });
+  const sm = segMap($("#sgmap"), [sg], { markers: true, width: 5, color: () => PAL.hue });
   addEventListener("hashchange", () => sm.map.destroy(), { once: true });
   if (!st.n) return;
   chart($("#c-seg"), {
     x: { type: "time" }, y: { fmt: v => v.toFixed(0), label: "km/h" }, onClick: go,
-    series: [{ name: "best per session", kind: "dot", color: "#ff7a1a", r: 3.5, data: st.best.map(e => ({ x: e.a._t, y: e.kmh, ref: e.aid, color: e === st.pr ? "#fff" : null })) },
-      { name: "rolling median", kind: "line", color: "#ffd166", width: 2, data: rolling(st.best.slice().sort((a, b) => a.a._t - b.a._t).map(e => ({ x: e.a._t, y: e.kmh })), 6), gapX: 60 * DAY }],
+    series: [{ name: "best per session", kind: "dot", color: PAL.hue, r: 3.5, data: st.best.map(e => ({ x: e.a._t, y: e.kmh, ref: e.aid, color: e === st.pr ? PAL.ink : null })) },
+      { name: "rolling median", kind: "line", color: PAL.ink, width: 2, data: rolling(st.best.slice().sort((a, b) => a.a._t - b.a._t).map(e => ({ x: e.a._t, y: e.kmh })), 6), gapX: 60 * DAY }],
     tip: (x, hits, b) => { const e = st.best.find(e => e.aid === b.p.ref); return e ? `<b>${fdate(e.a._d)}</b>${e === st.pr ? " · PR" : ""}<div class="row"><span>time</span><span>${dur(e.el, e.el >= 3600)}</span></div><div class="row"><span>speed</span><span>${f2(e.kmh)} km/h</span></div>${e.hr ? `<div class="row"><span>HR</span><span>${e.hr}</span></div>` : ""}` : ""; },
   });
   const drawLb = () => {
@@ -1286,7 +1503,7 @@ async function sessionSegments(a, map) {
   host.innerHTML = `<h2>Segments <span class="muted">${mine.length} in this session · hover to show on the map</span></h2><div class="scroll"><table><thead><tr><th class="l">segment</th><th>length</th><th>time</th><th>km/h</th><th>HR</th><th>rank</th><th>vs best</th><th class="l"></th></tr></thead><tbody>` +
     mine.map(m => {
       const isPr = m.rank === 1, newPr = m.prBefore ? m.best.el < m.prBefore.el : true;
-      return `<tr class="click${isPr ? " best" : ""}" data-sid="${m.sg.id}"><td class="l">${isFav("segments", m.sg.id) ? `<span class="star on">★</span> ` : ""}${esc(segName(m.sg))}${m.n > 1 ? ` <span class="muted small">×${m.n}</span>` : ""}</td><td>${flen(m.sg.m)}</td>
+      return `<tr class="click${isPr ? " best" : ""}" data-sid="${m.sg.id}"><td class="l">${isFav("segments", m.sg.id) ? `<span class="star on">${ICON.star}</span> ` : ""}${esc(segName(m.sg))}${m.n > 1 ? ` <span class="muted small">×${m.n}</span>` : ""}</td><td>${flen(m.sg.m)}</td>
         <td>${dur(m.best.el, m.best.el >= 3600)}</td><td>${f2(m.best.kmh)}</td><td>${f0(m.best.hr)}</td><td>${m.rank} / ${m.of}</td>
         <td>${isPr ? "PR" : "+" + dur(m.best.el - m.pr.el)}</td><td class="l">${newPr && m.of > 1 ? `<span class="pill ob">PR at the time</span>` : ""}</td></tr>`;
     }).join("") + `</tbody></table></div><div class="note">Rank is among each session's best effort. "PR at the time" = fastest so far when this session happened.</div>`;
@@ -1302,7 +1519,7 @@ async function viewSessions() {
   const showHidden = localStorage.showHidden === "1";
   const acts = inRange(await loadActs(S.type, showHidden));
   const cols = [
-    ["fav", "★", a => starSlot("sessions", a.id)], ["date", "date", a => `${fdate(a._d)}`, "l"],
+    ["fav", `<span class="star on" title="Favorite">${ICON.star}</span>`, a => starSlot("sessions", a.id)], ["date", "date", a => `${fdate(a._d)}`, "l"],
     ["name", "name", a => esc(a.name) + (a.hidden ? ` <span class="pill">${a.deleted ? "deleted" : "hidden"}</span>` : ""), "l"], ["km", "km", a => fkm(a.km)],
     ["elapsed_s", "elapsed", a => dur(a.elapsed_s, true)], ["moving_s", "moving", a => dur(a.moving_s, true)], ["pause_s", "paused", a => dur(a.pause_s)],
     ["kmh_moving", "avg km/h", a => f2(a.kmh_moving)], ["pace", "pace /km", a => pace(a.kmh_moving)], ["best10min_kmh", "best 10", a => f2(a.best10min_kmh)],
@@ -1318,7 +1535,7 @@ async function viewSessions() {
   app.innerHTML = `<div class="head"><div><h1>${esc(S.type)} sessions</h1><div class="muted" id="cnt"></div></div></div>
     <div class="panel"><div class="toolbar"><input id="q" placeholder="filter: name, date, route…" value="${esc(S.q)}" style="width:260px">
       <label class="muted small">min km <input id="mink" type="number" value="${localStorage.minKm || 0}" style="width:70px"></label>
-      <label class="muted small"><input type="checkbox" id="favonly" ${localStorage.favOnly === "1" ? "checked" : ""}> ★ favorites only</label>
+      <label class="muted small"><input type="checkbox" id="favonly" ${localStorage.favOnly === "1" ? "checked" : ""}> Favorites only</label>
       <label class="muted small" title="hidden and deleted sessions never count towards stats, maps or segments"><input type="checkbox" id="showhidden" ${showHidden ? "checked" : ""}> show hidden</label></div>
       <div class="scroll"><table id="tbl"></table></div></div>`;
   const draw = () => {
@@ -1364,7 +1581,7 @@ function lapWidgets(L, map, hasHr) {
     { k: "Counted laps", v: `${good.length} / ${laps.length}`, s: `${fkm(lapKm)} km in laps` },
   ]);
   const vals = good.map(x => x.kmh), lo = quantile(vals, .1), hi = quantile(vals, .9);
-  const col = x => !good.includes(x) ? "#555" : SPEED_COLORS[Math.max(0, Math.min(SPEED_COLORS.length - 1, Math.floor((x.kmh - lo) / ((hi - lo) || 1) * (SPEED_COLORS.length - 1) + .5)))];
+  const col = x => !good.includes(x) ? PAL.na : SPEED_COLORS[Math.max(0, Math.min(SPEED_COLORS.length - 1, Math.floor((x.kmh - lo) / ((hi - lo) || 1) * (SPEED_COLORS.length - 1) + .5)))];
   let selected = null;
   const select = n => {
     selected = selected === n ? null : n;
@@ -1379,8 +1596,8 @@ function lapWidgets(L, map, hasHr) {
   chart($("#c-laps"), {
     height: 300, x: { type: "linear", fmt: v => Number.isInteger(v) ? String(v) : "" }, y: { min: ymin, fmt: v => v.toFixed(0), label: "km/h" },
     y2: hasHr && laps.some(x => x.hr) ? { fmt: v => v.toFixed(0), label: "bpm" } : null, refY: median(vals),
-    series: [{ name: "lap speed (moving)", kind: "bar", color: "#3fb6ff", data: laps.filter(x => x.kmh).map(x => ({ x: x.n, y: Math.max(ymin, x.kmh), ref: x.n, color: col(x) })) },
-      ...(hasHr ? [{ name: "avg HR", kind: "line", axis: "y2", color: "#ff4d4d", width: 1.5, data: laps.filter(x => x.hr).map(x => ({ x: x.n, y: x.hr, ref: x.n })) }] : [])],
+    series: [{ name: "lap speed (moving)", kind: "bar", color: PAL.hue, data: laps.filter(x => x.kmh).map(x => ({ x: x.n, y: Math.max(ymin, x.kmh), ref: x.n, color: col(x) })) },
+      ...(hasHr ? [{ name: "avg HR", kind: "line", axis: "y2", color: PAL.hr, width: 1.5, data: laps.filter(x => x.hr).map(x => ({ x: x.n, y: x.hr, ref: x.n })) }] : [])],
     tip: (xv) => { const x = laps.find(l => l.n === xv); return x ? tipLap(x) : ""; },
     onClick: select,
   });
@@ -1412,10 +1629,10 @@ async function viewSession(id) {
   const L = m.laps;
   app.innerHTML = `
     <div class="head">
-      <div><h1>${starSlot("sessions", a.id)} ${esc(a.name)} <span class="muted small">${esc(a.type)}</span></h1>
-        <div class="muted">${fdate(d)} · ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")} · ${esc(a.device || "")} · ${routePill(m.route)}</div></div>
-      <div class="nav">
-        <button class="btn" id="edit" title="rename, change sport, hide or delete">✎ edit</button>
+      <div><h1>${starSlot("sessions", a.id)} ${esc(a.name)}</h1>
+        <div class="muted">${esc(a.type)} · ${fdate(d)} · ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")} · ${esc(a.device || "")} · ${routePill(m.route)}</div></div>
+      <div class="headnav">
+        <button class="btn" id="edit" title="Rename, change sport, hide or delete">Edit</button>
         <button class="btn" id="prev" ${prev ? "" : "disabled"}>← previous</button>
         <button class="btn" id="next" ${next ? "" : "disabled"}>next →</button>
       </div>
@@ -1445,8 +1662,8 @@ async function viewSession(id) {
       ...(a.cal ? [{ k: "Calories", v: `${f0(a.cal.kcal)} kcal`, s: `${esc(a.cal.source)}${isNum(a.cal.hr_kcal) ? ` · HR ${f0(a.cal.hr_kcal)}` : ""}${a.s_calories ? ` · Strava ${f0(a.s_calories)}` : ""}` }]
         : a.s_calories ? [{ k: "Calories", v: f0(a.s_calories), s: `Strava · <a href="#/profile">add your weight</a>` }] : []),
     ])}
-    <div class="grid g2">
-      <div class="panel"><h2>Route <span class="muted">coloured by speed · drag / scroll to explore · hover the chart to follow along</span></h2><div id="map"></div></div>
+    <div class="grid ${hasGps ? "g2" : ""}">
+      ${hasGps ? `<div class="panel fill"><h2>Route <span class="muted">coloured by speed · drag / scroll to explore · hover the chart to follow along</span></h2><div id="map"></div></div>` : ""}
       <div class="panel selhost"><div id="speed-sel" class="selbox" hidden></div><h2>Speed${hasHr ? ", heart rate" : ""}${hasPw ? ", power" : ""}${hasEle ? " &amp; elevation" : ""}</h2>
         <div class="toolbar"><div class="seg" id="xmode"><button data-x="km" class="on">distance</button><button data-x="t">time</button></div></div>
         <div id="c-speed"></div>
@@ -1458,11 +1675,11 @@ async function viewSession(id) {
       <div id="lap-cards"></div>
       <div class="grid g2" style="margin-top:14px"><div id="c-laps"></div><div class="scroll" id="t-laps" style="max-height:520px"></div></div>
       <div class="note">A lap starts each time you cross the gate (◆ on the map) heading the same way. Grey laps are irregular — a shortcut, a GPS dropout or a different line — and are left out of the lap stats.</div></div>` : ""}
-    <div class="grid g2">
-      <div class="panel"><h2>Speed per km</h2><div id="c-splits"></div></div>
+    <div class="grid g2 top">
+      <div class="panel stick"><h2>Speed per km</h2><div id="c-splits"></div></div>
       <div class="panel"><h2>Splits</h2><div class="scroll" id="t-splits"></div></div>
     </div>
-    <div class="grid g2">
+    <div class="grid g2 top">
       ${m.route === "out-back" ? `<div class="panel"><h2>Out / back legs</h2><div id="t-legs"></div>
         <div class="note">Wind-neutral averages the two legs' best 10 min. Adjusted first removes each leg's estimated wind and slope effect.</div></div>` : ""}
       ${m.pw ? `<div class="panel"><h2>Power <span class="muted">zones as % of FTP ${f0(ftp)} W (${esc(FT ? FT.note : "none")})</span></h2><div id="p-power"></div></div>` : ""}
@@ -1479,7 +1696,7 @@ async function viewSession(id) {
   $("#next").onclick = () => next && go(next.id);
 
   let selKm = null, selectKm = () => {};
-  const map = hasGps ? sessionMap($("#map"), ser, { turnKm: m.route === "out-back" ? m.turn_km : null, gate: L ? L.gate : null, wind: a.cond }) : ($("#map").innerHTML = `<p class="muted">No GPS (indoor session).</p>`, null);
+  const map = hasGps ? sessionMap($("#map"), ser, { turnKm: m.route === "out-back" ? m.turn_km : null, gate: L ? L.gate : null, wind: a.cond }) : null;  // indoor: no route panel, the charts take the width
   // One selected stretch for the whole page. Everything that highlights the map
   // (km splits, out/back legs, laps, segment rows, brushing the speed chart)
   // goes through hl.highlightBy, which also shades the speed chart and
@@ -1509,7 +1726,7 @@ async function viewSession(id) {
     box.hidden = false;
     const row = (k, val) => `<div class="row"><span>${k}</span><span>${val}</span></div>`;
     const eg = ele ? netGrade(i0, i1) : {};
-    box.innerHTML = `<div class="selhead"><b>Selected</b> <span class="num muted">${f2(ser[i0][1])}–${f2(ser[i1][1])} km</span><button class="btn small" id="sel-clear" title="clear selection">✕</button></div>` +
+    box.innerHTML = `<div class="selhead"><b>Selected</b> <span class="num muted">${f2(ser[i0][1])}–${f2(ser[i1][1])} km</span><button class="btn small" id="sel-clear" title="Clear selection" aria-label="Clear selection">${ICON.close}</button></div>` +
       row("time", dur(el, el >= 3600) + (mv < el - 2 ? ` <span class="muted">(moving ${dur(mv, mv >= 3600)})</span>` : "")) +
       row("speed", `${f2(v)} km/h` + (isNum(v) && isNum(avg) ? ` <span class="${v >= avg ? "up" : "down"}">${pct((v / avg - 1) * 100)}</span>` : "")) +
       row("pace", `${pace(v)}/km`) + (hrT ? row("HR", `${f0(hrS / hrT)} bpm`) : "") +
@@ -1591,10 +1808,10 @@ async function viewSession(id) {
       height: 170, padRight: true,
       x: { type: "linear", fmt: xf }, y: { min: 0, max: top, fmt: v => v.toFixed(0), label: "W", ticks: 4 },
       series: [
-        { name: "power", kind: "area", color: "#c77dff", opacity: .25, legend: false, data: ser.map((r, j) => ({ x: r[xi], y: r[7], ref: j })) },
-        { name: "power", kind: "line", color: "#c77dff", width: 1.4, data: ser.map((r, j) => ({ x: r[xi], y: r[7], ref: j })) },
-        ...(isNum(W) ? [{ name: `avg ${f0(W)}`, kind: "line", color: "#ff7a1a", width: 1, dash: "5 4", data: [{ x: x0, y: W }, { x: x1, y: W }] }] : []),
-        ...(ftp ? [{ name: `FTP ${f0(ftp)}`, kind: "line", color: "#ffd166", width: 1, dash: "2 3", data: [{ x: x0, y: ftp }, { x: x1, y: ftp }] }] : []),
+        { name: "power", kind: "area", color: PAL.hue, opacity: .14, legend: false, data: ser.map((r, j) => ({ x: r[xi], y: r[7], ref: j })) },
+        { name: "power", kind: "line", color: PAL.hue, width: 1.4, data: ser.map((r, j) => ({ x: r[xi], y: r[7], ref: j })) },
+        ...(isNum(W) ? [{ name: `avg ${f0(W)}`, kind: "line", color: PAL.ink, width: 1, dash: "5 4", data: [{ x: x0, y: W }, { x: x1, y: W }] }] : []),
+        ...(ftp ? [{ name: `FTP ${f0(ftp)}`, kind: "line", color: PAL.grey, width: 1, dash: "2 3", data: [{ x: x0, y: ftp }, { x: x1, y: ftp }] }] : []),
       ],
       tip: x => { const j = idxOf.get(x); if (j == null) return ""; const r = ser[j]; return `<b>${f2(r[1])} km · ${dur(r[0], true)}</b><div class="row"><span>power</span><span>${f0(r[7])} W${ftp && r[7] != null ? ` · ${f0(r[7] / ftp * 100)}% FTP` : ""}</span></div><div class="row"><span>speed</span><span>${f1(r[2])} km/h</span></div>` + (r[3] ? `<div class="row"><span>HR</span><span>${r[3]} bpm</span></div>` : ""); },
       onHover: x => { map && map.mark(x == null ? null : idxOf.get(x)); speedChart && speedChart.cursor(x); eleChart && eleChart.cursor(x); },
@@ -1614,8 +1831,8 @@ async function viewSession(id) {
       height: 150, legend: false, padRight: true,
       x: { type: "linear", fmt: xf }, y: { min: Math.floor(lo - pad), max: Math.ceil(hi + pad / 3), fmt: v => v.toFixed(0), label: "m", ticks: 3 },
       series: [
-        { name: "elevation", kind: "area", color: "#8a94a3", opacity: .35, data: ser.map((r, j) => ({ x: r[xi], y: ele[j], ref: j })) },
-        { name: "elevation", kind: "line", color: "#c9d1dc", width: 1.5, data: ser.map((r, j) => ({ x: r[xi], y: ele[j], ref: j })) },
+        { name: "elevation", kind: "area", color: PAL.grey, opacity: .22, data: ser.map((r, j) => ({ x: r[xi], y: ele[j], ref: j })) },
+        { name: "elevation", kind: "line", color: PAL.soft, width: 1.5, data: ser.map((r, j) => ({ x: r[xi], y: ele[j], ref: j })) },
       ],
       tip: x => { const j = idxOf.get(x); if (j == null) return ""; const r = ser[j], g = gradeAt(j); return `<b>${f2(r[1])} km · ${dur(r[0], true)}</b><div class="row"><span>elevation</span><span>${f0(ele[j])} m</span></div>` + (isNum(g) ? `<div class="row"><span>grade</span><span>${g >= 0 ? "+" : ""}${g.toFixed(1)}%</span></div>` : "") + `<div class="row"><span>speed</span><span>${f1(r[2])} km/h</span></div>`; },
       onHover: x => { map && map.mark(x == null ? null : idxOf.get(x)); speedChart && speedChart.cursor(x); pwChart && pwChart.cursor(x); },
@@ -1636,9 +1853,9 @@ async function viewSession(id) {
       height: 300, x: { type: "linear", fmt: xf }, y: { min: 0, max: ymax, fmt: v => v.toFixed(0), label: "km/h" },
       y2: hasHr ? { fmt: v => v.toFixed(0), label: "bpm" } : null, padRight: hasEle,
       series: [
-        { name: "speed", kind: "line", color: "#3fb6ff", width: 1.5, data: pts.map(p => ({ x: p.x, y: Math.min(p.r[2], ymax), ref: p.j })) },
-        ...(isNum(avg) ? [{ name: `avg ${f1(avg)}`, kind: "line", color: "#ff7a1a", width: 1, dash: "5 4", data: [{ x: pts[0].x, y: avg }, { x: pts[pts.length - 1].x, y: avg }] }] : []),
-        ...(hasHr ? [{ name: "heart rate", kind: "line", color: "#ff4d4d", axis: "y2", width: 1.3, opacity: .85, data: pts.map(p => ({ x: p.x, y: p.r[3] || null, ref: p.j })) }] : []),
+        { name: "speed", kind: "line", color: PAL.hue, width: 1.5, data: pts.map(p => ({ x: p.x, y: Math.min(p.r[2], ymax), ref: p.j })) },
+        ...(isNum(avg) ? [{ name: `avg ${f1(avg)}`, kind: "line", color: PAL.ink, width: 1, dash: "5 4", data: [{ x: pts[0].x, y: avg }, { x: pts[pts.length - 1].x, y: avg }] }] : []),
+        ...(hasHr ? [{ name: "heart rate", kind: "line", color: PAL.hr, axis: "y2", width: 1.3, opacity: .85, data: pts.map(p => ({ x: p.x, y: p.r[3] || null, ref: p.j })) }] : []),
       ],
       tip: x => { const j = idxOf.get(x); if (j == null) return ""; const r = ser[j]; return `<b>${f2(r[1])} km · ${dur(r[0], true)}</b><div class="row"><span>speed</span><span>${f1(r[2])} km/h · ${pace(r[2])}/km</span></div>` + (r[3] ? `<div class="row"><span>HR</span><span>${r[3]} bpm</span></div>` : "") + (r[7] != null ? `<div class="row"><span>power</span><span>${f0(r[7])} W</span></div>` : "") + (r[4] != null ? `<div class="row"><span>elevation</span><span>${f0(r[4])} m</span></div>` : ""); },
       onHover: x => { map && map.mark(x == null ? null : idxOf.get(x)); eleChart && eleChart.cursor(x); pwChart && pwChart.cursor(x); },
@@ -1669,7 +1886,7 @@ async function viewSession(id) {
       onClick: k => selectKm(k),
       x: { type: "linear", fmt: v => v.toFixed(0) }, y: { min: Math.max(0, Math.floor(Math.min(...sp.map(s => s.kmh)) - 2)), fmt: v => v.toFixed(0), label: "km/h" }, legend: false,
       refY: avg,
-      series: [{ name: "km/h", kind: "bar", color: "#3fb6ff", data: sp.map(s => ({ x: s.km, y: s.kmh, ref: s.km, color: col(s.kmh) })) }],
+      series: [{ name: "km/h", kind: "bar", color: PAL.hue, data: sp.map(s => ({ x: s.km, y: s.kmh, ref: s.km, color: col(s.kmh) })) }],
       tip: x => { const s = sp.find(s => s.km === x); return s ? `<b>km ${s.km}${turnKm != null ? (s.km <= turnKm ? " · out" : " · back") : ""}</b><div class="row"><span>speed</span><span>${f2(s.kmh)} km/h</span></div><div class="row"><span>pace</span><span>${dur(s.moving_s)} /km</span></div>${s.pause_s > 0 ? `<div class="row"><span>paused</span><span>${dur(s.pause_s)}</span></div>` : ""}${s.hr ? `<div class="row"><span>HR</span><span>${f0(s.hr)}</span></div>` : ""}` : ""; }
     });
     const fastest = Math.max(...sp.map(s => s.kmh));
@@ -1693,7 +1910,7 @@ async function viewSession(id) {
       <tr class="click" data-leg="out"><td>Out (${f0(m.bearing_out)}°)</td><td>${f2(m.out_km)}</td><td>${dur(m.out_moving_s, true)}</td><td>${f2(m.out_kmh)}</td><td>${f2(m.out_b10)}</td>${cx("out")}</tr>
       <tr class="click" data-leg="back"><td>Back</td><td>${f2(m.back_km)}</td><td>${dur(m.back_moving_s, true)}</td><td>${f2(m.back_kmh)}</td><td>${f2(m.back_b10)}</td>${cx("back")}</tr>
       <tr><td><b>Neutral</b></td><td></td><td></td><td>${pct(m.asym_pct)}</td><td><b>${f2(m.wind_neutral)}</b></td>${C ? `<td colspan="4"></td><td><b>${f2(C.adjusted)}</b></td>` : ""}</tr></tbody></table></div>` +
-      (C ? `<div class="gapbar">${[["wind", C.gap_wind, "#3fb6ff"], ["slope", C.gap_slope, "#c6e04a"], ["other", C.gap_other, "#8a94a3"]].map(([n, v, c]) =>
+      (C ? `<div class="gapbar">${[["wind", C.gap_wind, PAL.hue], ["slope", C.gap_slope, PAL.soft], ["other", C.gap_other, PAL.grey]].map(([n, v, c]) =>
         `<span style="flex:${Math.max(0.5, Math.abs(v))};background:${c}" title="${n} ${fsigned(v)}">${n} ${fsigned(v)}</span>`).join("")}</div>
         <div class="note">Out leg ${fsigned(C.gap_pct)} faster than back (best 10 min): <b>${fsigned(C.gap_wind)}</b> from wind (${f0(C.ws)} km/h from ${fdeg(C.wd)}, ${C.wind_k.toFixed(2)}% per km/h, fitted on your sessions), <b>${fsigned(C.gap_slope)}</b> from slope, ${fsigned(C.gap_other)} other (pacing, fatigue, gusts the hourly model misses). Weather: Open-Meteo, hourly, ~10 km grid.</div>` : "");
   }
@@ -1771,6 +1988,25 @@ function navInit() {
   addEventListener("mouseup", e => { if (e.button === 3) { e.preventDefault(); $("#nav-back").click(); } if (e.button === 4) { e.preventDefault(); $("#nav-fwd").click(); } });
   navButtons();
 }
+// ------------------------------------------------------------------ hide / show the sidebar
+function sideInit() {
+  const b = $("#side-toggle");
+  const set = (hidden, save) => {
+    document.body.classList.toggle("side-hidden", hidden);
+    const label = hidden ? "Show sidebar" : "Hide sidebar";
+    b.setAttribute("aria-expanded", String(!hidden)); b.setAttribute("aria-label", label); b.title = `${label} (⌘\\ / Ctrl+\\)`;
+    if (save) {
+      localStorage.sideHidden = hidden ? "1" : "0";
+      // charts are drawn at the width they had; redraw once the page has its new width (maps resize themselves)
+      setTimeout(() => document.querySelectorAll("#app *").forEach(h => h._redraw && !h.closest(".panel.expanded") && h._redraw()), 200);
+    }
+  };
+  set(localStorage.sideHidden === "1", false);
+  b.onclick = () => set(!document.body.classList.contains("side-hidden"), true);
+  addEventListener("keydown", e => {
+    if (e.key === "\\" && (e.metaKey || e.ctrlKey) && !e.altKey) { e.preventDefault(); b.click(); }
+  });
+}
 function navButtons() {
   $("#nav-back").disabled = Nav.i <= 0;
   $("#nav-fwd").disabled = Nav.i >= Nav.max;
@@ -1778,12 +2014,12 @@ function navButtons() {
 
 // ------------------------------------------------------------------ expand a widget
 // ⤢ on every panel with a chart or map: the panel goes full-window and its
-// charts are redrawn taller (maps resize themselves). Esc / ✕ / backdrop closes.
+// charts are redrawn taller (maps resize themselves). Esc / close / backdrop closes.
 function ensureExpander(el) {
   const panel = el.closest && el.closest(".panel");
   if (!panel || panel.querySelector(":scope > .expand-btn")) return;
   const b = document.createElement("button");
-  b.className = "btn small expand-btn"; b.type = "button"; b.textContent = "⤢"; b.title = "enlarge";
+  b.className = "btn small expand-btn"; b.type = "button"; b.innerHTML = ICON.expand; b.title = "Enlarge"; b.setAttribute("aria-label", "Enlarge");
   b.onclick = e => { e.stopPropagation(); panel.classList.contains("expanded") ? collapsePanel() : expandPanel(panel); };
   panel.prepend(b);
 }
@@ -1803,7 +2039,7 @@ function expandPanel(panel) {
   const bd = document.createElement("div"); bd.className = "expand-backdrop"; bd.onclick = collapsePanel;
   document.body.appendChild(bd);
   panel.classList.add("expanded"); document.body.classList.add("has-expanded");
-  panel.querySelector(":scope > .expand-btn").textContent = "✕";
+  { const x = panel.querySelector(":scope > .expand-btn"); x.innerHTML = ICON.close; x.title = "Close"; x.setAttribute("aria-label", "Close"); }
   expanded = { panel, bd };
   hideTip(); redrawCharts(panel, true, natural);
 }
@@ -1811,7 +2047,7 @@ function collapsePanel() {
   if (!expanded) return;
   const { panel, bd } = expanded; expanded = null;
   bd.remove(); panel.classList.remove("expanded"); document.body.classList.remove("has-expanded");
-  const b = panel.querySelector(":scope > .expand-btn"); if (b) b.textContent = "⤢";
+  const b = panel.querySelector(":scope > .expand-btn"); if (b) { b.innerHTML = ICON.expand; b.title = "Enlarge"; b.setAttribute("aria-label", "Enlarge"); }
   hideTip(); redrawCharts(panel, false);
 }
 addEventListener("keydown", e => { if (e.key === "Escape" && expanded) { e.preventDefault(); collapsePanel(); } });
@@ -1820,7 +2056,8 @@ addEventListener("hashchange", () => { if (expanded) { expanded.bd.remove(); doc
 async function route() {
   const h = location.hash.replace(/^#\/?/, "");
   const [page, arg] = h.split("/");
-  document.querySelectorAll("nav a").forEach(a => a.classList.toggle("on", a.dataset.nav === (page === "session" ? "sessions" : page === "segment" ? "segments" : page || "progress")));
+  const cur = page === "session" ? "sessions" : page === "segment" ? "segments" : page || "progress";
+  document.querySelectorAll("[data-nav]").forEach(a => { const on = a.dataset.nav === cur; a.classList.toggle("on", on); on ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current"); });
   hideTip();
   try {
     if (page === "session" && /^\d+$/.test(arg || "")) await viewSession(arg);
@@ -1899,7 +2136,7 @@ async function runImport() {
   if (files.some(f => kindOf(f) === "activity") && !sport) { $("#imp-sport").focus(); return; }
   Imp.busy = true;
   const state = {}, bar = $("#imp-bar"), phase = $("#imp-phase"), log = $("#imp-log");
-  $("#imp-prog").hidden = false; log.textContent = ""; phase.textContent = ""; bar.style.width = "0"; drawImportList(state);
+  $("#imp-prog").hidden = false; log.textContent = ""; phase.textContent = ""; bar.style.width = "0"; nrCancel($("#imp-records")); drawImportList(state);
   const total = files.reduce((s, f) => s + f.size, 0) || 1;
   let sent = 0, ok = 0;
   try {
@@ -1909,7 +2146,7 @@ async function runImport() {
       try {
         const r = await upload(f, sport, p => { bar.style.width = ((sent + p * f.size) / total * 30).toFixed(1) + "%"; phase.textContent = `Uploading ${f.name} · ${(p * 100).toFixed(0)}%`; });
         state[i] = r.duplicate ? "file already stored, checking" : r.kind === "export" ? `ok · ${r.files} files` : r.kind === "activities" ? `ok · ${r.files} activity files` : "ok"; ok++;
-      } catch (e) { state[i] = "✕ " + e.message; }
+      } catch (e) { state[i] = "failed: " + e.message; }
       sent += f.size; drawImportList(state);
     }
     if (!ok) throw new Error("nothing could be uploaded");
@@ -1918,7 +2155,7 @@ async function runImport() {
     await finishImport(30);
     Imp.files = [];
   } catch (e) {
-    phase.innerHTML = `<span class="down">✕ ${esc(e.message)}</span>`;
+    phase.innerHTML = `<span class="down">Failed: ${esc(e.message)}</span>`;
   } finally {
     Imp.busy = false; drawImportList(state); stravaStatus();
   }
@@ -1937,13 +2174,21 @@ async function finishImport(base) {
     if (j.state !== "running") break;
     await sleep(800);
   }
-  if (j.state === "error") throw new Error(j.error);
+  if (j.state === "error") {
+    if (j.changed) {  // an earlier step committed rows: show them anyway
+      await refreshData();
+      if (j.new_total || j.replaced) await newRecordsPanel($("#imp-records"));
+    }
+    throw new Error(j.error);
+  }
   bar.style.width = "100%";
   const dups = (j.log || []).filter(l => /skipped, (same session|already imported)/.test(l)).length;
   const fetched = j.source === "strava" ? `<span class="muted">${j.fetched || 0} file${j.fetched === 1 ? "" : "s"} downloaded from Strava. </span>` : "";
-  phase.innerHTML = fetched + (j.added ? `<span class="up">✓ ${j.added} new activit${j.added === 1 ? "y" : "ies"} imported.</span>` : `<span class="muted">✓ Done, nothing new: everything was already imported.</span>`) +
+  phase.innerHTML = fetched + (j.added ? `<span class="up">${j.added} new activit${j.added === 1 ? "y" : "ies"} imported.</span>` : `<span class="muted">Done, nothing new: everything was already imported.</span>`) +
     (dups ? ` <span class="muted">${dups} already in Rollbook from another file (same start time and distance), skipped.</span>` : "");
-  if (j.added) await refreshData();
+  // `added` is a count: an export replacing an uploaded copy swaps ids at the same count
+  if (j.added || j.changed) await refreshData();
+  if (j.new_total || j.replaced) await newRecordsPanel($("#imp-records"));
   return j;
 }
 async function stravaStatus() {
@@ -1961,13 +2206,13 @@ async function stravaStatus() {
 async function runStravaSync() {
   const phase = $("#imp-phase");
   Imp.busy = true; drawImportList(); $("#imp-strava").disabled = true;
-  $("#imp-prog").hidden = false; $("#imp-log").textContent = ""; phase.textContent = "contacting Strava…"; $("#imp-bar").style.width = "0";
+  $("#imp-prog").hidden = false; $("#imp-log").textContent = ""; nrCancel($("#imp-records")); phase.textContent = "contacting Strava…"; $("#imp-bar").style.width = "0";
   try {
     const r = await fetch("/api/strava/sync", { method: "POST", headers: { "X-Rollbook": "1" } });
     if (!r.ok) throw new Error((await r.json()).error || r.status);
     await finishImport(0);
   } catch (e) {
-    phase.innerHTML = `<span class="down">✕ ${esc(e.message)}</span>`;
+    phase.innerHTML = `<span class="down">Failed: ${esc(e.message)}</span>`;
   } finally {
     Imp.busy = false; drawImportList(); stravaStatus();
   }
@@ -1975,7 +2220,7 @@ async function runStravaSync() {
 /** Drop every client cache and redraw, after the DB (or its edits) changed underneath us.
  * With `dest`, navigate there instead of redrawing the current page. */
 async function refreshData(dest) {
-  S.acts = {}; S.tracks = {}; S.segs = {}; S.mapView = {};
+  S.acts = {}; S.tracks = {}; S.segs = {}; S.segsP = {}; S.lastImport = null; S.mapView = {};
   [S.types, { hrmax: S.hrmax }, S.favs] = await Promise.all([api("types"), api("hrmax"), api("favorites")]);
   S.hrmax = S.hrmax || 185;
   const sel = $("#type"), cur = S.type;
@@ -2016,7 +2261,7 @@ function openEdit(a) {
       const type = (j.edit && j.edit.type) || a.orig_type;
       if (type && type !== S.type && !j.edit.hidden) S.type = localStorage.type = type;  // follow the session to its sport
       await refreshData(dest);
-    } catch (err) { msg.className = "small down"; msg.textContent = "✕ " + err.message; }
+    } catch (err) { msg.className = "small down"; msg.textContent = "Could not save: " + err.message; }
   };
   $("#ed-form").onsubmit = ev => { ev.preventDefault(); save({ name: $("#ed-name").value, type: $("#ed-type").value, hidden: $("#ed-hidden").checked }); };
   $("#ed-delete").onclick = () => {
@@ -2069,6 +2314,7 @@ async function boot() {
   const rg = $("#range"); rg.value = S.range;
   rg.onchange = () => { S.range = localStorage.range = rg.value; if (!location.hash.startsWith("#/session/")) route(); };
   navInit();
+  sideInit();
   addEventListener("hashchange", route);
   let rt; addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(() => { if (!/^#\/(map|segment)/.test(location.hash)) route(); }, 200); });
   if (!S.readonly) initImport();

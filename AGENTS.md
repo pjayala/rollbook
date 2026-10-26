@@ -58,6 +58,7 @@ web/weather.py          historical weather per outdoor session (Open-Meteo, cach
 web/geonames.py         segment place names (Nominatim reverse geocoding, cached)
 web/importer.py         Import dialog backend: uploads + background db build / enrich
 web/edits.py            session edits (data/edits.json) as a TEMP view overlay on the read-only DB
+web/lastimport.py       what the last import added (data/last_import.json), for the new-records summary
 web/tls.py              self-signed cert for `web --lan` (openssl, else pure-Python RSA + DER)
 web/qr.py               stdlib QR encoder (byte mode, level M, v1-10) for the --lan link
 web/app.py              `rollbook app`: desktop window (pywebview / Chrome-Edge --app / browser)
@@ -66,6 +67,7 @@ web/strava_web.py       `rollbook strava`: session-cookie sync of new activities
 opencode.json           registers `./rollbook mcp` as the `rollbook` MCP server
 web/static/             index.html / app.js / map.js / style.css, vanilla JS + SVG/canvas, no CDN
 web/static/icon.svg     app icon master; favicon.svg is its 16-32 px simplification
+web/static/inter-*.woff2 Inter variable font (Latin subset, OFL, Inter-OFL.txt), served locally
 assets/                 rendered icons: rollbook-{128..1024}.png, rollbook.icns, rollbook.ico
 NOTES.md                analysis findings so far
 ```
@@ -110,7 +112,7 @@ such files is accepted too. `db build` skips an activity whose start is
 within 2 min and distance within 5% of one already imported; if the newcomer
 has `activities.csv` metadata and the existing copy doesn't, it replaces it.
 
-Or from the dashboard: **⇪ Import** (or drag files onto the page). It takes the
+Or from the dashboard: **Import** (or drag files onto the page). It takes the
 export `.zip` (stored in `exports/`, renamed `-2`, `-3`… if a different file
 has the same name, since archives are reused by stem) and/or single
 `.fit/.gpx/.tcx(.gz)` files (stored in `data/imports/activities/`, likewise
@@ -202,12 +204,22 @@ gradients, so `best10min_kmh` of 47–58 km/h are simulated descents.
 
 ## Web dashboard
 
+Look: dark, one neutral ground (#0a0a0a) with panels one lightness step up, no
+borders or shadows at rest; Inter with tabular figures; a sidebar (icon rail
+≤ 1100 px, bottom bar ≤ 720 px). Colour is on data only: `PAL` in app.js / the
+tokens in style.css. One hue (the wheel's orange) for the main series, white for
+its trend, greys for context, rose (`PAL.hr`) only for heart rate; speed, zones
+and the heatmap are ramps of those hues, not rainbows.
+
 Icons: edit `web/static/icon.svg` / `favicon.svg`, then re-render `assets/`
 (PNGs via headless Chrome, `iconutil` for `.icns`, `.ico` = PNG entries with
 favicon art at 16-64 px) and copy `icon-256.png`, `favicon-32.png`,
 `favicon.ico` into `web/static/`.
 
-`./rollbook web` binds to 127.0.0.1 only and opens the DB read-only. Metrics the
+`./rollbook web` binds to 127.0.0.1 only and opens the DB read-only. Every
+request on that listener, GET included, needs `Host: 127.0.0.1:<port>` or
+`localhost:<port>` (else 403): a DNS-rebinding page would otherwise read the
+whole API, GPS tracks included, as same-origin. Metrics the
 DB doesn't hold — best 30/45/60 min, out/back legs, **wind-neutral** speed,
 route kind, HR histogram — are derived from `samples` in a background thread
 on first start (~1 min for all activities) and cached in
@@ -349,23 +361,58 @@ changing `derive()`.
   `names_pending > 0`. Custom names still win.
   "Opposite direction" pairs are matched in the browser by ≥ 70% path overlap
   and a heading difference > 130°.
-* **Enlarge (⤢)** on every panel with a chart or map: the panel goes
-  full-window (Esc / ✕ / backdrop closes) and its charts are redrawn taller;
+* **Enlarge** (corner icon) on every panel with a chart or map: the panel goes
+  full-window (Esc / close / backdrop closes) and its charts are redrawn taller;
   `chart()` keeps its options on the host (`_redraw`) and returns a facade
   that delegates to the latest render, so references like `speedChart` and an
   active selection band survive the redraw. Maps just follow the new size.
-* **Back / forward** (← → left of the logo, Alt+←/→, ⌘[ / ⌘], mouse side
+* **Back / forward** (‹ › in the top bar, Alt+←/→, ⌘[ / ⌘], mouse side
   buttons): pages are `#/…` hash routes, so navigation is normal browser
   history; each entry is numbered in `history.state` to enable/disable the
   buttons (the app window has no browser chrome) and stores the scroll
   position, restored on back/forward.
-* **Favorites** (☆/★ on sessions and segments, "favorites only" filters,
+* **Sidebar** (`sideInit`): the button left of back/forward (or ⌘\ / Ctrl+\)
+  hides it, `body.side-hidden`, saved in `localStorage.sideHidden`; charts
+  redraw at the new width. Below 720 px it is the bottom bar and never hides.
+* **Favorites** (star toggle on sessions and segments, "favorites only" filters,
   a Favorites panel on the progress page) live in `data/favorites.json`,
   server-side so the app window and browser tabs share them. Starred
   segments store sport/start/end/length; when regenerated segments get new
   ids, `loadSegs` re-attaches the star (and a custom name) to the segment
   whose ends are within 80 m and length within 10%.
-* **Session edits** (✎ edit on the session page; `web/edits.py`): name,
+* **New records after an import** (#17; `web/lastimport.py`, `newRecords()`
+  in app.js): `Importer._work` diffs raw-DB ids before/after and stores the
+  new ones, oldest first, in `data/last_import.json`. A new id whose start is
+  within 2 min of a removed id's start is a dedup replacement: it is counted
+  in `replaced`, not announced. The job dict carries only `new_total` /
+  `replaced` / `changed`, never the ids. A first import (empty DB) stores no
+  ids (`first`); others store the newest 500. On an error after rows
+  committed, the file gets `partial`, and no records are compared.
+  Undismissed summaries merge with the next import.
+  * Store: lock, in memory (a GET never opens the file), 0600 atomic write
+    + fsync, one retry, never raises. On load it's untrusted: ≤ 256 KiB and
+    every field type-checked, else ignored.
+  * `GET /api/last_import` returns `new:[{id,type}]` through the edits
+    overlay.
+  * `POST /api/last_import/dismiss {finished}`: the usual
+    X-Rollbook/Host/Origin checks, body ≤ 4 KiB. It returns 409 unless
+    `finished` matches (a stale tab can't hide a newer import). There is no
+    GET form. The MCP server never reads it.
+  * The page computes the records from loaded sessions and segments, so
+    they follow edits:
+    * "all": best of the sport now, strictly above the older best after
+      display rounding.
+    * "then": beats everything earlier by `datetime` (not `_t`, which is
+      noon). Only within 30 days of the newest older session.
+    * At least 5 older sessions with the value (laps 3, segments 5 other
+      sessions). Virtual sports: power only. Never `kmh_moving`,
+      `ascent_m`, `moving_s`.
+    * At most 2 segment PRs per session (pieces before Full); the list is
+      capped at 10.
+  * `RECORD_METRICS` is shared with the records table; `groupCircuits()`
+    with the Circuits panel.
+  * Every name is `esc()`d; ids select only among API-returned rows.
+* **Session edits** (**Edit** on the session page; `web/edits.py`): name,
   sport, hidden, deleted, stored as overrides in `data/edits.json` keyed by
   activity id (Strava's, or the SHA-1-of-path id of an import — both stable,
   so edits survive `db build --fresh`). Each server connection gets a TEMP
@@ -403,7 +450,7 @@ changing `derive()`.
 
 ## Strava sync
 
-`./rollbook strava sync` (or **⟳ Sync from Strava** in the Import dialog)
+`./rollbook strava sync` (or **Sync from Strava** in the Import dialog)
 fetches activities newer than the DB without a full export. No API, no
 password: it uses the website's own endpoints with the `_strava4_session`
 cookie of a logged-in browser, stored once by `./rollbook strava auth`
