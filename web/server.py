@@ -72,7 +72,7 @@ TILE_MAXZ = 19
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
         ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml",
-        ".png": "image/png", ".ico": "image/x-icon"}
+        ".png": "image/png", ".ico": "image/x-icon", ".woff2": "font/woff2"}
 
 # columns added later — by `db build` migrations, or by `db enrich` (best<N>min_kmh,
 # absent until the first enrich): listed when the DB has them, else NULL
@@ -1143,7 +1143,7 @@ def make_handler(db_path, M, tiles, lan=None):
             self.send_header("Content-Length", str(len(body)))
             if gz:
                 self.send_header("Content-Encoding", "gzip")
-            self.send_header("Cache-Control", "max-age=86400" if ctype in ("image/svg+xml", "image/png", "image/x-icon") else cache)
+            self.send_header("Cache-Control", "max-age=86400" if ctype in ("image/svg+xml", "image/png", "image/x-icon", "font/woff2") else cache)
             self.send_header("X-Content-Type-Options", "nosniff")
             if lan:
                 self.send_header("Referrer-Policy", "no-referrer")

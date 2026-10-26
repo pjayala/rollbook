@@ -19,3 +19,7 @@ data/imports/
 
 # personal training analysis, kept local
 NOTES.md
+
+# design-tool working files (screenshots, direction sheet)
+.taste-skill/
+.DS_Store

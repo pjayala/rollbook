@@ -67,6 +67,7 @@ web/strava_web.py       `rollbook strava`: session-cookie sync of new activities
 opencode.json           registers `./rollbook mcp` as the `rollbook` MCP server
 web/static/             index.html / app.js / map.js / style.css, vanilla JS + SVG/canvas, no CDN
 web/static/icon.svg     app icon master; favicon.svg is its 16-32 px simplification
+web/static/inter-*.woff2 Inter variable font (Latin subset, OFL, Inter-OFL.txt), served locally
 assets/                 rendered icons: rollbook-{128..1024}.png, rollbook.icns, rollbook.ico
 NOTES.md                analysis findings so far
 ```
@@ -111,7 +112,7 @@ such files is accepted too. `db build` skips an activity whose start is
 within 2 min and distance within 5% of one already imported; if the newcomer
 has `activities.csv` metadata and the existing copy doesn't, it replaces it.
 
-Or from the dashboard: **⇪ Import** (or drag files onto the page). It takes the
+Or from the dashboard: **Import** (or drag files onto the page). It takes the
 export `.zip` (stored in `exports/`, renamed `-2`, `-3`… if a different file
 has the same name, since archives are reused by stem) and/or single
 `.fit/.gpx/.tcx(.gz)` files (stored in `data/imports/activities/`, likewise
@@ -202,6 +203,13 @@ Never compare `Virtual Ride` speeds to outdoor: ROUVY/MyWhoosh simulate
 gradients, so `best10min_kmh` of 47–58 km/h are simulated descents.
 
 ## Web dashboard
+
+Look: dark, one neutral ground (#0a0a0a) with panels one lightness step up, no
+borders or shadows at rest; Inter with tabular figures; a sidebar (icon rail
+≤ 1100 px, bottom bar ≤ 720 px). Colour is on data only: `PAL` in app.js / the
+tokens in style.css. One hue (the wheel's orange) for the main series, white for
+its trend, greys for context, rose (`PAL.hr`) only for heart rate; speed, zones
+and the heatmap are ramps of those hues, not rainbows.
 
 Icons: edit `web/static/icon.svg` / `favicon.svg`, then re-render `assets/`
 (PNGs via headless Chrome, `iconutil` for `.icns`, `.ico` = PNG entries with
@@ -353,17 +361,20 @@ changing `derive()`.
   `names_pending > 0`. Custom names still win.
   "Opposite direction" pairs are matched in the browser by ≥ 70% path overlap
   and a heading difference > 130°.
-* **Enlarge (⤢)** on every panel with a chart or map: the panel goes
-  full-window (Esc / ✕ / backdrop closes) and its charts are redrawn taller;
+* **Enlarge** (corner icon) on every panel with a chart or map: the panel goes
+  full-window (Esc / close / backdrop closes) and its charts are redrawn taller;
   `chart()` keeps its options on the host (`_redraw`) and returns a facade
   that delegates to the latest render, so references like `speedChart` and an
   active selection band survive the redraw. Maps just follow the new size.
-* **Back / forward** (← → left of the logo, Alt+←/→, ⌘[ / ⌘], mouse side
+* **Back / forward** (‹ › in the top bar, Alt+←/→, ⌘[ / ⌘], mouse side
   buttons): pages are `#/…` hash routes, so navigation is normal browser
   history; each entry is numbered in `history.state` to enable/disable the
   buttons (the app window has no browser chrome) and stores the scroll
   position, restored on back/forward.
-* **Favorites** (☆/★ on sessions and segments, "favorites only" filters,
+* **Sidebar** (`sideInit`): the button left of back/forward (or ⌘\ / Ctrl+\)
+  hides it, `body.side-hidden`, saved in `localStorage.sideHidden`; charts
+  redraw at the new width. Below 720 px it is the bottom bar and never hides.
+* **Favorites** (star toggle on sessions and segments, "favorites only" filters,
   a Favorites panel on the progress page) live in `data/favorites.json`,
   server-side so the app window and browser tabs share them. Starred
   segments store sport/start/end/length; when regenerated segments get new
@@ -401,7 +412,7 @@ changing `derive()`.
   * `RECORD_METRICS` is shared with the records table; `groupCircuits()`
     with the Circuits panel.
   * Every name is `esc()`d; ids select only among API-returned rows.
-* **Session edits** (✎ edit on the session page; `web/edits.py`): name,
+* **Session edits** (**Edit** on the session page; `web/edits.py`): name,
   sport, hidden, deleted, stored as overrides in `data/edits.json` keyed by
   activity id (Strava's, or the SHA-1-of-path id of an import — both stable,
   so edits survive `db build --fresh`). Each server connection gets a TEMP
@@ -439,7 +450,7 @@ changing `derive()`.
 
 ## Strava sync
 
-`./rollbook strava sync` (or **⟳ Sync from Strava** in the Import dialog)
+`./rollbook strava sync` (or **Sync from Strava** in the Import dialog)
 fetches activities newer than the DB without a full export. No API, no
 password: it uses the website's own endpoints with the `_strava4_session`
 cookie of a logged-in browser, stored once by `./rollbook strava auth`

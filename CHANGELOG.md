@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.6.0 (2026-10-26)
+
+### A new look for the dashboard
+
+- Dark, flat design on a neutral near-black: panels one shade up, no borders
+  or shadows; the Inter typeface, bundled so it stays offline (OFL,
+  `web/static/Inter-OFL.txt`), with tabular figures everywhere.
+- A sidebar with Progress, Sessions, Map, Segments and your profile replaces
+  the top navigation. It folds to an icon rail on a tablet and a bottom bar on
+  a phone, and can be hidden with the button left of back / forward or
+  ⌘\ / Ctrl+\ (remembered).
+- Colour only on data: the wheel's orange for the main series, white for its
+  trend, greys for context, rose for heart rate. Speed, heart-rate and power
+  zones, the calendar and the heatmap are shades of those instead of rainbows.
+- Summary cards are one divided strip that never leaves an orphan card; rows of
+  panels no longer stretch over empty space; indoor sessions drop the empty
+  route panel; the splits chart stays in view beside its table.
+- One outline icon set replaces the ☆ ✎ ⤢ ✕ ⇪ symbols; icon buttons have
+  accessible names; a skip link; the current page is marked for screen readers.
+
 ## 0.5.0 (2026-10-23)
 
 ### New records after an import (#17)

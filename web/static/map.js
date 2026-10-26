@@ -69,8 +69,8 @@ class SlippyMap {
     host.appendChild(this.canvas);
     this.ui = document.createElement("div");
     this.ui.className = "smap-ui";
-    this.ui.innerHTML = `<button data-a="in" title="zoom in">+</button><button data-a="out" title="zoom out">−</button>` +
-      (opt.fitButton !== false ? `<button data-a="fit" title="fit">⤢</button>` : "") +
+    this.ui.innerHTML = `<button data-a="in" title="Zoom in" aria-label="Zoom in">+</button><button data-a="out" title="Zoom out" aria-label="Zoom out">−</button>` +
+      (opt.fitButton !== false ? `<button data-a="fit" title="Fit the track" aria-label="Fit the track"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10"/></svg></button>` : "") +
       `<select title="basemap">${Object.entries(BASEMAPS).map(([k, b]) => `<option value="${k}">${b.label}</option>`).join("")}</select>`;
     host.appendChild(this.ui);
     this.attr = document.createElement("div");
@@ -86,7 +86,7 @@ class SlippyMap {
 
     this.ui.querySelector("select").onchange = e => { localStorage.basemap = e.target.value; this.setBasemap(e.target.value); };
     this.ui.addEventListener("click", e => {
-      const a = e.target.dataset && e.target.dataset.a;
+      const t = e.target.closest && e.target.closest("[data-a]"), a = t && t.dataset.a;
       if (a === "in") this.zoomAt(this.w / 2, this.h / 2, 1);
       if (a === "out") this.zoomAt(this.w / 2, this.h / 2, -1);
       if (a === "fit" && this.home) this.fit(this.home);
@@ -160,7 +160,7 @@ class SlippyMap {
     if (this._pendingFit) { const b = this._pendingFit; this._pendingFit = null; this.fit(b); }
     const tc = this.tctx;
     tc.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-    tc.fillStyle = this.basemap === "none" ? "#0b0e12" : "#f2efe9";
+    tc.fillStyle = this.basemap === "none" ? "#0a0a0a" : "#f2efe9";
     tc.fillRect(0, 0, this.w, this.h);
     if (BASEMAPS[this.basemap].src) this._drawTiles(tc);
     const ctx = this.ctx;
@@ -265,8 +265,9 @@ class SlippyMap {
 class HeatLayer {
   constructor(tracks) { this.tracks = tracks; this.off = document.createElement("canvas"); this.lut = HeatLayer.ramp(); this.passes = null; }
   static ramp() {
-    const stops = [[0, [70, 20, 140, 0]], [0.02, [90, 20, 160, 150]], [0.25, [200, 30, 90, 220]],
-      [0.5, [255, 110, 0, 240]], [0.78, [255, 214, 0, 255]], [1, [255, 255, 255, 255]]];
+    // one hue: deep orange for a single pass, through the brand orange, to white
+    const stops = [[0, [120, 40, 0, 0]], [0.02, [150, 55, 10, 150]], [0.25, [215, 85, 15, 220]],
+      [0.5, [255, 122, 26, 240]], [0.78, [255, 192, 135, 255]], [1, [255, 255, 255, 255]]];
     const lut = new Uint8ClampedArray(256 * 4);
     for (let v = 1; v < 256; v++) {
       const t = Math.pow(v / 255, 0.7);
