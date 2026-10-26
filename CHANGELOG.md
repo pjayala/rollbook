@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.6.0 (2026-10-26)
+## 0.5.0 (2026-10-26)
 
 ### A new look for the dashboard
 
@@ -20,13 +20,11 @@
 - One outline icon set replaces the ☆ ✎ ⤢ ✕ ⇪ symbols; icon buttons have
   accessible names; a skip link; the current page is marked for screen readers.
 
-## 0.5.0 (2026-10-23)
-
 ### New records after an import (#17)
 
 - When an import or Strava sync finishes, the Import dialog lists the
   records it set, with links to the sessions and segments; the Progress page
-  shows the same panel until you dismiss it (✕).
+  shows the same panel until you dismiss it.
 - Covered: best 5/10/20/30/60 min, wind-neutral 10 min, longest, power
   (best 5 s – 60 min, weighted), segment PRs and best laps per circuit.
   "record" = best of that sport now; "best at the time" = faster than every
