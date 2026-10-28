@@ -15,6 +15,9 @@ const ICON = {
   star: '<svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.9l1.85 3.85 4.2.55-3.07 2.93.77 4.17L8 11.37 4.25 13.4l.77-4.17L1.95 6.3l4.2-.55z"/></svg>',
   expand: '<svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M9.5 2.5h4v4M6.5 13.5h-4v-4M13.5 2.5L9 7M2.5 13.5L7 9"/></svg>',
   close: '<svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/></svg>',
+  play: '<svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.2v9.6L12.8 8z"/></svg>',
+  pause: '<svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M5.5 3.5v9M10.5 3.5v9"/></svg>',
+  swap: '<svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 5h10M10 2.5L12.5 5 10 7.5M13.5 11h-10M6 8.5L3.5 11 6 13.5"/></svg>',
 };
 
 // ------------------------------------------------------------------ utils
@@ -125,6 +128,9 @@ function timeTicks(lo, hi) {
  *  opt.y     {fmt, label, min, max, zero}     opt.y2 same, optional
  *  opt.series[] {name, color, kind:'line'|'dot'|'bar'|'area', data:[{x,y,ref}], axis:'y'|'y2', stack, width, r, opacity, legend:false}
  *  opt.tip(x, hits) -> html   opt.onClick(ref)   opt.onHover(x|null)
+ *  opt.marks[] {x, y, label}   events: a 1px leader from a label row above the plot to (x, y)
+ *  opt.sides {hi, lo}          captions inside the plot, top-left and bottom-left (a signed axis)
+ *  series.base                 area fill to this y instead of the series minimum
  */
 function chart(host, opt, heightOverride) {
   host.innerHTML = "";
@@ -134,7 +140,8 @@ function chart(host, opt, heightOverride) {
   ensureExpander(host);
   const H = heightOverride || opt.height || 260, W = Math.max(320, host.clientWidth || 600);
   const m = { l: 46, r: opt.y2 || opt.padRight ? 46 : 14, t: 18, b: 24 };
-  const iw = W - m.l - m.r, ih = H - m.t - m.b;
+  const iw = W - m.l - m.r;
+  let ih = H - m.t - m.b;
   const ser = opt.series.filter(s => s.data && s.data.length);
   if (opt.legend !== false) {
     const lg = document.createElement("div"); lg.className = "legend";
@@ -168,6 +175,19 @@ function chart(host, opt, heightOverride) {
   }
   if (xlo === xhi) { xlo -= 1; xhi += 1; }
   const X = v => m.l + (v - xlo) / (xhi - xlo) * iw;
+  // annotation labels: greedy rows above the plot so no two overlap, reserved only when a label exists
+  const marks = (opt.marks || []).filter(k => isNum(k.x) && k.x >= xlo && k.x <= xhi && k.label).map(k => ({ ...k })).sort((p, q) => p.x - q.x);
+  if (marks.length) {
+    const ends = [];
+    for (const k of marks) {
+      const w = k.label.length * 6.3 + 10, x0 = Math.max(4, Math.min(W - m.r - w, X(k.x) - 3));
+      let r = ends.findIndex(e => e < x0);
+      if (r < 0) { r = ends.length; ends.push(0); }
+      ends[r] = x0 + w; k.row = r; k.lx = x0;
+    }
+    m.t = 8 + ends.length * 16 + 6; ih = H - m.t - m.b;
+    for (const k of marks) k.ly = 8 + k.row * 16 + 11;
+  }
   const bandPx = band ? Math.max(1, band / (xhi - xlo) * iw * 0.78) : 0;
 
   function yscale(axis, cfg) {
@@ -203,7 +223,11 @@ function chart(host, opt, heightOverride) {
   }
   if (opt.y.label) el("text", { x: 4, y: 10 }, ax).textContent = opt.y.label;
   if (opt.y2 && opt.y2.label) el("text", { x: W - 4, y: 10, "text-anchor": "end" }, ax).textContent = opt.y2.label;
-  if (opt.refY != null && Y.y) el("line", { x1: m.l, x2: m.l + iw, y1: Y.y.f(opt.refY), y2: Y.y.f(opt.refY), stroke: PAL.grey, "stroke-dasharray": "3 3" }, svg);
+  if (opt.refY != null && Y.y) el("line", { x1: m.l, x2: m.l + iw, y1: Y.y.f(opt.refY), y2: Y.y.f(opt.refY), ...(opt.zeroLine ? { stroke: "#4a4a4a", "stroke-width": 1 } : { stroke: PAL.grey, "stroke-dasharray": "3 3" }) }, svg);
+  if (opt.sides && Y.y) {
+    if (opt.sides.hi) el("text", { x: m.l + 8, y: m.t + 14, class: "side" }, ax).textContent = opt.sides.hi;
+    if (opt.sides.lo) el("text", { x: m.l + 8, y: m.t + ih - 8, class: "side" }, ax).textContent = opt.sides.lo;
+  }
 
   // selection band, behind the series
   const bandEl = el("rect", { y: m.t, height: ih, fill: "#fff", opacity: .13, visibility: "hidden" }, svg);
@@ -241,7 +265,7 @@ function chart(host, opt, heightOverride) {
         prev = p;
       }
       if (s.kind === "area") {
-        const base = sc.f(Math.max(sc.cfg.min ?? -Infinity, Math.min(...pts.map(p => p.y1))));
+        const base = sc.f(s.base ?? Math.max(sc.cfg.min ?? -Infinity, Math.min(...pts.map(p => p.y1))));
         let a = "";
         const segs = d.split("M").filter(Boolean);
         for (const sg of segs) {
@@ -252,6 +276,17 @@ function chart(host, opt, heightOverride) {
       } else {
         el("path", { d, fill: "none", stroke: s.color, "stroke-width": s.width || 2, opacity: s.opacity ?? 1, "stroke-dasharray": s.dash || null, "stroke-linejoin": "round" }, svg);
       }
+    }
+  }
+
+  // annotations: leader from the label row down to the point
+  if (marks.length && Y.y) {
+    const mg = el("g", { class: "marks" }, svg);
+    for (const k of marks) {
+      const x = X(k.x), y = isNum(k.y) ? Y.y.f(k.y) : m.t + ih;
+      el("line", { x1: x, x2: x, y1: k.ly + 4, y2: y, stroke: "#6a6a6a", "stroke-width": 1 }, mg);
+      el("circle", { cx: x, cy: y, r: 2.5, fill: k.color || PAL.ink }, mg);
+      el("text", { x: k.lx, y: k.ly, class: "mark" }, mg).textContent = k.label;
     }
   }
 
@@ -393,6 +428,7 @@ function sessionMap(host, series, opt = {}) {
     (gate ? `<span><i style="background:${PAL.ink};transform:rotate(45deg)"></i>lap gate</span>` : "");
   host.appendChild(leg);
   return {
+    destroy() { map.destroy(); },
     highlight(t0, t1, fit) { this.highlightBy(0, t0, t1, fit); },
     /** Highlight the part of the track where series[col] is in [lo, hi]; col 0 = time, 1 = km. */
     highlightBy(col, lo, hi, fit) {
@@ -473,7 +509,9 @@ function zoneStrip(secs, zones, label) {
  * the item count (8 → 4 + 4, 10 → 5 + 5, 17 → 6 + 6 + 5), so no row ends with an orphan. */
 function cards(items) {
   const n = items.length, fit = max => Math.max(1, Math.ceil(n / Math.ceil(n / max)));
-  return `<div class="cards" style="--c:${fit(6)};--ct:${fit(4)}">` + items.map(c => `<div class="card ${c.hl ? "hl" : ""}"><div class="k">${esc(c.k)}</div><div class="v">${c.v}</div>${c.s ? `<div class="s">${c.s}</div>` : ""}</div>`).join("") + `</div>`;
+  // span of cell i in 60ths with c columns: the last, shorter row widens its cells (60 = lcm 1..6)
+  const span = (i, c) => { const r = n % c, last = n - r; return 60 / (r && i >= last ? r : c); };
+  return `<div class="cards">` + items.map((c, i) => `<div class="card ${c.hl ? "hl" : ""}" style="--s:${span(i, fit(6))};--st:${span(i, fit(4))};--sp:${span(i, 2)}"><div class="k">${esc(c.k)}</div><div class="v">${c.v}</div>${c.s ? `<div class="s">${c.s}</div>` : ""}</div>`).join("") + `</div>`;
 }
 const go = id => { location.hash = "#/session/" + id; };
 const routePill = r => r ? `<span class="pill ${r === "out-back" ? "ob" : r === "loop" ? "loop" : r === "one-way" ? "ow" : ""}">${esc(r)}</span>` : "";
@@ -675,7 +713,7 @@ async function viewProgress() {
 function predictor(host, all) {
   const recent = all.filter(a => a._t >= Date.now() - 60 * DAY);
   host.innerHTML = `<h2>Race predictor <span class="muted">heuristic, from the last 60 days</span></h2>
-    <div class="toolbar"><label>Distance <input id="pk" type="number" min="1" max="200" step="0.5" value="${localStorage.predKm || 24}" style="width:80px"> km</label></div>
+    <div class="toolbar"><label>Distance <input id="pk" type="number" min="1" max="200" step="0.5" value="${Math.min(200, Math.max(1, +localStorage.predKm || 24))}" style="width:80px"> km</label></div>
     <div id="pout"></div>`;
   const render = () => {
     const D = +$("#pk").value; localStorage.predKm = D;
@@ -1258,7 +1296,7 @@ function favPanel(host, all) {
 const COMPASS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
 const compass = b => COMPASS[Math.round(((b % 360) + 360) % 360 / 45) % 8];
 const flen = m => m < 1000 ? `${f0(m)} m` : `${f2(m / 1000)} km`;
-const segNames = () => JSON.parse(localStorage.segNames || "{}");
+const segNames = () => { try { const o = JSON.parse(localStorage.segNames || "{}"); return o && typeof o === "object" && !Array.isArray(o) ? o : {}; } catch { return {}; } };
 function segName(sg) {
   const custom = segNames()[sg.id];
   if (custom) return custom;
@@ -1518,7 +1556,9 @@ async function sessionSegments(a, map) {
 async function viewSessions() {
   const showHidden = localStorage.showHidden === "1";
   const acts = inRange(await loadActs(S.type, showHidden));
+  let pick = loadPick();
   const cols = [
+    ["pick", `<span class="vh">Select to compare</span>`, a => `<input type="checkbox" class="pick" data-pick="${a.id}" ${pick.includes(a.id) ? "checked" : ""} aria-label="Select ${esc(a.name)} on ${esc(a.date)} to compare">`, "pickc"],
     ["fav", `<span class="star on" title="Favorite">${ICON.star}</span>`, a => starSlot("sessions", a.id)], ["date", "date", a => `${fdate(a._d)}`, "l"],
     ["name", "name", a => esc(a.name) + (a.hidden ? ` <span class="pill">${a.deleted ? "deleted" : "hidden"}</span>` : ""), "l"], ["km", "km", a => fkm(a.km)],
     ["elapsed_s", "elapsed", a => dur(a.elapsed_s, true)], ["moving_s", "moving", a => dur(a.moving_s, true)], ["pause_s", "paused", a => dur(a.pause_s)],
@@ -1534,9 +1574,10 @@ async function viewSessions() {
   const app = $("#app");
   app.innerHTML = `<div class="head"><div><h1>${esc(S.type)} sessions</h1><div class="muted" id="cnt"></div></div></div>
     <div class="panel"><div class="toolbar"><input id="q" placeholder="filter: name, date, route…" value="${esc(S.q)}" style="width:260px">
-      <label class="muted small">min km <input id="mink" type="number" value="${localStorage.minKm || 0}" style="width:70px"></label>
+      <label class="muted small">min km <input id="mink" type="number" value="${Math.max(0, +localStorage.minKm || 0)}" style="width:70px"></label>
       <label class="muted small"><input type="checkbox" id="favonly" ${localStorage.favOnly === "1" ? "checked" : ""}> Favorites only</label>
-      <label class="muted small" title="hidden and deleted sessions never count towards stats, maps or segments"><input type="checkbox" id="showhidden" ${showHidden ? "checked" : ""}> show hidden</label></div>
+      <label class="muted small" title="hidden and deleted sessions never count towards stats, maps or segments"><input type="checkbox" id="showhidden" ${showHidden ? "checked" : ""}> show hidden</label>
+      <span class="cmpbar" id="cmpbar" hidden><span class="muted small" id="cmpcnt"></span><button class="btn small" id="cmpgo" disabled>Compare</button><button class="linkbtn" id="cmpclr">Clear</button></span></div>
       <div class="scroll"><table id="tbl"></table></div></div>`;
   const draw = () => {
     const q = S.q.toLowerCase(), mink = +($("#mink").value || 0);
@@ -1547,16 +1588,29 @@ async function viewSessions() {
       .sort((a, b) => { const x = val(a), y = val(b); if (x == null) return 1; if (y == null) return -1; return (x > y ? 1 : x < y ? -1 : 0) * dir; });
     const nh = rows.filter(a => a.hidden).length;
     $("#cnt").textContent = `${rows.length} of ${acts.length} sessions · ${fkm(rows.reduce((s, a) => s + (a.hidden ? 0 : a.km || 0), 0))} km` + (nh ? ` · ${nh} hidden` : "");
-    $("#tbl").innerHTML = `<thead><tr>${cols.map(([k, n, , c]) => `<th class="sort ${c || ""} ${S.sort.k === k ? (S.sort.dir > 0 ? "asc" : "desc") : ""}" data-k="${k}">${n}</th>`).join("")}</tr></thead><tbody>` +
-      rows.map(a => `<tr class="click${a.hidden ? " hiddenrow" : ""}" data-id="${a.id}">${cols.map(([, , f, c]) => `<td class="${c || ""}">${f(a)}</td>`).join("")}</tr>`).join("") + `</tbody>`;
-    $("#tbl").querySelectorAll("th").forEach(th => th.onclick = () => { const k = th.dataset.k; S.sort = { k, dir: S.sort.k === k ? -S.sort.dir : -1 }; draw(); });
-    $("#tbl").querySelectorAll("tr[data-id]").forEach(tr => tr.onclick = () => go(tr.dataset.id));
+    $("#tbl").innerHTML = `<thead><tr>${cols.map(([k, n, , c]) => `<th class="${k === "pick" ? "" : "sort"} ${c || ""} ${S.sort.k === k ? (S.sort.dir > 0 ? "asc" : "desc") : ""}" data-k="${k}">${n}</th>`).join("")}</tr></thead><tbody>` +
+      rows.map(a => `<tr class="click${a.hidden ? " hiddenrow" : ""}${pick.includes(a.id) ? " sel" : ""}" data-id="${a.id}">${cols.map(([, , f, c]) => `<td class="${c || ""}">${f(a)}</td>`).join("")}</tr>`).join("") + `</tbody>`;
+    $("#tbl").querySelectorAll("th.sort").forEach(th => th.onclick = () => { const k = th.dataset.k; S.sort = { k, dir: S.sort.k === k ? -S.sort.dir : -1 }; draw(); });
+    $("#tbl").querySelectorAll("tr[data-id]").forEach(tr => tr.onclick = e => { if (!e.target.closest(".pickc")) go(tr.dataset.id); });
+    $("#tbl").querySelectorAll("input.pick").forEach(cb => cb.onchange = () => { pick = pickToggle(pick, +cb.dataset.pick); savePick(pick); draw(); });
+    const shown = new Set(rows.map(a => a.id)), off = pick.filter(id => !shown.has(id)).length;
+    $("#cmpbar").hidden = !pick.length;
+    $("#cmpcnt").textContent = `${pick.length} of 2 selected` + (off ? ` (${off} not shown)` : "");
+    $("#cmpgo").disabled = pick.length !== 2;
     mountStars($("#tbl"), null, () => favOnly && draw());
   };
   $("#q").oninput = e => { S.q = e.target.value; draw(); };
   $("#mink").oninput = e => { localStorage.minKm = e.target.value; draw(); };
   $("#favonly").onchange = e => { localStorage.favOnly = e.target.checked ? "1" : "0"; draw(); };
   $("#showhidden").onchange = e => { localStorage.showHidden = e.target.checked ? "1" : "0"; viewSessions(); };
+  $("#cmpclr").onclick = () => { pick = []; savePick(pick); draw(); };
+  $("#cmpgo").onclick = () => {
+    if (pick.length !== 2) return;
+    const [x, y] = pick.map(id => acts.find(a => a.id === id) || { id, _t: 0 });
+    const [sub, ref] = cmpWhen(x, y) >= 0 ? [x, y] : [y, x];  // the newer one is the subject
+    pick = []; savePick(pick);
+    location.hash = `#/compare/${sub.id}/${ref.id}`;
+  };
   draw();
 }
 
@@ -1632,6 +1686,7 @@ async function viewSession(id) {
       <div><h1>${starSlot("sessions", a.id)} ${esc(a.name)}</h1>
         <div class="muted">${esc(a.type)} · ${fdate(d)} · ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")} · ${esc(a.device || "")} · ${routePill(m.route)}</div></div>
       <div class="headnav">
+        <button class="btn" id="cmp" title="Compare with another session">Compare…</button>
         <button class="btn" id="edit" title="Rename, change sport, hide or delete">Edit</button>
         <button class="btn" id="prev" ${prev ? "" : "disabled"}>← previous</button>
         <button class="btn" id="next" ${next ? "" : "disabled"}>next →</button>
@@ -1689,6 +1744,7 @@ async function viewSession(id) {
     </div>`;
   mountStars(app.querySelector(".head"));
   $("#edit").onclick = () => openEdit(a);
+  $("#cmp").onclick = () => comparePicker(self, m, peers);
   if ($("#restore")) $("#restore").onclick = async () => {
     try { await postEdit({ id: String(a.id), restore: true }); await refreshData(); } catch (err) { alert("Could not restore: " + err.message); }
   };
@@ -1697,6 +1753,7 @@ async function viewSession(id) {
 
   let selKm = null, selectKm = () => {};
   const map = hasGps ? sessionMap($("#map"), ser, { turnKm: m.route === "out-back" ? m.turn_km : null, gate: L ? L.gate : null, wind: a.cond }) : null;  // indoor: no route panel, the charts take the width
+  if (map) onLeave(() => map.destroy());
   // One selected stretch for the whole page. Everything that highlights the map
   // (km splits, out/back legs, laps, segment rows, brushing the speed chart)
   // goes through hl.highlightBy, which also shades the speed chart and
@@ -1939,17 +1996,22 @@ async function viewSession(id) {
     $("#t-zones").innerHTML = `<table><tbody>` + z.map((s, k) => `<tr><td class="l">${zoneLabel(k, S.hrmax)}</td><td>${dur(s, true)}</td><td>${(s / tot * 100).toFixed(0)}%</td>
       <td class="l"><span class="bar" style="width:${(s / tot * 240).toFixed(0)}px;background:${ZONES[k].c}"></span></td></tr>`).join("") + `</tbody></table>`;
   }
-  // similar route: same kind, similar distance from start to farthest point and outbound bearing
-  const same = peers.filter(p => p.id !== a.id && p.route === m.route && m.route && m.route !== "indoor" &&
-    isNum(p.crow_km) && isNum(m.crow_km) && Math.abs(p.crow_km - m.crow_km) < Math.max(0.6, m.crow_km * 0.12) &&
-    (m.route !== "out-back" || Math.abs(((p.bearing_out - m.bearing_out + 540) % 360) - 180) < 20) &&
-    Math.abs((p.km || 0) - (a.km || 0)) < Math.max(2, a.km * 0.2));
+  const same = sameRoute(a, m, peers);
   const metric = m.route === "out-back" ? "wind_neutral" : "best10min_kmh";
   const rank = same.filter(p => isNum(p[metric])).filter(p => p[metric] > (m[metric] ?? a[metric])).length + 1;
   $("#t-same").innerHTML = same.length ? `<div class="note" style="margin:0 0 8px">${same.length} similar sessions. This one ranks <b>#${rank}</b> of ${same.filter(p => isNum(p[metric])).length + 1} by ${metric === "wind_neutral" ? "wind-neutral" : "best 10-min"} speed.</div>
-    <table><thead><tr><th>date</th><th>km</th><th>moving</th><th>avg km/h</th><th>best 10</th><th>wind-neutral</th><th>out vs back</th><th>HR</th></tr></thead><tbody>` +
-    same.slice().sort((x, y) => y._t - x._t).slice(0, 25).map(p => `<tr class="click" data-id="${p.id}"><td class="l">${fdate(p._d)}</td><td>${fkm(p.km)}</td><td>${dur(p.moving_s, true)}</td><td>${f2(p.kmh_moving)}</td><td>${f2(p.best10min_kmh)}</td><td>${f2(p.wind_neutral)}</td><td>${pct(p.asym_pct)}</td><td>${f0(p.hr_avg)}</td></tr>`).join("") + `</tbody></table>` : `<p class="muted">No other sessions on a matching route.</p>`;
-  app.querySelectorAll("#t-same tr[data-id]").forEach(tr => tr.onclick = () => go(tr.dataset.id));
+    <table><thead><tr><th>date</th><th>km</th><th>moving</th><th>avg km/h</th><th>best 10</th><th>wind-neutral</th><th>out vs back</th><th>HR</th><th></th></tr></thead><tbody>` +
+    same.slice().sort((x, y) => y._t - x._t).slice(0, 25).map(p => `<tr class="click" data-id="${p.id}"><td class="l">${fdate(p._d)}</td><td>${fkm(p.km)}</td><td>${dur(p.moving_s, true)}</td><td>${f2(p.kmh_moving)}</td><td>${f2(p.best10min_kmh)}</td><td>${f2(p.wind_neutral)}</td><td>${pct(p.asym_pct)}</td><td>${f0(p.hr_avg)}</td><td><a class="rowact" href="#/compare/${a.id}/${p.id}">Compare</a></td></tr>`).join("") + `</tbody></table>` : `<p class="muted">No other sessions on a matching route.</p>`;
+  app.querySelectorAll("#t-same tr[data-id]").forEach(tr => tr.onclick = e => { if (!e.target.closest("a")) go(tr.dataset.id); });
+}
+
+/** Sessions on the same route as `a` (its metrics `m`): same kind, similar distance from
+ * the start to the farthest point and, out-and-back, a similar outbound bearing. */
+function sameRoute(a, m, peers) {
+  return peers.filter(p => p.id !== a.id && p.route === m.route && m.route && m.route !== "indoor" &&
+    isNum(p.crow_km) && isNum(m.crow_km) && Math.abs(p.crow_km - m.crow_km) < Math.max(0.6, m.crow_km * 0.12) &&
+    (m.route !== "out-back" || Math.abs(((p.bearing_out - m.bearing_out + 540) % 360) - 180) < 20) &&
+    Math.abs((p.km || 0) - (a.km || 0)) < Math.max(2, a.km * 0.2));
 }
 
 // ------------------------------------------------------------------ router / boot
@@ -2053,10 +2115,16 @@ function collapsePanel() {
 addEventListener("keydown", e => { if (e.key === "Escape" && expanded) { e.preventDefault(); collapsePanel(); } });
 addEventListener("hashchange", () => { if (expanded) { expanded.bd.remove(); document.body.classList.remove("has-expanded"); expanded = null; } });
 
+// cleanup for the page being left (maps, replay loops), run before every render
+const Leave = [];
+const onLeave = fn => Leave.push(fn);
+let routeSeq = 0;  // a view checks it after each await: a newer route() means it was left
 async function route() {
+  while (Leave.length) { try { Leave.pop()(); } catch (e) { console.error(e); } }
+  const seq = ++routeSeq;
   const h = location.hash.replace(/^#\/?/, "");
-  const [page, arg] = h.split("/");
-  const cur = page === "session" ? "sessions" : page === "segment" ? "segments" : page || "progress";
+  const [page, arg, arg2] = h.split("/");
+  const cur = page === "session" || page === "compare" ? "sessions" : page === "segment" ? "segments" : page || "progress";
   document.querySelectorAll("[data-nav]").forEach(a => { const on = a.dataset.nav === cur; a.classList.toggle("on", on); on ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current"); });
   hideTip();
   try {
@@ -2066,6 +2134,7 @@ async function route() {
     else if (page === "segments") await viewSegments();
     else if (page === "segment" && arg) await viewSegment(arg);
     else if (page === "profile") await viewProfile();
+    else if (page === "compare") await viewCompare(arg, arg2, seq);
     else await viewProgress();
     const y = history.state && history.state.y;
     if (Nav.pop && y) requestAnimationFrame(() => scrollTo(0, y));  // back/forward: where you were
@@ -2310,13 +2379,17 @@ async function boot() {
   const sel = $("#type");
   sel.innerHTML = S.types.map(t => `<option value="${esc(t.type)}">${esc(t.type)} (${t.n})</option>`).join("");
   sel.value = S.type;
-  sel.onchange = () => { S.type = localStorage.type = sel.value; if (location.hash.startsWith("#/session/")) location.hash = "#/"; else if (location.hash.startsWith("#/segment/")) location.hash = "#/segments"; else route(); };
+  sel.onchange = () => { S.type = localStorage.type = sel.value; if (/^#\/(session|compare)\//.test(location.hash)) location.hash = "#/"; else if (location.hash.startsWith("#/segment/")) location.hash = "#/segments"; else route(); };
   const rg = $("#range"); rg.value = S.range;
-  rg.onchange = () => { S.range = localStorage.range = rg.value; if (!location.hash.startsWith("#/session/")) route(); };
+  rg.onchange = () => { S.range = localStorage.range = rg.value; if (!/^#\/(session|compare)\//.test(location.hash)) route(); };
   navInit();
   sideInit();
   addEventListener("hashchange", route);
-  let rt; addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(() => { if (!/^#\/(map|segment)/.test(location.hash)) route(); }, 200); });
+  // compare keeps its replay state: redraw its charts at the new width instead of re-rendering
+  let rt; addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(() => {
+    if (/^#\/compare\//.test(location.hash)) redrawCharts($("#app"));
+    else if (!/^#\/(map|segment)/.test(location.hash)) route();
+  }, 200); });
   if (!S.readonly) initImport();
   else $("#import-btn").replaceWith(Object.assign(document.createElement("span"),
     { className: "muted small", textContent: "read-only", title: "opened over the network; start rollbook with --lan-write to allow changes" }));

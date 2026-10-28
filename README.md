@@ -76,6 +76,10 @@ GPS: runs, rides, walks, skates, plus indoor rides from ROUVY or MyWhoosh.
   dialog): fetch new activities straight from strava.com with your browser's
   login cookie, no export or API needed. See
   [Sync from Strava](#sync-from-strava).
+- **Compare two sessions** (**Compare…** on a session, or tick two in the
+  session list): the time gap by distance (who was ahead where), speed and
+  heart rate overlaid, a map replay with a ghost, splits and shared segments
+  side by side, on the moving or the elapsed clock.
 - **Edit sessions** (**Edit** on a session): rename, fix the sport, hide from stats
   or delete. Edits are stored next to the database and survive rebuilds.
 - **Desktop window** (`rollbook app`) or a normal browser tab
@@ -94,6 +98,9 @@ GPS: runs, rides, walks, skates, plus indoor rides from ROUVY or MyWhoosh.
 <tr><td align="center"><sub>An indoor ride: power, intensity and load against FTP</sub></td>
 <td align="center"><sub>Heatmap of every session</sub></td></tr>
 </table>
+
+<p align="center"><img src="docs/screenshots/compare.png" alt="Two sessions compared: time gap by distance, speed and heart rate, map replay"></p>
+<p align="center"><sub>Two sessions compared: who was ahead where, with a replay</sub></p>
 
 <p align="center"><sub>The screenshots show a synthetic demo athlete (<code>tools/demo.py</code>), offline, so
 there is no basemap. Normally you see OpenStreetMap underneath.</sub></p>

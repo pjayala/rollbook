@@ -65,7 +65,7 @@ web/app.py              `rollbook app`: desktop window (pywebview / Chrome-Edge 
 web/mcp_server.py       `rollbook mcp`: read-only MCP tools over stdio JSON-RPC
 web/strava_web.py       `rollbook strava`: session-cookie sync of new activities from strava.com
 opencode.json           registers `./rollbook mcp` as the `rollbook` MCP server
-web/static/             index.html / app.js / map.js / style.css, vanilla JS + SVG/canvas, no CDN
+web/static/             index.html / app.js / map.js / compare.js / style.css, vanilla JS + SVG/canvas, no CDN
 web/static/icon.svg     app icon master; favicon.svg is its 16-32 px simplification
 web/static/inter-*.woff2 Inter variable font (Latin subset, OFL, Inter-OFL.txt), served locally
 assets/                 rendered icons: rollbook-{128..1024}.png, rollbook.icns, rollbook.ico
@@ -324,7 +324,9 @@ changing `derive()`.
   the browser never talks to a third party. "Dark" is the same tiles through
   a CSS filter. CARTO basemaps now need an API key — don't switch back.
   `--offline` serves only cached tiles. Tile requests do reveal which area is
-  being viewed to the OSM tile server.
+  being viewed to the OSM tile server. `TileCache` fetches each tile once
+  (other requests wait for it) and at most `UPSTREAM` (2) at a time, per the
+  OSM tile policy; the User-Agent carries the project URL.
 * **Heatmap**: each track adds once per pixel (one `stroke()` per track, so an
   out-and-back doesn't count twice), accumulated in the alpha channel, then
   colour-mapped. Tracks are downsampled to ~15 m and delta-encoded in the
@@ -374,6 +376,28 @@ changing `derive()`.
 * **Sidebar** (`sideInit`): the button left of back/forward (or ⌘\ / Ctrl+\)
   hides it, `body.side-hidden`, saved in `localStorage.sideHidden`; charts
   redraw at the new width. Below 720 px it is the bottom bar and never hides.
+* **Compare** (`web/static/compare.js`, #16): `#/compare/<subject>/<reference>`,
+  reached from **Compare…** on a session (a picker: suggestions, same route via
+  `sameRoute()`, then the sport), the **Compare** action in "Same route", or two
+  ticks in the Sessions list (the newer is the subject; `sessionStorage.cmpPick`,
+  ids only). The subject is orange, the reference white (heart rate rose / a
+  muted rose); every change is subject − reference, coloured only where better
+  is clear. Lead block: the time gap by distance, `g = t_ref(x) − t_sub(x)`
+  (positive = subject ahead), on the **moving** clock (the series' `mv` column:
+  cumulative moving s at full resolution, so downsampling doesn't move it) or
+  **elapsed**. Distance is made non-decreasing and "time at x km" is the first
+  arrival. Per-km splits come from rounded cumulative times, so they add up to
+  the headline gap. Starts > 150 m apart: auto-aligned at the first shared
+  segment's start (`alignAt`); circuits offer the lap gate. Different virtual
+  routes get no gap or splits (simulated speed), best power instead. The
+  replay map is fitted once to both tracks and never pans or zooms (no new
+  tiles); its rAF loop stops on leaving, on a hidden tab and on navigation.
+  GET only, so it works read-only over `--lan`. Pure helpers are tested under
+  node in `tests/test_frontend_compare.py`.
+* **Page cleanup**: `route()` runs every `onLeave()` callback first (maps,
+  replay loops) and bumps `routeSeq`; a view that awaited checks it so a late
+  response never draws over the next page. The HTML carries a
+  Content-Security-Policy (`CSP` in server.py; no inline scripts anywhere).
 * **Favorites** (star toggle on sessions and segments, "favorites only" filters,
   a Favorites panel on the progress page) live in `data/favorites.json`,
   server-side so the app window and browser tabs share them. Starred
