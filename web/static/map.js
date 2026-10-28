@@ -151,7 +151,7 @@ class SlippyMap {
   }
 
   redraw() {
-    if (this._raf) return;
+    if (this._raf || this._dead) return;
     this._raf = requestAnimationFrame(() => { this._raf = 0; this.draw(); });
   }
 
@@ -256,7 +256,15 @@ class SlippyMap {
     c.addEventListener("dblclick", e => { const [x, y] = pos(e); this.zoomAt(x, y, e.shiftKey ? -1 : 1); });
   }
 
-  destroy() { this._ro.disconnect(); }
+  /** Stop everything: observer, pending frame, tile callbacks. Safe to call twice. */
+  destroy() {
+    this._dead = true;
+    this._ro.disconnect();
+    if (this._raf) cancelAnimationFrame(this._raf);
+    this._raf = 0;
+    for (const img of this.tiles.values()) img.onload = null;
+    this.tiles.clear();
+  }
 }
 
 // ------------------------------------------------------------------ layers

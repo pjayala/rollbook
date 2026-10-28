@@ -67,8 +67,12 @@ POWER_HOLD = 10  # s, a reading counts until the next one; longer gaps are 0 W (
 TILE_SOURCES = {  # CARTO needs an API key now; the dark look is a CSS filter client-side
     "osm": "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
 }
-TILE_UA = "Rollbook/1.0 (personal training dashboard, single-user; tiles cached)"
+TILE_UA = "Rollbook/1.0 (personal training dashboard, single-user; tiles cached; +https://github.com/pjayala/rollbook)"
 TILE_MAXZ = 19
+# no inline scripts anywhere; templates use style="" attributes, so inline styles stay allowed
+CSP = ("default-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data: blob:; "
+       "style-src 'self' 'unsafe-inline'; font-src 'self'; object-src 'none'; frame-ancestors 'none'; "
+       "base-uri 'none'; form-action 'self'")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
         ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml",
@@ -703,12 +707,21 @@ def api_activity(db, q, M, aid):
         def watts(i):
             return None
 
+    # cumulative moving seconds at full resolution (same rule as `db build`), so a
+    # downsampled series still gives the true moving clock (compare page)
+    mv, acc = [0.0] * n, 0.0
+    for i in range(1, n):
+        dt = t[i] - t[i - 1]
+        if dt > 0 and (d[i] - d[i - 1]) / dt >= THR:
+            acc += dt
+        mv[i] = acc
+
     def pt(i):
         r = rows[i]
         ll = valid_ll(r[1], r[2])
         return [t[i], round(d[i] / 1000, 4), round(speed[i], 2), r[4],
                 None if r[3] is None else round(r[3], 1),
-                round(r[1], 6) if ll else None, round(r[2], 6) if ll else None, watts(i)]
+                round(r[1], 6) if ll else None, round(r[2], 6) if ll else None, watts(i), round(mv[i], 1)]
 
     step = max(1, math.ceil(n / SERIES_MAX))
     idx = list(range(0, n, step))
@@ -721,7 +734,7 @@ def api_activity(db, q, M, aid):
     act["cond"] = conditions(act, m)
     act["cal"] = athlete.calories(act, PROFILE.get())
     act["splits"] = splits
-    act["series_cols"] = ["t", "km", "kmh", "hr", "ele", "lat", "lon", "watts"]
+    act["series_cols"] = ["t", "km", "kmh", "hr", "ele", "lat", "lon", "watts", "mv"]
     act["series"] = series
     return act
 
@@ -923,10 +936,14 @@ def api_hrmax(db, q, M):
 
 
 class TileCache:
+    UPSTREAM = 2  # parallel fetches from the tile server, per the OSM tile usage policy
+
     def __init__(self, root, offline):
         self.root, self.offline = root, offline
         self.failed = {}  # url -> time of last failure, avoids hammering when offline
         self.lock = threading.Lock()
+        self.slots = threading.BoundedSemaphore(self.UPSTREAM)
+        self.inflight = {}  # url -> Lock: one fetch per tile, the other requests wait for it
 
     def get(self, src, z, x, y):
         path = os.path.join(self.root, src, str(z), str(x), f"{y}.png")
@@ -938,6 +955,24 @@ class TileCache:
         url = TILE_SOURCES[src].format(z=z, x=x, y=y)
         if self.offline or time.time() - self.failed.get(url, 0) < 60:
             return None
+        with self.lock:
+            tl = self.inflight.setdefault(url, threading.Lock())
+        with tl:
+            try:  # another request may have fetched it while this one waited
+                with open(path, "rb") as f:
+                    return f.read()
+            except OSError:
+                pass
+            if time.time() - self.failed.get(url, 0) < 60:
+                return None
+            try:
+                with self.slots:
+                    return self._fetch(url, path)
+            finally:
+                with self.lock:
+                    self.inflight.pop(url, None)
+
+    def _fetch(self, url, path):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": TILE_UA})
             with urllib.request.urlopen(req, timeout=10) as r:
@@ -945,8 +980,11 @@ class TileCache:
                     raise urllib.error.URLError(f"status {r.status}")
                 body = r.read()
         except (urllib.error.URLError, OSError, ValueError):
+            now = time.time()
             with self.lock:
-                self.failed[url] = time.time()
+                self.failed[url] = now
+                if len(self.failed) > 2000:  # forget old failures
+                    self.failed = {u: ts for u, ts in self.failed.items() if now - ts < 60}
             return None
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = f"{path}.{threading.get_ident()}.tmp"
@@ -1145,6 +1183,8 @@ def make_handler(db_path, M, tiles, lan=None):
                 self.send_header("Content-Encoding", "gzip")
             self.send_header("Cache-Control", "max-age=86400" if ctype in ("image/svg+xml", "image/png", "image/x-icon", "font/woff2") else cache)
             self.send_header("X-Content-Type-Options", "nosniff")
+            if ctype.startswith("text/html"):
+                self.send_header("Content-Security-Policy", CSP)
             if lan:
                 self.send_header("Referrer-Policy", "no-referrer")
                 self.send_header("X-Frame-Options", "DENY")
@@ -1374,7 +1414,7 @@ def make_handler(db_path, M, tiles, lan=None):
                 return self.json(clean({**strava_web.status(IMPORTER.home), "offline": IMPORTER.offline}))
             if p.startswith("activity/"):
                 tail = p[len("activity/"):]
-                if not tail.isdigit():
+                if not re.fullmatch(r"[0-9]{1,15}", tail):
                     return self.json({"error": "bad id"}, 400)
                 a = api_activity(db, q, M, int(tail))
                 if a is None:

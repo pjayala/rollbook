@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.6.0 (2026-10-28)
+
+### Compare two sessions (#16)
+
+- **Compare…** on a session (suggests the last time on the same route and the
+  route best), a **Compare** link in "Same route, other sessions", or tick two
+  sessions in the list.
+- The time gap by distance leads: who was ahead where, the final and largest
+  gap, lead changes and, on the elapsed clock, the stops. Speed and heart rate
+  overlaid, a map replay with a ghost (10× / 30× / 60×, a scrubber synced with
+  the charts), per-km (or per-lap) splits that add up to the gap, shared
+  segments and every metric side by side.
+- Moving or elapsed clock; the moving clock comes from the server at full
+  resolution. Far-apart starts are lined up on the first shared segment;
+  circuits can be lined up on the lap gate.
+
+### Fixes and hardening
+
+- Summary strips never leave a gap in their last row; the session page's map
+  is released when you leave it.
+- The dashboard sends a Content-Security-Policy; activity ids are checked
+  strictly; the tile proxy fetches each tile once and at most two at a time,
+  with a contact URL in its User-Agent.
+
 ## 0.5.0 (2026-10-26)
 
 ### A new look for the dashboard

@@ -127,7 +127,7 @@ class Api(Build):
 
     def test_static_and_icons(self):
         self.assertIn(b"Rollbook", self.get("/"))
-        for p in ("/app.js", "/map.js", "/style.css", "/favicon.svg", "/favicon.ico"):
+        for p in ("/app.js", "/map.js", "/compare.js", "/style.css", "/favicon.svg", "/favicon.ico"):
             self.assertTrue(self.get(p))
 
     def test_path_traversal_blocked(self):
@@ -147,6 +147,34 @@ class Api(Build):
         s = self.get("/api/activity/1001")
         self.assertGreater(len(s["series"]), 100)
         self.assertEqual(len(s["splits"]), 18)
+
+    def test_compare_series_moving_clock(self):
+        """#16: the series' full-resolution moving clock ends at the session's moving time,
+        however the series was downsampled; distance never runs backwards."""
+        for aid in (1001, 1002):
+            s = self.get(f"/api/activity/{aid}")
+            mv = s["series_cols"].index("mv")
+            self.assertEqual(s["series"][0][0], 0)
+            self.assertEqual(s["series"][0][mv], 0)
+            km = [r[1] for r in s["series"]]
+            self.assertEqual(km, sorted(km))
+            self.assertAlmostEqual(s["series"][-1][mv], s["moving_s"], delta=5)
+        self.assertAlmostEqual(self.get("/api/activity/1001")["series"][-1][-1], 3068, delta=5)  # 51:08
+
+    def test_activity_ids_are_strict(self):
+        for path, code in (("/api/activity/abc", 400), ("/api/activity/%C2%B2", 400), ("/api/activity/" + "1" * 16, 400),
+                           ("/api/activity/999999", 404)):
+            with self.assertRaises(urllib.error.HTTPError) as cm:
+                self.get(path)
+            self.assertEqual(cm.exception.code, code, path)
+
+    def test_page_has_a_content_security_policy(self):
+        with urllib.request.urlopen(self.url, timeout=60) as r:
+            csp = r.headers.get("Content-Security-Policy", "")
+        self.assertIn("script-src 'self'", csp)
+        self.assertIn("frame-ancestors 'none'", csp)
+        idx = self.get("/").decode()
+        self.assertNotRegex(idx, r"<script>|<script [^>]*>[^<]+</script>|\son[a-z]+=")  # nothing inline for the CSP to block
 
     def test_import_needs_header_and_same_origin(self):
         gpx = open(os.path.join(SAMPLES, "The_come_back.gpx"), "rb").read()
@@ -299,8 +327,9 @@ class PowerBuild(unittest.TestCase):
         self.assertAlmostEqual(a["pw20m"], (30 * 400 + 1170 * 180) / 1200, delta=1)
         self.assertGreater(a["np"], a["watts_avg"])
         s = server.api_activity(con, {}, M, 2001)
-        self.assertEqual(s["series_cols"][-1], "watts")
-        self.assertTrue(all(isinstance(r[-1], int) for r in s["series"]))
+        w = s["series_cols"].index("watts")
+        self.assertEqual(s["series_cols"][-1], "mv")
+        self.assertTrue(all(isinstance(r[w], int) for r in s["series"]))
 
     def test_older_db_is_migrated_in_place(self):
         from helpers import load_tool
