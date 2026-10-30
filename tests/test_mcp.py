@@ -117,6 +117,9 @@ class MCP(unittest.TestCase):
         self.assertIn("hr_zones", r)
         self.assertNotIn("trk", r["derived"])
         self.assertNotIn("ll0", r["derived"])
+        be = r["derived"]["best_efforts"]  # #6, no coordinates
+        self.assertEqual(set(be), {"400", "1k", "5k", "10k"})
+        self.assertGreater(be["5k"]["seconds"], 5 * be["1k"]["seconds"] - 1e-6)
         self.assertNotIn("splits", self.call("activity", id=1001, splits=False))
 
     def test_compare_trend_records(self):
@@ -128,6 +131,11 @@ class MCP(unittest.TestCase):
         self.assertEqual(sum(p["n"] for p in t["periods"]), 2)
         rec = self.call("records", limit=1)
         self.assertEqual(rec["km"][0]["id"], 1001)
+        self.call("activity", id=1001); self.call("activity", id=1002)
+        rec = self.call("records", limit=2)
+        if "best_effort_1k_s" in rec:  # derived records need the metrics cache
+            per = rec["best_effort_1k_s"]["Inline Skate"]
+            self.assertLessEqual(per[0]["seconds"], per[-1]["seconds"])  # fastest first
 
     # ------------------------------------------------------------ safety
 

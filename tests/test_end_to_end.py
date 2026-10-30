@@ -161,6 +161,18 @@ class Api(Build):
             self.assertAlmostEqual(s["series"][-1][mv], s["moving_s"], delta=5)
         self.assertAlmostEqual(self.get("/api/activity/1001")["series"][-1][-1], 3068, delta=5)  # 51:08
 
+    def test_best_efforts_in_list_and_session(self):
+        """#6: list columns be<label> in seconds, the same as the session's metrics."""
+        acts = {a["id"]: a for a in self.get("/api/activities?type=Inline%20Skate")}
+        for aid in (1001, 1002):
+            m = self.get(f"/api/activity/{aid}")["metrics"]
+            for label in ("400", "1k", "5k", "10k"):
+                self.assertGreater(acts[aid]["be" + label], 0)
+                self.assertEqual(acts[aid]["be" + label], m["be"][label][0])
+            self.assertIsNone(acts[aid]["be21k"])
+            self.assertIsNone(acts[aid]["be42k"])
+        self.assertAlmostEqual(acts[1001]["be1k"], 147.0, delta=1.0)  # Outdoor_cycle.gpx, see test_parsing
+
     def test_activity_ids_are_strict(self):
         for path, code in (("/api/activity/abc", 400), ("/api/activity/%C2%B2", 400), ("/api/activity/" + "1" * 16, 400),
                            ("/api/activity/999999", 404)):

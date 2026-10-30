@@ -18,6 +18,7 @@ import profile as athlete
 import gzip
 import hmac
 import ipaddress
+import bisect
 import json
 import re
 import math
@@ -40,7 +41,7 @@ from http.cookies import CookieError, SimpleCookie
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-METRICS_VERSION = 15
+METRICS_VERSION = 16
 THR = 0.5  # m/s, pause threshold; must match bin/rollbook
 WINDOWS = (30, 45, 60)  # minutes; 5/10/20 already live in the DB via `db enrich`
 LEG_WINDOW = 10  # minutes, best effort per out/back leg
@@ -55,6 +56,10 @@ LAP_CAND_M = 80  # m, spacing of candidate gates along the track
 LAP_MIN_M = 150  # m, shortest lap considered (inline/athletics tracks are ~200-400 m)
 LAP_HEAD_COS = 0.7  # pass heading must be within ~45 deg of the gate heading
 TRACK_Q = 1e5  # lat/lon quantised to 1e-5 deg (~1 m), then delta-encoded
+# best efforts by distance (#6): label, metres. Labels are the API keys (`be<label>`)
+BEST_EFFORTS = (("400", 400.0), ("1k", 1000.0), ("5k", 5000.0), ("10k", 10000.0), ("21k", 21097.5), ("42k", 42195.0))
+BE_KEYS = tuple("be" + k for k, _ in BEST_EFFORTS)
+BE_MAX_MS = 30.0  # m/s; a window holding a faster step is a glitch (bin/rollbook MAX_MS), not an effort
 POWER_WINDOWS = (5, 30, 60, 300, 1200, 1800, 3600)  # s, best mean power ("power curve" points)
 POWER_KEYS = ("pw5s", "pw30s", "pw1m", "pw5m", "pw20m", "pw30m", "pw60m")  # list columns, same order
 PW_BIN = 1  # W, power histogram bin (zones are drawn in the browser, where FTP is known;
@@ -132,6 +137,79 @@ def best_window(t, d, i0, i1, span):
             if best is None or v > best:
                 best = v
     return best
+
+
+def best_effort(t, d, D):
+    """Fastest elapsed time over D metres anywhere in a track: (seconds, start t, start m).
+
+    Time as a function of distance is piecewise linear, so f(x) = T_first(x + D) -
+    T_last(x) is too, with breaks only where x or x + D is a sample's distance: its
+    minimum is exact when f is evaluated at those breakpoints. On a plateau (a pause)
+    the start is the moment it moves on and the end the first arrival; pauses inside
+    the window count, as with Strava. Equal timestamps keep the last sample (no
+    distance in zero time); a window holding a step faster than BE_MAX_MS (an
+    odometer or GPS spike) is skipped. Ties keep the earliest start. None if the
+    track is shorter than D.
+    """
+    tt, dd = [], []
+    for a, b in zip(t, d):
+        if b is None:
+            continue
+        b = max(b, dd[-1]) if dd else b  # distance never runs backwards
+        if tt and a <= tt[-1]:
+            dd[-1] = max(dd[-1], b)
+            continue
+        tt.append(a); dd.append(b)
+    n = len(tt)
+    if n < 2:
+        return None
+    total = dd[-1] - dd[0]
+    if total < D * (1 - 1e-9):
+        return None
+    D = min(D, total)
+    bad = [0]  # prefix count of impossible steps
+    for k in range(n - 1):
+        bad.append(bad[-1] + ((dd[k + 1] - dd[k]) / (tt[k + 1] - tt[k]) > BE_MAX_MS))
+
+    def t_last(x):  # leaving distance x (the end of a plateau)
+        i = bisect.bisect_right(dd, x) - 1
+        if i >= n - 1:
+            return tt[-1], n - 1
+        return tt[i] + (x - dd[i]) / (dd[i + 1] - dd[i]) * (tt[i + 1] - tt[i]), i
+
+    def t_first(y):  # first arrival at distance y
+        j = bisect.bisect_left(dd, y)
+        if j <= 0:
+            return tt[0], 0
+        if j >= n:
+            return tt[-1], n - 1
+        return tt[j - 1] + (y - dd[j - 1]) / (dd[j] - dd[j - 1]) * (tt[j] - tt[j - 1]), j
+
+    hi_x = max(dd[0], dd[-1] - D)
+    xs = sorted({x for x in dd if x <= hi_x + 1e-9} | {y - D for y in dd if y - D >= dd[0] - 1e-9})
+    best = None
+    for x in xs:
+        x = max(dd[0], min(x, hi_x))
+        t0, i = t_last(x)
+        t1, j = t_first(x + D)
+        if bad[j] - bad[i]:
+            continue
+        el = t1 - t0
+        if el > 0 and (best is None or el < best[0] - 1e-9):
+            best = (el, t0, x)
+    return None if best is None else (round(best[0], 1), round(best[1], 1), round(best[2], 1))
+
+
+def best_efforts(t, d, typ=""):
+    """{label: [seconds, start t, start m]} for the BEST_EFFORTS a sport uses."""
+    out = {}
+    for k, D in BEST_EFFORTS:
+        if k == "400" and "Ride" in typ:  # 400 m on a bike is noise
+            continue
+        r = best_effort(t, d, D)
+        if r:
+            out[k] = list(r)
+    return out
 
 
 def moving_kmh(t, d, i0, i1):
@@ -478,6 +556,10 @@ def derive(db, aid):
     if typ.startswith("Virtual"):  # simulated GPS, no wind, gradients are fake
         out["route"] = "virtual"
         return out
+    # before the indoor return: a treadmill run's distance counts too
+    be = best_efforts(t, d, typ)
+    if be:
+        out["be"] = be
     valid = [i for i, r in enumerate(rows) if valid_ll(r[1], r[2])]
     if len(valid) < 20:
         out["route"] = "indoor"
@@ -641,6 +723,9 @@ def api_activities(db, q, M):
             r["lap_center"] = lp["center"]
             r["best_lap_s"] = min((x["elapsed"] for x in reg), default=None)
             r["best_lap_kmh"] = max((x["kmh_elapsed"] for x in reg if x["kmh_elapsed"]), default=None)
+        be = m.get("be") or {}
+        for (k, _), col in zip(BEST_EFFORTS, BE_KEYS):
+            r[col] = (be.get(k) or [None])[0]
         r["hr_hist"] = m.get("hr_hist") or None
         p = m.get("pw") or {}
         for k, w in zip(POWER_KEYS, POWER_WINDOWS):

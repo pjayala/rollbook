@@ -65,6 +65,9 @@ Which metric to trust:
 - Power (watts_avg, f_np, best power): indoor rides only, the most reliable
   fitness signal. Outdoor s_avg_watts is Strava's estimate, not measured.
 - Never compare 'Virtual Ride' speeds with outdoor ones (simulated gradients).
+- Best efforts (400 m … marathon): fastest elapsed time over that distance
+  anywhere in a session, stops included, per sport; none for virtual rides.
+  400 m / 1 km read slower on the 6 s recording era (since 2025-08).
 - Wind-neutral speed (out-and-back routes) = mean of the best 10 min out and
   back; it cancels wind and slope.
 - km / ascent_m prefer Strava's figure; *_calc are recomputed; s_* columns are
@@ -182,6 +185,8 @@ class Rollbook:
             m["best_power_w"] = {POWER_LABELS.get(k, k): v for k, v in m.pop("pw").items()}
         if "np" in m:
             m["weighted_power_w"] = m.pop("np")
+        if "be" in m:  # best efforts by distance: elapsed seconds and where it started (no coordinates)
+            m["best_efforts"] = {k: {"seconds": v[0], "start_s": v[1], "start_km": round(v[2] / 1000, 3)} for k, v in m.pop("be").items()}
         for k in ("b30", "b45", "b60"):
             if k in m:
                 m[f"best{k[1:]}min_kmh"] = m.pop(k)
@@ -410,6 +415,17 @@ class Rollbook:
             t = top(lambda m, k=k: (m.get("pw") or {}).get(k))
             if t:
                 out[f"best_power_{label}_w"] = t
+        # best efforts by distance: fastest first, and per sport (a ride's 5 km is no run's)
+        for label in ("400", "1k", "5k", "10k", "21k", "42k"):
+            per = {}
+            for aid, m in der.items():
+                v = ((m.get("be") or {}).get(label) or [None])[0]
+                if v:
+                    per.setdefault(info[aid]["type"], []).append((v, aid))
+            res = {typ: [_r({**{k: info[aid][k] for k in ("id", "date", "type", "name")}, "seconds": v})
+                         for v, aid in sorted(vals)[:n]] for typ, vals in sorted(per.items())}
+            if res:
+                out[f"best_effort_{label}_s"] = next(iter(res.values())) if args.get("sport") else res
         if len(der) < len(acts):
             out["note"] = (f"derived records cover {len(der)} of {len(acts)} sessions "
                            "(open `rollbook web` once to fill the metrics cache)")
@@ -463,7 +479,7 @@ TOOLS = [
      _props(**FILTERS, by={"type": "string", "enum": ["week", "month", "year"], "description": "Default month."}),
      Rollbook.t_trend),
     ("records", "Personal bests: top sessions by best 5/10/20/30/45/60-min speed, wind-neutral speed, "
-                "distance, duration, ascent and power.",
+                "distance, duration, ascent and power, and best efforts by distance (fastest 400 m … marathon, per sport).",
      _props(**FILTERS, limit={"type": "integer", "minimum": 1, "maximum": 25, "description": "Per record, default 5."}),
      Rollbook.t_records),
 ]

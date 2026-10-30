@@ -453,6 +453,20 @@ changing `derive()`.
   stays, restorable, until a fresh build); re-uploading that file un-deletes.
   A sport change drops the session's metrics cache entry. The CLI
   (`db query`, `v_activities`) shows the raw, unedited DB.
+* **Best efforts** (#6, `best_effort()` in server.py): the fastest *elapsed*
+  time over 400 m, 1 km, 5 km, 10 km, half and full marathon anywhere in a
+  session (no 400 m for rides, none for virtual rides), in the metrics cache as
+  `be` {label: [s, start t, start m]} and in the list as `be<label>` seconds.
+  Exact, not sampled: time as a function of distance is piecewise linear, so
+  the minimum of T(x + D) − T(x) sits where x or x + D is a sample's distance;
+  a pause starts the window when moving on and ends it at the first arrival.
+  Equal timestamps collapse to the last sample; a window holding a step faster
+  than 30 m/s (a spike) is skipped. Shown on the session page (rank all time,
+  click to select the stretch with its exact time), in Personal records (lower
+  is better, `low` in `RECORD_METRICS`, also for new records after an import),
+  as sortable list columns (first click fastest first), as a Progress trend
+  (per-session speed plus the record progression) and in compare. 400 m / 1 km
+  read slower on 6 s recording than on 1 Hz.
 * **Power** (`power_grid` etc. in server.py): readings go on a 1 s grid,
   each held until the next one for at most 10 s (a paused trainer stops
   recording, so longer gaps are 0 W). From it: best mean power over 5 s,
@@ -593,6 +607,9 @@ The_come_back.gpx   14.040 km | elapsed 40:40 | moving 38:42 | pause 1:58 | HR 1
 ```
 
 Out/back split for `Outdoor_cycle.gpx`: OUT 8.761 km @ 22.53, BACK 9.445 km @ 20.39.
+
+Best efforts (elapsed): `Outdoor_cycle.gpx` 400 m 57.8 s, 1 km 2:27.0, 5 km
+12:50.7, 10 km 27:25.0; `The_come_back.gpx` 54.3 s, 2:19.5, 12:26.0, 27:16.3.
 
 The same ride also exists in the archive as a big-endian FIT
 (`activities/21363091415.fit.gz`) and must yield 18.205 km — cross-format
