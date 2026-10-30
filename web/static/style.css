@@ -116,8 +116,8 @@ select:hover, input:hover { border-color: #555; }
 .iconbtn:hover:not(:disabled) { background: var(--hover); color: var(--text); }
 .iconbtn:disabled { opacity: .35; cursor: default; }
 
-.seg { display: inline-flex; gap: 2px; padding: 3px; background: var(--raised); border-radius: var(--radius-control); }
-.seg button { height: 26px; padding: 0 12px; background: transparent; color: var(--muted); border: 0; border-radius: var(--radius-control);
+.seg { max-width: 100%; overflow-x: auto; scrollbar-width: none; display: inline-flex; gap: 2px; padding: 3px; background: var(--raised); border-radius: var(--radius-control); }
+.seg button { white-space: nowrap; flex: none; height: 26px; padding: 0 12px; background: transparent; color: var(--muted); border: 0; border-radius: var(--radius-control);
   font: inherit; font-size: 12px; font-weight: 500; cursor: pointer; transition: background-color .12s, color .12s; }
 .seg button:hover { color: var(--text); }
 .seg button.on { background: #3a3a3a; color: var(--text); }
@@ -225,6 +225,7 @@ svg.cal rect:hover { stroke: #fff; stroke-width: 1.5; }
 .pill { display: inline-flex; align-items: center; flex: none; height: 20px; padding: 0 8px; border-radius: 999px; font-size: 11px; font-weight: 500;
   background: var(--pill-bg); color: var(--pill-ink); white-space: nowrap; vertical-align: 1px; }
 tr.best td { color: var(--hue); }
+.pill-pr { background: #3a2414; color: #ffb27a; }
 tr.best td.l { color: var(--hue); }
 tr.sel td { background: var(--active) !important; }
 tr.muted td { color: var(--faint); font-size: 12px; }
@@ -377,6 +378,7 @@ body.readonly button.star:not(.on) { display: none; }
 td.pickc, th.pickc { width: 28px; padding-right: 4px; }
 td.pickc input { width: 16px; height: 16px; margin: 0; vertical-align: -3px; cursor: pointer; }
 .cmpbar { display: inline-flex; align-items: center; gap: 10px; margin-left: auto; }
+.cmpbar[hidden] { display: none; }
 .linkbtn { background: none; border: 0; padding: 4px 2px; color: var(--text); font: inherit; font-size: 13px; font-weight: 500; cursor: pointer;
   text-decoration: underline; text-decoration-color: #5a5a5a; text-underline-offset: 3px; }
 .linkbtn:hover { text-decoration-color: var(--text); }

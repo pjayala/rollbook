@@ -62,6 +62,9 @@ GPS: runs, rides, walks, skates, plus indoor rides from ROUVY or MyWhoosh.
   speed-based METs for skating and outdoor rides. Watches and Strava differ
   wildly on this. A **Profile** screen holds your weight, height, birth year
   and heart-rate limits.
+- **Best efforts** by distance (400 m, 1 km, 5 km, 10 km, half, marathon):
+  per session with its rank, in personal records, as list columns and as a
+  trend with the record progression.
 - **Race predictor**, **favorites (star)** for sessions and segments, and
   back/forward navigation.
 - **Import** from the UI: drop in a full Strava export `.zip` or single

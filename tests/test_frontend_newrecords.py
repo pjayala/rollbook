@@ -40,7 +40,7 @@ class NewRecords(unittest.TestCase):
         cls.prelude = "\n".join([
             extract_const(src, "isNum"), extract_const(src, "DAY"),
             "function median(xs) { xs = xs.filter(isNum).sort((a, b) => a - b); if (!xs.length) return null; const m = xs.length >> 1; return xs.length % 2 ? xs[m] : (xs[m - 1] + xs[m]) / 2; }",
-            extract_const(src, "whenOf"), extract_const(src, "cmpWhen"), extract_const(src, "RECORD_METRICS"),
+            extract_const(src, "whenOf"), extract_const(src, "cmpWhen"), extract_const(src, "BE"), extract_const(src, "RECORD_METRICS"),
             extract_const(src, "recRound"), extract_const(src, "NR"),
             extract_function(src, "groupCircuits"), extract_function(src, "newRecords"),
         ])
@@ -62,6 +62,22 @@ class NewRecords(unittest.TestCase):
 
     def recs(self, acts, new_ids, k="best10min_kmh", segs=None):
         return [(r["scope"], r["aid"]) for r in self.run_js(acts, new_ids, segs) if r["k"] == k]
+
+    # ---- best efforts by distance (#6): lower is better
+
+    def test_best_effort_lower_is_better(self):
+        out = self.run_js(olds(be5k=lambda i: 900 + i) + [act(1, 1, be5k=880.0)], [1])
+        self.assertEqual([(r["scope"], r["k"], r["aid"], r["value"], r["prev"], r["type"]) for r in out if r["k"] == "be5k"],
+                         [("all", "be5k", 1, 880.0, 900, SK)])
+
+    def test_best_effort_must_beat_after_rounding(self):
+        base = olds(be5k=lambda i: 900 + i)
+        self.assertEqual(self.recs(base + [act(1, 1, be5k=899.6)], [1], k="be5k"), [])
+        self.assertEqual(self.recs(base + [act(1, 1, be5k=899.4)], [1], k="be5k"), [("all", 1)])
+
+    def test_best_effort_never_on_virtual(self):
+        vr = [act(100 + i, 10 + i, type="Virtual Ride", be5k=600.0 + i) for i in range(5)] + [act(1, 1, type="Virtual Ride", be5k=500.0)]
+        self.assertEqual(self.recs(vr, [1], k="be5k"), [])
 
     # ---- all-time / at the time
 

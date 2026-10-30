@@ -30,6 +30,28 @@ class Fixtures(unittest.TestCase):
         self.assertEqual(f"{c['best30']:.2f}", best30)
         return c
 
+    def efforts(self, name):
+        import server
+        _, c = analyse(os.path.join(SAMPLES, name))
+        return c, {k: server.best_effort(c["_t"], c["_d"], D) for k, D in server.BEST_EFFORTS}
+
+    def test_best_efforts_on_the_fixtures(self):
+        """#6: pinned, and consistent with the splits and the best 30 s."""
+        pins = {"Outdoor_cycle.gpx": {"400": (57.8, 790.0), "1k": (147.0, 741.0), "5k": (770.7, 295.0), "10k": (1645.0, 185.0)},
+                "The_come_back.gpx": {"400": (54.3, 779.0), "1k": (139.5, 756.5), "5k": (746.0, 281.0), "10k": (1636.3, 186.7)}}
+        for name, pin in pins.items():
+            c, be = self.efforts(name)
+            for k, (s, t0) in pin.items():
+                self.assertAlmostEqual(be[k][0], s, places=1, msg=(name, k))
+                self.assertAlmostEqual(be[k][1], t0, delta=1, msg=(name, k))
+            self.assertIsNone(be["21k"]); self.assertIsNone(be["42k"])
+            sp = rb.splits(c)
+            self.assertLessEqual(be["1k"][0], min(x[0] for x in sp) + 1e-6, name)  # no full km split beats it
+            self.assertGreaterEqual(be["400"][0], 400 / (c["best30"] / 3.6) - 1, name)  # 400 m takes > 30 s
+            self.assertGreaterEqual(be["5k"][0], 5 * be["1k"][0])
+            self.assertGreaterEqual(be["10k"][0], 2 * be["5k"][0])
+            self.assertLessEqual(be["10k"][0], c["elapsed"])
+
     def test_outdoor_cycle(self):
         c = self.check("Outdoor_cycle.gpx", "18.206", "55:02", "51:08", "3:54", 145, "25.42")
         ob = rb.outback(c)

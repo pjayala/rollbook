@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.7.0 (2026-10-30)
+
+### Best efforts by distance (#6)
+
+- The fastest time over 400 m, 1 km, 5 km, 10 km, half and full marathon
+  anywhere in each session, exact (not sampled), elapsed time with stops,
+  like Strava's best efforts. None for virtual rides; no 400 m on a bike.
+- On the session page with its all-time rank (click a row to see the stretch
+  on the map and charts), in Personal records, as sortable columns in the
+  session list, in compare, as new records after an import, and as a trend on
+  the Progress page with the record progression.
+- The metrics cache is rebuilt once on the first start (about a minute).
+- The MCP `records` tool lists best efforts per sport, fastest first.
+
 ## 0.6.0 (2026-10-28)
 
 ### Compare two sessions (#16)

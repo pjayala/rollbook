@@ -215,6 +215,7 @@ function cmpMetrics(A, B) {
     kmhe: { n: "Avg speed (with pauses)", get: x => x.kmh_elapsed, dp: 2, u: "km/h", good: 0 },
     pause: { n: "Paused", get: x => x.pause_s, time: 1, good: 0 },
     asc: { n: "Ascent", get: x => x.ascent_m, dp: 0, u: "m", good: 0 },
+    ...Object.fromEntries(BE.map(b => ["be" + b.k, { n: `Best ${b.short || b.n}`, get: x => isVirt(x) ? null : (((x.metrics || {}).be || {})[b.k] || [])[0], time: 1, good: -1 }])),
     w: { n: "Avg power", get: x => pwAvg(x), dp: 0, u: "W", good: 1 },
     np: { n: "Weighted power", get: x => m(x).np, dp: 0, u: "W", good: 1 },
     w20: { n: "Best 20 min power", get: x => (m(x).pw || {})["1200"], dp: 0, u: "W", good: 1 },

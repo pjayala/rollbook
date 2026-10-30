@@ -521,7 +521,7 @@ async function viewProgress() {
   const app = $("#app");
   if (!acts.length) { app.innerHTML = `<p class="muted">No ${esc(S.type)} sessions in this range.</p>`; return; }
   const km = acts.reduce((s, a) => s + (a.km || 0), 0), mv = acts.reduce((s, a) => s + (a.moving_s || 0), 0);
-  const best = (k, xs = acts) => xs.filter(a => isNum(a[k])).reduce((b, a) => !b || a[k] > b[k] ? a : b, null);
+  const best = (k, xs = acts, low) => xs.filter(a => isNum(a[k]) && (!low || a[k] > 0)).reduce((b, a) => !b || (low ? a[k] < b[k] : a[k] > b[k]) ? a : b, null);
   const b10 = best("best10min_kmh"), wn = best("wind_neutral"), lg = best("km");
   const last30 = all.filter(a => a._t >= Date.now() - 30 * DAY), prev30 = all.filter(a => a._t >= Date.now() - 60 * DAY && a._t < Date.now() - 30 * DAY);
   const k30 = last30.reduce((s, a) => s + a.km, 0), kp30 = prev30.reduce((s, a) => s + a.km, 0);
@@ -550,6 +550,7 @@ async function viewProgress() {
       <div class="panel"><h2>Volume per month</h2><div id="c-vol"></div><div class="note" id="vol-note"></div></div>
       <div class="panel"><h2>Energy per month <span class="muted">kcal, Rollbook's per-sport estimate</span></h2><div id="c-kcal"></div>
         <div class="note" id="kcal-note"></div></div>
+      <div class="panel" id="p-be" hidden></div>
       <div class="panel"><h2>Endurance: best sustained speed <span class="muted">30 / 60 min windows</span></h2><div id="c-endu"></div></div>
       <div class="panel"><h2>Average moving speed per session</h2><div id="c-avg"></div>
         <div class="note">Not comparable across 2025-08: the watch sample rate dropped then and inflates moving speed. Use best-10 for long-term form.</div></div>
@@ -623,6 +624,7 @@ async function viewProgress() {
     const tot = acts.reduce((t, a) => t + (a.kcal || 0), 0), src = [...new Set(acts.map(a => (a.kcal_src || "").split(" ")[0]).filter(Boolean))];
     $("#kcal-note").innerHTML = `${f0(tot)} kcal in this range (${f0(tot / 7700)} kg of fat-equivalent). Method: ${esc(src.join(", "))}, from your <a href="#/profile">profile</a> weight.`;
   } else $("#c-kcal").innerHTML = `<p class="muted">Enter your weight in the <a href="#/profile">profile</a> to estimate calories.</p>`;
+  bestEffortsTrend($("#p-be"), all, acts);
   chart($("#c-endu"), {
     x: { type: "time" }, y: { fmt: v => v.toFixed(0), label: "km/h" }, tip: tipAct, onClick: go,
     series: [{ name: "best 30 min", kind: "dot", color: PAL.dim, data: P("b30", acts.filter(a => a.b30 > 5)) },
@@ -697,7 +699,7 @@ async function viewProgress() {
 
   // records
   $("#t-rec").innerHTML = `<table><thead><tr><th>record</th><th>value</th><th class="l">date</th><th>km</th><th class="l">route</th></tr></thead><tbody>` +
-    RECORD_METRICS.filter(m => !m.power || hasPw).map(m => { const a = best(m.k, m.minKm ? acts.filter(a => a.km >= m.minKm) : acts); if (!a) return ""; return `<tr class="click" data-id="${a.id}"><td class="l">${m.n}</td><td>${recFmt(m, a[m.k])} ${m.u}</td><td class="l">${fdate(a._d)}</td><td>${fkm(a.km)}</td><td class="l">${routePill(a.route)}</td></tr>`; }).join("") + `</tbody></table>`;
+    RECORD_METRICS.filter(m => !m.power || hasPw).map(m => { const a = best(m.k, m.minKm ? acts.filter(a => a.km >= m.minKm) : acts, m.low); if (!a) return ""; return `<tr class="click" data-id="${a.id}"><td class="l">${m.n}</td><td>${recFmt(m, a[m.k])}${m.u === "s" ? "" : " " + m.u}</td><td class="l">${fdate(a._d)}</td><td>${fkm(a.km)}</td><td class="l">${routePill(a.route)}</td></tr>`; }).join("") + `</tbody></table>`;
   $("#t-mon").innerHTML = `<table><thead><tr><th>month</th><th>n</th><th>km</th><th>moving</th><th>km/h</th><th>best10 max</th><th>best10 med</th><th>wind-neutral</th><th>HR</th><th>kcal</th></tr></thead><tbody>` +
     mons.slice().reverse().map(m => `<tr><td class="l">${fmon(new Date(m.x))}</td><td>${m.n}</td><td>${fkm(m.km)}</td><td>${hours(m.mv)}</td><td>${f1(m.kmh)}</td><td>${f2(m.b10)}</td><td>${f2(m.b10med)}</td><td>${f2(m.wn)}</td><td>${f0(m.hr)}</td><td>${m.kcal ? f0(m.kcal) : "–"}</td></tr>`).join("") + `</tbody></table>`;
   app.querySelectorAll("tr[data-id]").forEach(tr => tr.onclick = () => go(tr.dataset.id));
@@ -708,6 +710,40 @@ async function viewProgress() {
   circuits($("#p-circ"), acts);
   favPanel($("#p-favs"), all);
   newRecordsPanel($("#p-new"), { dismiss: true });
+}
+
+/** Best efforts over time: one dot per session for the chosen distance (its average
+ * km/h, so up is faster like the other form charts) and the record progression. */
+function bestEffortsTrend(host, all, acts) {
+  const avail = BE.filter(b => all.filter(a => a["be" + b.k] > 0).length >= 3);
+  if (!avail.length || /^Virtual/.test(S.type)) { host.hidden = true; return; }
+  host.hidden = false;
+  let k = avail.some(b => b.k === localStorage.beDist) ? localStorage.beDist : (avail.find(b => b.k === "5k") || avail[0]).k;
+  host.innerHTML = `<div class="toolbar"><h2 style="margin:0">Best efforts <span class="muted">click a dot to open the session</span></h2>
+    <div class="seg" id="be-dist" role="group" aria-label="Distance">${avail.map(b => `<button data-k="${b.k}">${esc(b.short || b.n)}</button>`).join("")}</div></div>
+    <div id="c-be"></div><div class="note" id="be-note"></div>`;
+  const draw = () => {
+    const b = BE.find(x => x.k === k), key = "be" + b.k, kmh = s => b.m / s * 3.6;
+    host.querySelectorAll("#be-dist button").forEach(x => { const on = x.dataset.k === k; x.classList.toggle("on", on); x.setAttribute("aria-pressed", on); });
+    // the record progression runs over all time, then is clipped to the range
+    const prog = [], sorted = all.filter(a => a[key] > 0).slice().sort(cmpWhen);
+    let rec = null;
+    for (const a of sorted) if (rec == null || a[key] < rec) { rec = a[key]; prog.push({ a, s: rec }); }
+    const lo = acts.length ? acts[0]._t : 0, inr = acts.filter(a => a[key] > 0), inSet = new Set(prog.map(p => p.a.id));
+    const before = prog.filter(p => p.a._t < lo).pop(), steps = [...(before ? [{ ...before, x: lo }] : []), ...prog.filter(p => p.a._t >= lo).map(p => ({ ...p, x: p.a._t }))];
+    const line = steps.flatMap((p, i) => i ? [{ x: p.x, y: kmh(steps[i - 1].s) }, { x: p.x, y: kmh(p.s) }] : [{ x: p.x, y: kmh(p.s) }]);
+    if (line.length && acts.length) line.push({ x: acts[acts.length - 1]._t, y: line[line.length - 1].y });
+    chart($("#c-be"), {
+      height: 214, x: { type: "time" }, y: { fmt: v => v.toFixed(0), label: "km/h" }, onClick: go,
+      series: [{ name: `${b.short || b.n} per session`, kind: "dot", color: PAL.hue, r: 3, opacity: .8, data: inr.map(a => ({ x: a._t, y: kmh(a[key]), ref: a.id, color: inSet.has(a.id) ? PAL.ink : null })) },
+        { name: "record", kind: "line", color: PAL.ink, width: 2, data: line }],
+      tip: (x, h, best) => { const a = acts.find(a => a.id === best.p.ref); return a ? `<b>${fdate(a._d)}</b> · ${esc(a.name)}<div class="row"><span>${esc(b.n)}</span><span>${dur(a[key], a[key] >= 3600)} · ${pace(kmh(a[key]))}/km</span></div><div class="row"><span>speed</span><span>${f2(kmh(a[key]))} km/h</span></div>${inSet.has(a.id) ? `<div class="row"><span></span><span>a record when set</span></div>` : ""}` : ""; },
+    });
+    const pr = prog[prog.length - 1];
+    $("#be-note").textContent = `${inr.length} sessions in range reach ${b.n}. Record ${dur(pr.s, pr.s >= 3600)} (${f2(kmh(pr.s))} km/h) on ${fdate(pr.a._d)}; white dots set a record when they happened. Elapsed time, stops included.`;
+  };
+  host.querySelector("#be-dist").onclick = e => { const x = e.target.closest("button"); if (!x) return; k = localStorage.beDist = x.dataset.k; draw(); };
+  draw();
 }
 
 function predictor(host, all) {
@@ -743,6 +779,9 @@ function predictor(host, all) {
  * = never announced as new (kmh_moving isn't comparable across 2025-08, watch
  * climbing runs 2-10x high); speed = speed/distance, meaningless on Virtual sports
  * (simulated gradients). */
+// best efforts by distance (#6): the server's metrics `be` {label: [s, t0, m0]}, list columns be<label> (seconds)
+const BE = [{ k: "400", n: "400 m", m: 400 }, { k: "1k", n: "1 km", m: 1000 }, { k: "5k", n: "5 km", m: 5000 },
+  { k: "10k", n: "10 km", m: 10000 }, { k: "21k", n: "Half marathon", short: "21.1 km", m: 21097.5 }, { k: "42k", n: "Marathon", short: "42.2 km", m: 42195 }];
 const RECORD_METRICS = [
   { k: "best5min_kmh", n: "Best 5 min", u: "km/h", grp: 6, speed: true },
   { k: "best10min_kmh", n: "Best 10 min", u: "km/h", grp: 1, speed: true },
@@ -751,6 +790,7 @@ const RECORD_METRICS = [
   { k: "b60", n: "Best 60 min", u: "km/h", grp: 6, speed: true },
   { k: "wind_neutral", n: "Best wind-neutral 10 min", u: "km/h", grp: 2, speed: true },
   { k: "kmh_moving", n: "Fastest avg (≥10 km)", u: "km/h", minKm: 10, news: false },
+  ...BE.map(b => ({ k: "be" + b.k, n: `Best ${b.short || b.n}`, u: "s", grp: 6, speed: true, low: true })),
   { k: "km", n: "Longest", u: "km", grp: 7, speed: true },
   { k: "moving_s", n: "Longest moving time", u: "", news: false },
   { k: "ascent_m", n: "Most climbing", u: "m", news: false },
@@ -763,7 +803,7 @@ const RECORD_METRICS = [
   { k: "pw60m", n: "Best 60 min power", u: "W", grp: 5, power: true },
   { k: "np", n: "Highest weighted power", u: "W", grp: 5, power: true },
 ];
-const recFmt = (m, v) => m.k === "moving_s" ? dur(v, true) : m.u === "W" ? f0(v) : f2(v);
+const recFmt = (m, v) => m.u === "s" ? dur(v, v >= 3600) : m.k === "moving_s" ? dur(v, true) : m.u === "W" ? f0(v) : f2(v);
 /** A value as shown: a record must still be better after this rounding. */
 const recRound = (u, v) => u === "W" || u === "s" ? Math.round(v) : Math.round(v * 100) / 100;
 const NR = { minPrior: 5, minPriorLap: 3, segMinOthers: 5, thenDays: 30, segPerSession: 2, cap: 10 };
@@ -807,7 +847,7 @@ function newRecords(acts, newIds, segsByType) {
     for (const m of RECORD_METRICS) {
       if (m.news === false || (virtual && m.speed)) continue;
       const items = list.filter(a => isNum(a[m.k]) && a[m.k] > 0).map(a => ({ a, v: a[m.k] }));
-      out.push(...judge({ kind: "metric", k: m.k, n: m.n, u: m.u, grp: m.grp, type }, items, NR.minPrior, false));
+      out.push(...judge({ kind: "metric", k: m.k, n: m.n, u: m.u, grp: m.grp, type }, items, NR.minPrior, !!m.low));
     }
     if (!virtual) for (const c of groupCircuits(list)) {
       const items = c.a.map(a => ({ a, v: a.best_lap_s }));
@@ -1563,7 +1603,9 @@ async function viewSessions() {
     ["name", "name", a => esc(a.name) + (a.hidden ? ` <span class="pill">${a.deleted ? "deleted" : "hidden"}</span>` : ""), "l"], ["km", "km", a => fkm(a.km)],
     ["elapsed_s", "elapsed", a => dur(a.elapsed_s, true)], ["moving_s", "moving", a => dur(a.moving_s, true)], ["pause_s", "paused", a => dur(a.pause_s)],
     ["kmh_moving", "avg km/h", a => f2(a.kmh_moving)], ["pace", "pace /km", a => pace(a.kmh_moving)], ["best10min_kmh", "best 10", a => f2(a.best10min_kmh)],
-    ["b60", "best 60", a => f2(a.b60)], ["wind_neutral", "wind-neutral", a => f2(a.wind_neutral)], ["asym_pct", "out vs back", a => pct(a.asym_pct)],
+    ["b60", "best 60", a => f2(a.b60)],
+    ...BE.filter(b => acts.some(a => a["be" + b.k] > 0)).map(b => ["be" + b.k, b.short || b.n, a => a["be" + b.k] > 0 ? dur(a["be" + b.k], a["be" + b.k] >= 3600) : "–", "", true]),
+    ["wind_neutral", "wind-neutral", a => f2(a.wind_neutral)], ["asym_pct", "out vs back", a => pct(a.asym_pct)],
     ["laps_n", "laps", a => a.laps_n ? `${a.laps_n} × ${f2(a.lap_km)}` : ""], ["best_lap_s", "best lap", a => a.best_lap_s ? dur(a.best_lap_s) : ""],
     ["temp", "°C", a => f0(a.temp)], ["wind", "wind", a => a.cond && isNum(a.cond.ws) ? `${f0(a.cond.ws)} ${windArrow(a.cond.wd)}` : ""],
     ["adj_neutral", "adjusted", a => f2(a.adj_neutral)], ["kcal", "kcal", a => f0(a.kcal)],
@@ -1585,12 +1627,12 @@ async function viewSessions() {
     const val = a => k === "watts" ? pwAvg(a) : k === "pace" ? (a.kmh_moving ? -a.kmh_moving : null) : k === "date" ? a._t : k === "fav" ? (isFav("sessions", a.id) ? 1 : 0) : a[k];
     const favOnly = $("#favonly").checked;
     const rows = acts.filter(a => (a.km || 0) >= mink && (!favOnly || isFav("sessions", a.id)) && (!q || `${a.name} ${a.date} ${a.route} ${a.device}`.toLowerCase().includes(q)))
-      .sort((a, b) => { const x = val(a), y = val(b); if (x == null) return 1; if (y == null) return -1; return (x > y ? 1 : x < y ? -1 : 0) * dir; });
+      .sort((a, b) => { const x = val(a), y = val(b); if (x == null) return y == null ? 0 : 1; if (y == null) return -1; return (x > y ? 1 : x < y ? -1 : 0) * dir; });
     const nh = rows.filter(a => a.hidden).length;
     $("#cnt").textContent = `${rows.length} of ${acts.length} sessions · ${fkm(rows.reduce((s, a) => s + (a.hidden ? 0 : a.km || 0), 0))} km` + (nh ? ` · ${nh} hidden` : "");
     $("#tbl").innerHTML = `<thead><tr>${cols.map(([k, n, , c]) => `<th class="${k === "pick" ? "" : "sort"} ${c || ""} ${S.sort.k === k ? (S.sort.dir > 0 ? "asc" : "desc") : ""}" data-k="${k}">${n}</th>`).join("")}</tr></thead><tbody>` +
       rows.map(a => `<tr class="click${a.hidden ? " hiddenrow" : ""}${pick.includes(a.id) ? " sel" : ""}" data-id="${a.id}">${cols.map(([, , f, c]) => `<td class="${c || ""}">${f(a)}</td>`).join("")}</tr>`).join("") + `</tbody>`;
-    $("#tbl").querySelectorAll("th.sort").forEach(th => th.onclick = () => { const k = th.dataset.k; S.sort = { k, dir: S.sort.k === k ? -S.sort.dir : -1 }; draw(); });
+    $("#tbl").querySelectorAll("th.sort").forEach(th => th.onclick = () => { const k = th.dataset.k; const low = (cols.find(c => c[0] === k) || [])[4] || k === "best_lap_s"; S.sort = { k, dir: S.sort.k === k ? -S.sort.dir : low ? 1 : -1 }; draw(); });
     $("#tbl").querySelectorAll("tr[data-id]").forEach(tr => tr.onclick = e => { if (!e.target.closest(".pickc")) go(tr.dataset.id); });
     $("#tbl").querySelectorAll("input.pick").forEach(cb => cb.onchange = () => { pick = pickToggle(pick, +cb.dataset.pick); savePick(pick); draw(); });
     const shown = new Set(rows.map(a => a.id)), off = pick.filter(id => !shown.has(id)).length;
@@ -1735,6 +1777,7 @@ async function viewSession(id) {
       <div class="panel"><h2>Splits</h2><div class="scroll" id="t-splits"></div></div>
     </div>
     <div class="grid g2 top">
+      ${m.be && Object.keys(m.be).length ? `<div class="panel"><h2>Best efforts <span class="muted">fastest stretch of each distance · click to show it</span></h2><div id="t-be"></div></div>` : ""}
       ${m.route === "out-back" ? `<div class="panel"><h2>Out / back legs</h2><div id="t-legs"></div>
         <div class="note">Wind-neutral averages the two legs' best 10 min. Adjusted first removes each leg's estimated wind and slope effect.</div></div>` : ""}
       ${m.pw ? `<div class="panel"><h2>Power <span class="muted">zones as % of FTP ${f0(ftp)} W (${esc(FT ? FT.note : "none")})</span></h2><div id="p-power"></div></div>` : ""}
@@ -1779,7 +1822,10 @@ async function viewSession(id) {
       if (ser[j][3] && dt <= 60) { hrS += ser[j][3] * dt; hrT += dt; }
       if (ser[j][7] != null && dt <= 60) { pwS += ser[j][7] * dt; pwT += dt; }
     }
-    const km = ser[i1][1] - ser[i0][1], el = ser[i1][0] - ser[i0][0], v = mv ? km / (mv / 3600) : null;
+    // a best effort carries its exact time and distance; the series is downsampled
+    const ex = sel.exact, km = ex ? ex.km : ser[i1][1] - ser[i0][1], el = ex ? ex.el : ser[i1][0] - ser[i0][0];
+    if (ex) mv = Math.min(mv, el);
+    const v = ex ? km / (el / 3600) : mv ? km / (mv / 3600) : null;
     box.hidden = false;
     const row = (k, val) => `<div class="row"><span>${k}</span><span>${val}</span></div>`;
     const eg = ele ? netGrade(i0, i1) : {};
@@ -1791,8 +1837,8 @@ async function viewSession(id) {
       (isNum(eg.net) ? row("elev", `${fnet(eg.net)}${isNum(eg.g) ? ` <span class="muted">(${fgrade(eg.g)})</span>` : ""}`) : "");
     $("#sel-clear").onclick = () => { clearRowSel(); hl.highlightBy(null); };
   };
-  hl.highlightBy = (col, lo, hi, fit) => { sel = lo == null ? null : { col, lo, hi }; mapHighlightBy(col, lo, hi, fit); paintSel(); };
-  const clearRowSel = () => { selKm = null; document.querySelectorAll("#t-splits tr.sel, #t-legs tr.sel, #t-laps tr.sel").forEach(tr => tr.classList.remove("sel")); };
+  hl.highlightBy = (col, lo, hi, fit, exact) => { sel = lo == null ? null : { col, lo, hi, exact }; mapHighlightBy(col, lo, hi, fit); paintSel(); };
+  const clearRowSel = () => { selKm = null; document.querySelectorAll("#t-splits tr.sel, #t-legs tr.sel, #t-laps tr.sel, #t-be tr.sel").forEach(tr => tr.classList.remove("sel")); };
 
   // Elevation for display: a 7-sample median removes dropouts (some FIT files
   // write 0 m for a sample), then a +-15 s mean takes out barometer jitter.
@@ -1979,6 +2025,29 @@ async function viewSession(id) {
       const end = ser.length ? ser[ser.length - 1][1] : a.km;
       selLeg ? hl.highlightBy(1, selLeg === "out" ? 0 : m.turn_km, selLeg === "out" ? m.turn_km : end, false) : hl.highlightBy(1, null);
       $("#t-legs").querySelectorAll("tr[data-leg]").forEach(r => r.classList.toggle("sel", r.dataset.leg === selLeg));
+    });
+  }
+  if ($("#t-be")) {
+    // rank against every (non-hidden) session of the sport, all time
+    const me = String(a.id), rows = BE.filter(b => m.be[b.k]).map(b => {
+      const [secs, t0, m0] = m.be[b.k], key = "be" + b.k;
+      const others = peers.filter(p => String(p.id) !== me && p[key] > 0).map(p => p[key]).sort((x, y) => x - y);
+      const r = Math.round(secs), rank = others.filter(v => Math.round(v) < r).length + 1;
+      const vs = a.hidden ? null : rank === 1 ? (others.length ? Math.round(others[0]) - r : null) : r - Math.round(others[0]);
+      return { b, secs, t0, m0, rank, of: others.length + 1, vs };
+    });
+    let selBe = null;
+    $("#t-be").innerHTML = `<table><thead><tr><th>distance</th><th>time</th><th>pace</th><th>km/h</th><th>rank</th><th>vs the best</th></tr></thead><tbody>` +
+      rows.map(x => `<tr class="click" data-be="${x.b.k}"><td class="l">${esc(x.b.n)}</td><td>${dur(x.secs, x.secs >= 3600)}</td><td>${pace(x.b.m / x.secs * 3.6)}</td><td>${f2(x.b.m / x.secs * 3.6)}</td>
+        <td>${a.hidden ? `<span class="muted">hidden</span>` : x.rank === 1 && x.of > 1 ? `<span class="pill pill-pr">best</span>` : `${x.rank} <span class="muted">of ${x.of}</span>`}</td>
+        <td class="muted">${x.vs == null ? "–" : x.rank === 1 ? (x.vs ? `${dur(x.vs)} ahead of 2nd` : "tied") : `+${dur(x.vs)}`}</td></tr>`).join("") + `</tbody></table>` +
+      `<div class="note">Elapsed time over the distance, stops included, anywhere in the session. ${a.km_diff_pct != null && Math.abs(a.km_diff_pct) > 10 ? "This track disagrees with Strava's distance by over 10%, so treat these with care. " : ""}Short efforts (400 m, 1 km) read slower on 6-second recording (since 2025-08) than on 1-second.</div>`;
+    $("#t-be").querySelectorAll("tr[data-be]").forEach(tr => tr.onclick = () => {
+      const x = rows.find(r => r.b.k === tr.dataset.be);
+      selBe = selBe === x.b.k ? null : x.b.k;
+      clearRowSel();
+      selBe ? hl.highlightBy(1, x.m0 / 1000, (x.m0 + x.b.m) / 1000, true, { el: x.secs, km: x.b.m / 1000 }) : hl.highlightBy(1, null);
+      tr.classList.toggle("sel", !!selBe);
     });
   }
   if (m.pw) {

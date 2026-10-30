@@ -62,6 +62,96 @@ class Tracks(unittest.TestCase):
         d = [i * 5.0 if i < 600 else 3000 + (i - 600) * 7.0 for i in t]  # 18 then 25.2 km/h
         self.assertAlmostEqual(server.best_window(t, d, 0, len(t) - 1, 600), 25.2, places=1)
 
+    # ---- best efforts by distance (#6)
+
+    def test_best_effort_constant_speed(self):
+        t = list(range(0, 1001)); d = [5.0 * x for x in t]
+        self.assertEqual(server.best_effort(t, d, 400), (80.0, 0.0, 0.0))
+        self.assertEqual(server.best_effort(t, d, 1000)[0], 200.0)
+        self.assertEqual(server.best_effort(t, d, 5000), (1000.0, 0.0, 0.0))  # exactly the whole track
+        self.assertIsNone(server.best_effort(t, d, 10000))
+
+    def test_best_effort_finds_the_fast_stretch(self):
+        t = list(range(0, 1201))
+        d = [i * 5.0 if i < 600 else 3000 + (i - 600) * 7.0 for i in t]
+        s, t0, _ = server.best_effort(t, d, 400)
+        self.assertAlmostEqual(s, 57.1, places=1)
+        self.assertEqual(t0, 600.0)  # the earliest of the equally fast windows
+        self.assertAlmostEqual(server.best_effort(t, d, 1000)[0], 142.9, places=1)
+        self.assertEqual(server.best_effort(t, d, 5000), (760.0, 440.0, 2200.0))
+
+    def pause_track(self, fast=5.0, until=300):
+        t, d = [], []
+        for x in range(0, until + 1):
+            t.append(x)
+            d.append(5.0 * x if x <= 100 else 500.0 if x <= 160 else 500 + fast * (x - 160))
+        return t, d
+
+    def test_best_effort_counts_a_pause_inside(self):
+        t, d = self.pause_track()
+        self.assertEqual(server.best_effort(t, d, 1000)[0], 260.0)  # every 1 km window holds the 60 s stop
+
+    def test_best_effort_starts_when_moving_on_after_a_pause(self):
+        t, d = self.pause_track(fast=10.0, until=230)
+        self.assertEqual(server.best_effort(t, d, 400), (40.0, 160.0, 500.0))
+        self.assertEqual(server.best_effort(t, d, 1000), (190.0, 40.0, 200.0))
+
+    def test_best_effort_ends_at_the_first_arrival(self):
+        t = list(range(0, 201))
+        d = [2.5 * x if x <= 40 else 100 + 10.0 * (x - 40) if x <= 70 else 400.0 if x <= 130 else 400 + 2.5 * (x - 130) for x in t]
+        self.assertEqual(server.best_effort(t, d, 400), (70.0, 0.0, 0.0))  # reaches 400 m at 70 s, not 130
+
+    def test_best_effort_float_total(self):
+        t = [0, 1000, 2000]; d = [0.0, 5000.0, 10000 - 1e-9]  # Strava's 10.000 km, scaled with float error
+        self.assertEqual(server.best_effort(t, d, 10000)[0], 2000.0)
+        self.assertIsNone(server.best_effort(t, d, 10001))
+
+    def test_best_effort_ignores_distance_in_zero_time(self):
+        r = server.best_effort([0, 10, 10, 20], [0.0, 100.0, 200.0, 300.0], 100)
+        self.assertGreater(r[0], 0)
+        self.assertAlmostEqual(r[0], 5.0)  # collapsed to (0, 0) (10, 200) (20, 300): 20 m/s first, so 5 s
+
+    def test_best_effort_skips_a_spike(self):
+        t = list(range(0, 301)); d = [5.0 * x for x in t]
+        d = [v + (40.0 if x >= 150 else 0) for x, v in zip(t, d)]  # one 45 m step in 1 s
+        s, t0, _ = server.best_effort(t, d, 400)
+        self.assertEqual(s, 80.0)
+        self.assertTrue(t0 + s <= 149 or t0 >= 150)
+
+    def test_best_effort_matches_an_oracle(self):
+        import bisect
+        import random
+        rnd = random.Random(6)
+        for _ in range(20):
+            t, d, now, dist = [], [], 0, 0.0
+            for _ in range(300):
+                t.append(now); d.append(dist)
+                now += rnd.choice([1, 1, 2, 3, 7])
+                dist += rnd.choice([0, 0, 3, 5, 6, 9, 14]) * (now - t[-1])
+            for D in (400, 1000, 2000):
+                got = server.best_effort(t, d, D)
+                if dist < D:
+                    self.assertIsNone(got)
+                    continue
+
+                def f(x):  # leave x as late as possible, reach x + D as early as possible
+                    i = bisect.bisect_right(d, x) - 1
+                    t0 = t[-1] if i >= len(d) - 1 else t[i] + (x - d[i]) / (d[i + 1] - d[i]) * (t[i + 1] - t[i])
+                    j = bisect.bisect_left(d, x + D)
+                    t1 = t[0] if j == 0 else t[-1] if j >= len(d) else t[j - 1] + (x + D - d[j - 1]) / (d[j] - d[j - 1]) * (t[j] - t[j - 1])
+                    return t1 - t0
+                xs = [x for x in d if x <= d[-1] - D] + [y - D for y in d if y - D >= 0]
+                self.assertAlmostEqual(got[0], round(min(f(x) for x in xs), 1), places=6)
+                for _ in range(100):
+                    self.assertGreaterEqual(f(rnd.uniform(0, d[-1] - D)) + 0.05, got[0])
+                if D == 2000:
+                    self.assertGreaterEqual(got[0] + 0.1, 2 * server.best_effort(t, d, 1000)[0])  # superadditive
+
+    def test_best_efforts_per_sport(self):
+        t = list(range(0, 2001)); d = [5.0 * x for x in t]
+        self.assertEqual(set(server.best_efforts(t, d, "Run")), {"400", "1k", "5k", "10k"})
+        self.assertNotIn("400", server.best_efforts(t, d, "Ride"))
+
     def test_power_grid_and_bests(self):
         # 10 min at 200 W, then 5 min at 300 W, sampled every 2 s, then a 60 s pause
         rows = [(t, None, None, None, None, None, t * 5.0, 200 if t < 600 else 300) for t in range(0, 900, 2)]
