@@ -57,6 +57,11 @@ GPS: runs, rides, walks, skates, plus indoor rides from ROUVY or MyWhoosh.
   per session and per month, intensity and training load against your FTP
   (from the profile, from ROUVY's files, or estimated), cadence, watts per
   heartbeat, and a power chart per session.
+- **Gear:** skates, bikes and shoes made of parts (wheels, frame, boots,
+  bearings, tyres, chain…) with their specs. Km and time per gear and per
+  part, counted only for the days a part was fitted, so swapped or rotated
+  wheels keep the right history. A default gear per sport for new sessions,
+  any session's gear changeable, and service reminders per part.
 - **Calories:** Rollbook's own per-sport estimate, from measured power for
   indoor rides, the ACSM equations for running and walking, and
   speed-based METs for skating and outdoor rides. Watches and Strava differ
@@ -104,6 +109,9 @@ GPS: runs, rides, walks, skates, plus indoor rides from ROUVY or MyWhoosh.
 
 <p align="center"><img src="docs/screenshots/compare.png" alt="Two sessions compared: time gap by distance, speed and heart rate, map replay"></p>
 <p align="center"><sub>Two sessions compared: who was ahead where, with a replay</sub></p>
+
+<p align="center"><img src="docs/screenshots/gear.png" alt="Gear page: gear with km and time, parts with their service state"></p>
+<p align="center"><sub>Gear and parts, with service reminders</sub></p>
 
 <p align="center"><sub>The screenshots show a synthetic demo athlete (<code>tools/demo.py</code>), offline, so
 there is no basemap. Normally you see OpenStreetMap underneath.</sub></p>
