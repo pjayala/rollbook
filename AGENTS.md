@@ -430,7 +430,13 @@ changing `derive()`.
   follow a replaced session like edits (`edits.reattach`, importer
   `_remap_all`). The page uses `Map`s for anything keyed by id or sport;
   every user string goes through `esc()`; write controls carry `.gear-w`
-  (hidden read-only). Reminder badge: `#gear-badge`.
+  (hidden read-only). Reminder badge: `#gear-badge`. Gear page / detail
+  views: `gearCompare()` (by gear for one sport: `best10min_kmh`, or
+  `pw20m` for Virtual, never `kmh_moving`; per-heartbeat only with ≥ 3 HR
+  sessions), `timelineRows()` (fittings as % bars over [first fitting,
+  today]), monthly km from the server (`totals.gear[id].months`), first-run
+  rows from `/api/types`; pure helpers are tested under node in
+  `tests/test_frontend_gear.py`.
 * **Favorites** (star toggle on sessions and segments, "favorites only" filters,
   a Favorites panel on the progress page) live in `data/favorites.json`,
   server-side so the app window and browser tabs share them. Starred

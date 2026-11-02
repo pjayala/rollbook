@@ -241,6 +241,19 @@ td.acts, td.svccell { white-space: nowrap; }
 fieldset.pfield { border: 0; margin: 0; padding: 0; min-width: 0; }
 fieldset.pfield > legend { float: left; width: 150px; padding: 0; color: var(--muted); font-size: 13px; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+/* gear: parts timeline (rows of bars over [first fitting, today]) */
+.gtl { display: grid; gap: 6px; margin: 4px 0 10px; }
+.gtl-row { display: grid; grid-template-columns: 220px 1fr; align-items: center; gap: 12px; min-height: 24px; }
+.gtl-k { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gtl-track { position: relative; height: 18px; border-radius: 4px; background: var(--raised); }
+.gtl-bar { position: absolute; top: 0; bottom: 0; border-radius: 4px; background: #5a5a5a; }
+.gtl-bar.on { background: var(--hue); }
+.gtl-tick { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--text); box-shadow: 0 0 0 1px var(--ground); }
+.gtl-tick.gtl-rotate { background: #ffb27a; } .gtl-tick.gtl-replace { background: var(--negative); }
+.gtl-axis .gtl-track { background: none; height: 16px; }
+.gtl-axis .gtl-track span { position: absolute; top: 0; transform: translateX(-50%); }
+.gtl-axis .gtl-track span:first-child { transform: none; }
+.gtl-axis .gtl-end { right: 0; left: auto; transform: none; }
 dialog.dlg form .subhead { margin: 6px 0 0; }
 .navbadge { margin-left: auto; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; font-size: 11px; line-height: 18px; text-align: center;
   background: #2c1a1c; color: var(--negative); font-weight: 600; }
@@ -363,10 +376,13 @@ body.readonly button.star:not(.on) { display: none; }
   /* gear tables: drop the secondary columns, let the identity cell wrap */
   table.gparts .svc { display: none; }  /* the coloured text says it */
   table.gp-main td:nth-child(4), table.gp-main th:nth-child(4),
-  table.gparts td:nth-child(2), table.gparts th:nth-child(2), table.gtbl td:nth-child(3), table.gtbl th:nth-child(3),
+  table.gp-main td:nth-child(2), table.gp-main th:nth-child(2),
+  table.gp-one td:nth-child(3), table.gp-one th:nth-child(3), table.gtbl td:nth-child(3), table.gtbl th:nth-child(3),
   table.gtbl td:nth-child(5), table.gtbl th:nth-child(5) { display: none; }
   table.gparts td.l:not(.acts):not(.svccell), table.gtbl td.l { white-space: normal; }
   fieldset.pfield > legend { float: none; width: auto; }
+  .gtl-row { grid-template-columns: 110px 1fr; gap: 8px; }
+  .gtl-axis .gtl-track span:not(:first-child):not(.gtl-end) { display: none; }
   .nav a, .user { flex: 1; flex-direction: column; justify-content: center; gap: 3px; width: auto; height: auto; padding: 0; border-radius: 12px; background: transparent !important; }
   .nav a span { display: block; font-size: 11px; line-height: 14px; }
   .nav a.on { color: var(--text); }

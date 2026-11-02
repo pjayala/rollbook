@@ -2,6 +2,18 @@
 
 ## 0.8.0 (2026-11-02)
 
+### Gear pages (#10, part 2)
+
+- A gear's page shows its **parts over time** (when each was fitted and
+  removed, with service, rotation and replacement marks), km per month, its
+  best 10 min (best 20 min power indoors) against your other gear of that
+  sport, and its service log.
+- The Gear page compares the selected sport's gear side by side: sessions,
+  km, median and best best-10-min, and speed per heartbeat where there is
+  heart rate.
+- No gear yet? The page lists your sports with their sessions and km; one
+  click creates gear for a sport as its default from the first session.
+
 ### Gear (#10, part 1)
 
 - A **Gear** page: your skates, bikes and shoes, made of parts (wheels,

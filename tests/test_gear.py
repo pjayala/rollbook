@@ -109,6 +109,7 @@ class Store(unittest.TestCase):
         v = self.view()
         t = dict(v["totals"]["gear"][gid])
         recent = t.pop("recent")
+        self.assertEqual(t.pop("months"), {"2026-01": [20.0, 1], "2026-02": [30.0, 1], "2026-03": [25.0, 1]})
         self.assertEqual(t, {"sessions": 3, "km": 75.0, "moving_s": 11500, "first": "2026-01-05", "last": "2026-03-05"})
         self.assertEqual([(r["id"], r["src"]) for r in recent], [(3, "default"), (2, "default"), (1, "default")])
         t = v["totals"]["parts"][wid]
@@ -298,6 +299,19 @@ class Store(unittest.TestCase):
             with self.assertRaises(OSError):
                 self.op(op="gear.save", name="x", sports=[SK])
         self.assertEqual(self.g.data, before)
+
+    def test_index_ops_check_the_row(self):
+        gid, wid = self.skates()
+        self.op(op="part.service", id=wid, date="2026-02-01", action="rotate", note="")
+        self.op(op="part.service", id=wid, date="2026-01-10", action="service", note="")  # sorts before: indices shift
+        with self.assertRaises(gear.Conflict):  # the page still thinks index 0 is the rotation
+            self.op(op="part.service", id=wid, delete=0, date="2026-02-01", action="rotate")
+        self.assertEqual(len(self.g.data["parts"][wid]["services"]), 2)
+        self.op(op="part.service", id=wid, delete=1, date="2026-02-01", action="rotate")
+        self.assertEqual([v["action"] for v in self.g.data["parts"][wid]["services"]], ["service"])
+        with self.assertRaises(gear.Conflict):
+            self.op(op="mount.delete", gear=gid, index=0, part="f" * 16)
+        self.op(op="mount.delete", gear=gid, index=0, part=wid)
 
     def test_untrusted_file_shapes_never_crash(self):
         path = os.path.join(self.home, "gear.json")
