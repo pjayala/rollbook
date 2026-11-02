@@ -25,10 +25,11 @@ from the Strava export's profile.csv (name, sex, weight).
 import bisect
 import csv
 import glob
-import json
 import os
 import threading
 import time
+
+import store
 
 EFF_POWER = 0.24
 KCAL_PER_L_O2 = 5.0
@@ -139,11 +140,7 @@ class Profile:
     def __init__(self, home):
         self.path = os.path.join(home, "profile.json")
         self.home, self.lock = home, threading.Lock()
-        try:
-            with open(self.path) as f:
-                self.data = json.load(f)
-        except (OSError, ValueError):
-            self.data = {}
+        self.data = store.load_object(self.path) or {}
         if not self.data:
             self.data = self._from_export()
 
@@ -197,9 +194,6 @@ class Profile:
                     raise ValueError(f"{k}: must be between {lo} and {hi}")
             clean[k] = v
         with self.lock:
+            store.write_json(self.path, clean)
             self.data = clean
-            tmp = self.path + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(clean, f, indent=1)
-            os.replace(tmp, self.path)
         return self.get()

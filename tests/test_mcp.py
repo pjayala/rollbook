@@ -48,6 +48,18 @@ class MCP(unittest.TestCase):
         text = res["content"][0]["text"]
         return json.loads(text) if ok else text
 
+    def test_profile_hr_max_file_not_an_object(self):
+        path = os.path.join(self.home, "profile.json")
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        db_max = self.srv.rb.hrmax() if not os.path.exists(path) else None
+        for raw in ("[]", '"x"', '{"hr_max": "190"}', '{"hr_max": NaN}', "{bad"):
+            with open(path, "w") as f:
+                f.write(raw)
+            self.assertEqual(self.srv.rb.hrmax(), db_max, raw)  # falls back to the recorded max
+        with open(path, "w") as f:
+            f.write('{"hr_max": 188}')
+        self.assertEqual(self.srv.rb.hrmax(), 188)
+
     # ------------------------------------------------------------ protocol
 
     def test_initialize_negotiates_version(self):

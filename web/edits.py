@@ -17,6 +17,14 @@ Every server connection gets the edits as a TEMP table plus two TEMP views:
 
 "Delete" = hide, plus optionally removing the stored import file and its row
 in imports/activities.csv. The DB row stays until the next fresh build.
+
+An import can replace a session with a copy under another id (an uploaded
+file, later the export's copy with Strava's id: `db build` dedup). The
+dashboard importer hands the edit over (`remap`); for builds outside it
+(CLI `db build`, `strava sync`) each edit keeps the session's `start`, and an
+edit whose id is gone re-attaches to the one session starting within 120 s
+that has no edit of its own. That happens in memory and is saved with the
+next edit: a GET never writes.
 """
 
 import csv
@@ -29,9 +37,13 @@ import sqlite3
 import threading
 import time
 
+import store
+
 NAME_MAX = 200
 TYPE_MAX = 40
 OVERRIDES = ("name", "type")
+REATTACH_S = 120  # same window as the importer's / `db build`'s dedup
+META = ("updated", "start")  # bookkeeping keys: an edit with only these is no edit
 _VERSIONS = itertools.count(1)  # process-wide, so two stores never share a version
 
 
@@ -58,16 +70,12 @@ class Edits:
         self.home = home
         self.path = os.path.join(home, "edits.json") if home else None
         self.lock = threading.Lock()
-        self.data = {}
-        if self.path:
-            try:
-                with open(self.path, encoding="utf-8") as f:
-                    self.data = json.load(f)
-            except (OSError, ValueError):
-                self.data = {}
-        if not isinstance(self.data.get("sessions"), dict):
-            self.data["sessions"] = {}
+        self.data = (store.load_object(self.path) if self.path else None) or {}
+        sess = self.data.get("sessions")
+        self.data["sessions"] = {k: v for k, v in sess.items() if isinstance(v, dict)} \
+            if isinstance(sess, dict) else {}
         self.version = next(_VERSIONS)
+        self._dbsig = None
 
     # ------------------------------------------------------------ read
 
@@ -83,6 +91,7 @@ class Edits:
 
     def sync(self, db):
         """Install / refresh the TEMP overlay on one connection (cheap when current)."""
+        self._reconcile(db)
         try:
             v, ncols = db.execute("SELECT v, ncols FROM temp.rollbook_edits_v").fetchone()
         except sqlite3.OperationalError:
@@ -109,6 +118,65 @@ class Edits:
         db.executemany("INSERT INTO temp.rollbook_edits VALUES (?,?,?,?,?)", rows)
         db.execute("UPDATE temp.rollbook_edits_v SET v=?", (ver,))
         db.commit()
+
+    def _reconcile(self, db):
+        """After the DB changed: move edits of vanished ids to their replacement
+        (see the module doc) and note the start of edits made before `start`
+        was kept. In memory only; the next save writes it."""
+        try:
+            sig = db.execute("SELECT count(*), total(id), max(id) FROM main.activities").fetchone()
+        except sqlite3.Error:
+            return
+        if sig == self._dbsig:
+            return
+        try:
+            rows = db.execute("SELECT id, datetime, julianday(datetime) FROM main.activities").fetchall()
+        except sqlite3.Error:  # a DB without start times: nothing to match on
+            self._dbsig = sig
+            return
+        jd = {r[0]: r[2] for r in rows}
+        dt = {r[0]: r[1] for r in rows}
+        with self.lock:
+            self._dbsig = sig
+            sess = self.data["sessions"]
+            moved = False
+            for k, e in sess.items():
+                if k.isdigit() and int(k) in dt and isinstance(dt[int(k)], str) and "start" not in e:
+                    e["start"] = dt[int(k)]
+            orphans = [k for k, e in sess.items() if k.isdigit() and int(k) not in jd
+                       and isinstance(e.get("start"), str) and not e.get("file_removed")]
+            if orphans:
+                taken = {int(k) for k in sess if k.isdigit()}
+                for k in orphans:
+                    t = db.execute("SELECT julianday(?)", (sess[k]["start"],)).fetchone()[0]
+                    if t is None:
+                        continue
+                    near = [i for i, ti in jd.items()
+                            if ti is not None and i not in taken and abs(ti - t) * 86400 < REATTACH_S]
+                    if len(near) == 1:  # ambiguous = leave it where it is
+                        sess[str(near[0])] = sess.pop(k)
+                        taken.add(near[0])
+                        moved = True
+            if moved:
+                self.version = next(_VERSIONS)
+
+    def remap(self, mapping):
+        """{old id: new id} from an import that replaced sessions: edits follow."""
+        with self.lock:
+            sess = self.data["sessions"]
+            prev = dict(sess)
+            moved = False
+            for old, new in mapping.items():
+                e = sess.get(str(old))
+                if e is not None and str(new) not in sess and not e.get("file_removed"):
+                    sess[str(new)] = sess.pop(str(old))
+                    moved = True
+            if moved:
+                try:
+                    self._save()
+                except OSError:
+                    self.data["sessions"] = prev
+                    raise
 
     @staticmethod
     def _ncols(db):
@@ -144,7 +212,8 @@ class Edits:
         """
         if not isinstance(body, dict):
             raise ValueError("expected a JSON object")
-        row = db.execute("SELECT name, type, filename FROM main.activities WHERE id=?", (aid,)).fetchone()
+        row = db.execute("SELECT name, type, filename, datetime FROM main.activities WHERE id=?",
+                         (aid,)).fetchone()
         if row is None:
             raise KeyError(aid)
         orig = {"name": row[0], "type": row[1]}
@@ -179,13 +248,24 @@ class Edits:
             if remove:
                 self._remove_file(remove, row[2])
                 cur["file_removed"] = True
-            cur.pop("updated", None)
+            for k in META:
+                cur.pop(k, None)
+            prev = self.data["sessions"].get(str(aid))
             if cur:
                 cur["updated"] = time.strftime("%Y-%m-%d")
+                if isinstance(row[3], str):
+                    cur["start"] = row[3]
                 self.data["sessions"][str(aid)] = cur
             else:
                 self.data["sessions"].pop(str(aid), None)
-            self._save()
+            try:
+                self._save()
+            except OSError:
+                if prev is None:
+                    self.data["sessions"].pop(str(aid), None)
+                else:
+                    self.data["sessions"][str(aid)] = prev
+                raise
             return dict(cur), cur.get("type") != before
 
     def forget_removed(self, rel):
@@ -197,7 +277,7 @@ class Edits:
                 return
             for k in ("hidden", "deleted", "file_removed"):
                 cur.pop(k, None)
-            if not set(cur) - {"updated"}:
+            if not set(cur) - set(META):
                 self.data["sessions"].pop(key)
             self._save()
 
@@ -228,10 +308,6 @@ class Edits:
 
     def _save(self):
         """Caller holds the lock."""
+        if self.path:
+            store.write_json(self.path, self.data)
         self.version = next(_VERSIONS)
-        if not self.path:
-            return
-        tmp = self.path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(self.data, f, indent=1, ensure_ascii=False)
-        os.replace(tmp, self.path)

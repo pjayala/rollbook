@@ -19,6 +19,7 @@ from test_end_to_end import make_export, run
 
 import lastimport
 import server
+import store
 
 
 class Store(unittest.TestCase):
@@ -135,8 +136,8 @@ class Store(unittest.TestCase):
         s.record([1], ["a"])
         with open(self.path, "rb") as f:
             before = f.read()
-        with mock.patch.object(lastimport.os, "replace", side_effect=OSError("locked")), \
-                mock.patch.object(lastimport.time, "sleep"):
+        with mock.patch.object(store.os, "replace", side_effect=OSError("locked")), \
+                mock.patch.object(store.time, "sleep"):
             d = s.record([2], ["b"])  # must not raise
         self.assertEqual(d["new_ids"], [1, 2])
         with open(self.path, "rb") as f:

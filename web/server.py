@@ -28,6 +28,7 @@ import socket
 import sqlite3
 import ssl
 import statistics
+import store
 import strava_web
 import sys
 import threading
@@ -857,13 +858,10 @@ class Favorites:
 
     def __init__(self, path):
         self.path, self.lock = path, threading.Lock()
-        try:
-            with open(path) as f:
-                self.data = json.load(f)
-        except (OSError, ValueError):
-            self.data = {}
-        self.data.setdefault("sessions", {})
-        self.data.setdefault("segments", {})
+        self.data = store.load_object(path) or {}
+        for k in ("sessions", "segments"):
+            b = self.data.get(k)
+            self.data[k] = {i: v for i, v in b.items() if isinstance(v, dict)} if isinstance(b, dict) else {}
 
     def get(self):
         with self.lock:
@@ -873,17 +871,17 @@ class Favorites:
         if kind not in ("sessions", "segments") or not re.fullmatch(r"[0-9a-zA-Z]{1,24}", str(key)):
             raise ValueError("bad favorite")
         with self.lock:
-            bucket = self.data[kind]
+            data = json.loads(json.dumps(self.data))
+            bucket = data[kind]
             if on:
-                m = {k: v for k, v in (meta or {}).items() if k in ("type", "start", "end", "m")}
+                m = {k: v for k, v in (meta if isinstance(meta, dict) else {}).items()
+                     if k in ("type", "start", "end", "m")}
                 bucket[str(key)] = {"added": time.strftime("%Y-%m-%d"), **m}
             else:
                 bucket.pop(str(key), None)
-            tmp = self.path + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(self.data, f, indent=1)
-            os.replace(tmp, self.path)
-            return json.loads(json.dumps(self.data))
+            store.write_json(self.path, data)  # memory changes only once it is on disk
+            self.data = data
+            return json.loads(json.dumps(data))
 
 
 def api_segments(db, q, M):
@@ -1373,6 +1371,27 @@ def make_handler(db_path, M, tiles, lan=None):
                 self.close_connection = True
             return self.send(code, body, ctype)
 
+        def _read_json(self, limit=65536):
+            """The request body as a JSON object, or None after answering 400/413.
+            The body is read whole or not at all (a refused one is drained, or the
+            connection closed), so keep-alive never parses its tail as a request."""
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                n = -1
+            if not 0 <= n <= limit:
+                self._reject(413 if n > limit else 400, json.dumps({"error": f"body must be 0-{limit} bytes"}))
+                return None
+            try:
+                b = store.loads(self.rfile.read(n) or b"{}")
+            except (ValueError, RecursionError) as e:  # bad JSON / UTF-8, NaN, [[[[...
+                self.json({"error": f"bad JSON: {type(e).__name__}"}, 400)
+                return None
+            if not isinstance(b, dict):
+                self.json({"error": "expected a JSON object"}, 400)
+                return None
+            return b
+
         def do_POST(self):
             u = urllib.parse.urlparse(self.path)
             q = {k: v[-1] for k, v in urllib.parse.parse_qs(u.query).items()}
@@ -1394,18 +1413,23 @@ def make_handler(db_path, M, tiles, lan=None):
             if u.path == "/api/profile":
                 if not self._same_origin() or self.headers.get("X-Rollbook") != "1":
                     return self._reject(403, json.dumps({"error": "forbidden"}))
+                b = self._read_json()
+                if b is None:
+                    return
                 try:
-                    n = int(self.headers.get("Content-Length") or 0)
-                    return self.json(clean(PROFILE.set(json.loads(self.rfile.read(min(n, 65536)) or b"{}"))))
+                    return self.json(clean(PROFILE.set(b)))
                 except (ValueError, TypeError, AttributeError) as e:
                     return self.json({"error": str(e)}, 400)
+                except OSError as e:
+                    return self.json({"error": f"profile not saved: {e}"}, 500)
             if u.path == "/api/edit":
                 if not self._same_origin() or self.headers.get("X-Rollbook") != "1":
                     return self._reject(403, json.dumps({"error": "forbidden"}))
+                b = self._read_json()
+                if b is None:
+                    return
                 try:
-                    n = int(self.headers.get("Content-Length") or 0)
-                    b = json.loads(self.rfile.read(min(n, 65536)) or b"{}")
-                    aid = b.get("id") if isinstance(b, dict) else None
+                    aid = b.get("id")
                     if not re.fullmatch(r"\d{1,20}", str(aid)):
                         raise ValueError("bad id")
                     e, type_changed = EDITS.update(dbc(), int(aid), b)
@@ -1421,27 +1445,21 @@ def make_handler(db_path, M, tiles, lan=None):
             if u.path == "/api/favorites":
                 if not self._same_origin() or self.headers.get("X-Rollbook") != "1":
                     return self._reject(403, json.dumps({"error": "forbidden"}))
+                b = self._read_json()
+                if b is None:
+                    return
                 try:
-                    n = int(self.headers.get("Content-Length") or 0)
-                    b = json.loads(self.rfile.read(min(n, 65536)) or b"{}")
                     return self.json(FAVS.set(b.get("kind"), b.get("id"), bool(b.get("on")), b.get("meta")))
                 except (ValueError, TypeError) as e:
                     return self.json({"error": str(e)}, 400)
+                except OSError as e:
+                    return self.json({"error": f"favorites not saved: {e}"}, 500)
             if u.path == "/api/last_import/dismiss":  # POST only: viewing never dismisses
                 if not self._same_origin() or self.headers.get("X-Rollbook") != "1":
                     return self._reject(403, json.dumps({"error": "forbidden"}))
-                try:
-                    n = int(self.headers.get("Content-Length") or 0)
-                except ValueError:
-                    n = -1
-                if not 0 <= n <= 4096:  # drained or closed by _reject: the connection stays sane
-                    return self._reject(413 if n > 0 else 400, json.dumps({"error": "body must be 0-4096 bytes"}))
-                try:
-                    b = json.loads(self.rfile.read(n) or b"{}")
-                    if not isinstance(b, dict):
-                        raise ValueError("expected an object")
-                except (ValueError, TypeError) as e:
-                    return self.json({"error": str(e)}, 400)
+                b = self._read_json(4096)
+                if b is None:
+                    return
                 r = LAST.dismiss(b.get("finished")) if LAST else None
                 if r is None:
                     return self.json({"error": "nothing to dismiss"}, 404)
@@ -1564,6 +1582,7 @@ def start(db_path, cache_path, port=8765, offline=False, lan=None):
     SEGS = segments.SegmentStore(db_path, M, os.path.join(os.path.dirname(cache_path), "web_segments.json"))
     IMPORTER = importer.Importer(db_path, M)
     IMPORTER.on_store = EDITS.forget_removed
+    IMPORTER.on_remap = EDITS.remap
     IMPORTER.offline = offline
     LAST = lastimport.LastImport(os.path.join(os.path.dirname(os.path.abspath(db_path)), "last_import.json"))
     IMPORTER.last = LAST

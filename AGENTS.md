@@ -58,6 +58,7 @@ web/weather.py          historical weather per outdoor session (Open-Meteo, cach
 web/geonames.py         segment place names (Nominatim reverse geocoding, cached)
 web/importer.py         Import dialog backend: uploads + background db build / enrich
 web/edits.py            session edits (data/edits.json) as a TEMP view overlay on the read-only DB
+web/store.py            atomic 0600 JSON writes + object-only loads for the small stores in data/
 web/lastimport.py       what the last import added (data/last_import.json), for the new-records summary
 web/tls.py              self-signed cert for `web --lan` (openssl, else pure-Python RSA + DER)
 web/qr.py               stdlib QR encoder (byte mode, level M, v1-10) for the --lan link
@@ -453,6 +454,22 @@ changing `derive()`.
   stays, restorable, until a fresh build); re-uploading that file un-deletes.
   A sport change drops the session's metrics cache entry. The CLI
   (`db query`, `v_activities`) shows the raw, unedited DB.
+  Edits follow a session that an import replaces under a new id (dedup:
+  upload, then the export's copy): the dashboard importer calls
+  `EDITS.remap({old: new})`; for CLI `db build` / `strava sync` each edit
+  keeps the session's `start`, and when `main.activities` changes
+  (`count, total(id), max(id)`), an edit whose id is gone moves to the single
+  session starting within 120 s that has no edit (none if two qualify; never
+  a `file_removed` one). In memory only, saved with the next edit.
+* **JSON POST bodies** (`_read_json` in server.py, every JSON endpoint):
+  `Content-Length` 0…limit (64 KiB, dismiss 4 KiB) else 413/400 through
+  `_reject` (drained, or the connection closed) — never `read(min(n, cap))`,
+  which read to EOF on a negative length and left the rest of a big body to
+  be parsed as the next request. NaN/Infinity, nesting too deep and
+  non-objects are 400. The stores (`edits`, `profile`, `favorites`,
+  `last_import`) write via `store.write_json` (unique O_EXCL/O_NOFOLLOW temp,
+  0600, fsync, replace, one retry) and load via `store.load_object`
+  (anything but a JSON object = empty, never a startup crash).
 * **Best efforts** (#6, `best_effort()` in server.py): the fastest *elapsed*
   time over 400 m, 1 km, 5 km, 10 km, half and full marathon anywhere in a
   session (no 400 m for rides, none for virtual rides), in the metrics cache as

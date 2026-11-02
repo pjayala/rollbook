@@ -63,6 +63,7 @@ class Importer:
         self.on_store = None  # called with "activities/<name>" for each newly stored file
         self.offline = False  # `web --offline`: no Strava sync
         self.last = None  # lastimport.LastImport: what the last import added (new-records summary)
+        self.on_remap = None  # called with {old id: new id} when an import replaced sessions
 
     # ---------------------------------------------------------------- upload
 
@@ -251,8 +252,9 @@ class Importer:
         """Hand what this import added to the summary store; never raises.
         A new id whose start is within 2 min of a removed id's start is the
         same session from an export (`db build` dedup), so it isn't announced;
-        if the removed one is in an unseen summary, the summary follows it."""
-        if self.last is None or before is None or after is None or after == before:
+        if the removed one is in an unseen summary, the summary follows it,
+        and so do its edits (on_remap)."""
+        if before is None or after is None or after == before:
             return
         try:
             starts = self._starts()
@@ -267,6 +269,13 @@ class Importer:
                     new.append(i)
             new.sort(key=lambda i: (starts.get(i) or 0, i))  # oldest first: the store keeps the newest
             j = self.job
+            if remap and self.on_remap:
+                try:
+                    self.on_remap(remap)
+                except Exception as e:
+                    j.setdefault("log", []).append(f"edits of replaced sessions not moved: {e}")
+            if self.last is None:
+                return
             if new or remap:
                 self.last.record(new, j.get("items", []), j.get("source", "upload"), len(remap),
                                  partial=partial, first=not before, remap=remap)

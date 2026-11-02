@@ -16,9 +16,10 @@ names, and tool output goes to a model provider.
 """
 
 import json
-import os
 import threading
 import time
+
+import store
 
 MAX_FILE = 256 * 1024
 MAX_IDS = 500     # a first import into a big DB stores none; others keep the newest 500
@@ -66,13 +67,7 @@ class LastImport:
         self.data = self._load()
 
     def _load(self):
-        try:
-            if os.path.getsize(self.path) > MAX_FILE:
-                return None
-            with open(self.path, encoding="utf-8") as f:
-                return validate(json.load(f))
-        except (OSError, ValueError):  # missing, unreadable, not UTF-8, not JSON
-            return None
+        return validate(store.load_object(self.path, MAX_FILE))
 
     def get(self):
         with self.lock:
@@ -126,22 +121,8 @@ class LastImport:
 
     def _write(self):
         """Never raises: losing the summary must not fail the import."""
-        tmp = f"{self.path}.{os.getpid()}.{threading.get_ident()}.tmp"
-        body = json.dumps(self.data, indent=1).encode()
-        for attempt in (0, 1):
-            try:
-                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-                with os.fdopen(fd, "wb") as f:
-                    f.write(body)
-                    f.flush()
-                    os.fsync(f.fileno())
-                os.replace(tmp, self.path)
-                return True
-            except OSError:  # Windows: replace fails while another process reads it
-                try:
-                    os.remove(tmp)
-                except OSError:
-                    pass
-                if attempt == 0:
-                    time.sleep(0.05)
-        return False
+        try:
+            store.write_json(self.path, self.data)
+            return True
+        except (OSError, ValueError):
+            return False

@@ -296,6 +296,155 @@ class Api(Build):
         self.assertNotIn("1002", self.get("/api/edits")["sessions"])
         self.assertEqual(self.get("/api/activity/1002")["name"], "The come back")
 
+    # ---- every JSON POST reads its body whole or not at all (web/server.py _read_json)
+
+    ENDPOINTS = ("/api/profile", "/api/edit", "/api/favorites", "/api/last_import/dismiss")
+
+    def raw(self, path, length, body):
+        """(status, whether the next keep-alive request still parsed; None if the server closed)."""
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
+        try:
+            c.putrequest("POST", path)
+            for k, v in (("X-Rollbook", "1"), ("Content-Type", "application/json"), ("Content-Length", length)):
+                c.putheader(k, v)
+            c.endheaders()
+            c.send(body)
+            r = c.getresponse()
+            r.read()
+            if r.will_close:
+                return r.status, None
+            c.request("GET", "/api/status")
+            nxt = c.getresponse()
+            nxt.read()
+            return r.status, nxt.status == 200
+        finally:
+            c.close()
+
+    def test_out_of_range_lengths(self):
+        for path in self.ENDPOINTS:
+            limit = 4096 if path.endswith("dismiss") else 65536
+            big = b'{"pad":"' + b"x" * limit + b'"}'
+            with self.subTest(path=path):
+                code, ok = self.raw(path, str(len(big)), big)
+                self.assertEqual(code, 413)
+                self.assertIsNot(ok, False)  # drained: a keep-alive connection still parses
+                self.assertEqual(self.raw(path, "-1", b"")[0], 400)  # used to read until EOF
+                self.assertEqual(self.raw(path, "abc", b"")[0], 400)
+
+    def test_bad_json(self):
+        for path in self.ENDPOINTS:
+            for body in (b"not json", b"[1]", b'"x"', b'{"id": NaN}', b'{"a": Infinity}',
+                         b"[" * 2000 + b"]" * 2000, b"\xff\xfe"):
+                with self.subTest(path=path, body=body[:12]):
+                    code, ok = self.raw(path, str(len(body)), body)
+                    self.assertEqual(code, 400)
+                    self.assertIsNot(ok, False)
+        self.assertEqual(self.get("/api/activity/1001")["name"], "Outdoor cycle")
+
+    def test_favorites_meta_must_be_object(self):
+        h = {"X-Rollbook": "1", "Content-Type": "application/json"}
+        body = json.dumps({"kind": "sessions", "id": "1001", "on": True, "meta": [1]}).encode()
+        try:
+            self.assertEqual(self.post("/api/favorites", body, h)[0], 200)
+            self.assertEqual(self.get("/api/favorites")["sessions"]["1001"].keys(), {"added"})
+        finally:
+            self.post("/api/favorites", json.dumps({"kind": "sessions", "id": "1001", "on": False}).encode(), h)
+
+
+class Stores(unittest.TestCase):
+    """The small JSON stores: atomic 0600 writes, files that aren't an object."""
+
+    def setUp(self):
+        self.home = tmpdir(self)
+
+    def write(self, name, raw):
+        with open(os.path.join(self.home, name), "w", encoding="utf-8") as f:
+            f.write(raw)
+
+    def test_non_object_files_load_as_empty(self):
+        import profile as athlete
+        for raw in ("[]", "1", '"x"', "null", '{"sessions": []}', '{"sessions": {"1": 5}}', "{nope"):
+            with self.subTest(raw=raw):
+                self.write("edits.json", raw)
+                self.write("favorites.json", raw)
+                self.write("profile.json", raw)
+                self.assertEqual(edits.Edits(self.home).all()["sessions"], {})
+                fav = server.Favorites(os.path.join(self.home, "favorites.json")).get()
+                self.assertEqual((fav["sessions"], fav["segments"]), ({}, {}))
+                self.assertIsInstance(athlete.Profile(self.home).get(), dict)
+
+    def test_write_is_atomic_and_private(self):
+        import store
+        path = os.path.join(self.home, "x.json")
+        store.write_json(path, {"a": 1})
+        self.assertEqual(store.load_object(path), {"a": 1})
+        if os.name == "posix":
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        with self.assertRaises(ValueError):
+            store.write_json(path, {"a": float("nan")})
+        self.assertEqual(store.load_object(path), {"a": 1})
+        self.assertEqual([n for n in os.listdir(self.home) if n.endswith(".tmp")], [])
+
+    def test_write_failure_raises_and_keeps_old_file(self):
+        import store
+        from unittest import mock
+        path = os.path.join(self.home, "x.json")
+        store.write_json(path, {"a": 1})
+        with mock.patch.object(store.os, "replace", side_effect=OSError("locked")) as rep, \
+                mock.patch.object(store.time, "sleep"):
+            with self.assertRaises(OSError):
+                store.write_json(path, {"a": 2})
+        self.assertEqual(rep.call_count, 2)  # one retry (Windows: a reader holds the file)
+        self.assertEqual(store.load_object(path), {"a": 1})
+        self.assertEqual([n for n in os.listdir(self.home) if n.endswith(".tmp")], [])
+
+    def test_retry_succeeds(self):
+        import store
+        from unittest import mock
+        path = os.path.join(self.home, "x.json")
+        real = os.replace
+        calls = []
+
+        def flaky(a, b):
+            calls.append(a)
+            if len(calls) == 1:
+                raise PermissionError("locked")
+            return real(a, b)
+        with mock.patch.object(store.os, "replace", side_effect=flaky), mock.patch.object(store.time, "sleep"):
+            store.write_json(path, {"a": 3})
+        self.assertEqual(store.load_object(path), {"a": 3})
+
+    def test_planted_symlink_never_followed(self):
+        import store
+        if not hasattr(os, "symlink") or os.name != "posix":
+            self.skipTest("posix only")
+        from unittest import mock
+        victim = os.path.join(self.home, "victim")
+        with open(victim, "w") as f:
+            f.write("keep")
+        path = os.path.join(self.home, "x.json")
+        with mock.patch.object(store.secrets, "token_hex", return_value="fixed"):
+            os.symlink(victim, f"{path}.{os.getpid()}.{threading.get_ident()}.fixed.tmp")
+            with self.assertRaises(OSError):
+                store.write_json(path, {"a": 1})
+        with open(victim) as f:
+            self.assertEqual(f.read(), "keep")
+
+    def test_edit_write_failure_keeps_memory(self):
+        export = os.path.join(self.home, "export")
+        make_export(export)
+        self.assertEqual(run(self.home, "db", "build", "--no-samples", export).returncode, 0)
+        import store
+        from unittest import mock
+        e = edits.Edits(self.home)
+        db = sqlite3.connect(f"file:{os.path.join(self.home, 'rollbook.db')}?mode=ro", uri=True)
+        self.addCleanup(db.close)
+        e.sync(db)
+        with mock.patch.object(store, "write_json", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                e.update(db, 1001, {"name": "x"})
+        self.assertEqual(e.get(1001), {})
+
 
 class PowerBuild(unittest.TestCase):
     """Power through the whole pipeline, and an older DB without the power columns."""
