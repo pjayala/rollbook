@@ -31,9 +31,9 @@ class Fixtures(unittest.TestCase):
         return c
 
     def efforts(self, name):
-        import server
+        import analysis
         _, c = analyse(os.path.join(SAMPLES, name))
-        return c, {k: server.best_effort(c["_t"], c["_d"], D) for k, D in server.BEST_EFFORTS}
+        return c, {k: analysis.best_effort(c["_t"], c["_d"], D) for k, D in analysis.BEST_EFFORTS}
 
     def test_best_efforts_on_the_fixtures(self):
         """#6: pinned, and consistent with the splits and the best 30 s."""

@@ -1671,12 +1671,13 @@ def cmd_web(a):
         die("no database yet. run: rollbook db build <archive.zip>")
     webdir = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "web")
     sys.path.insert(0, os.path.abspath(webdir))
+    import lanaccess
     import server
 
     lan = None
     if a.lan or a.lan_write:
-        lan = server.lan_setup(os.path.dirname(DB), a.lan_port, write=a.lan_write, https=not a.lan_http,
-                               new_token=a.new_token, new_cert=a.new_cert)
+        lan = lanaccess.lan_setup(os.path.dirname(DB), a.lan_port, write=a.lan_write, https=not a.lan_http,
+                                  new_token=a.new_token, new_cert=a.new_cert)
     try:
         server.serve(DB, os.path.join(CACHE, "web_metrics.json"), a.port, not a.no_open, a.offline,
                      lan=lan, qr=a.qr)

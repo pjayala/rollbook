@@ -28,6 +28,7 @@ from unittest import mock
 from helpers import ROOT, tmpdir
 
 import app
+import analysis
 import server
 
 
@@ -550,7 +551,7 @@ class ByeEndpoint(unittest.TestCase):
     def setUpClass(cls):
         cls.home = tempfile.mkdtemp(prefix="rollbook-test-app-")
         cls.cache = os.path.join(cls.home, "cache", "web_metrics.json")
-        with mock.patch.object(server.Metrics, "warm", lambda self: None), \
+        with mock.patch.object(analysis.Metrics, "warm", lambda self: None), \
                 contextlib.redirect_stdout(io.StringIO()):
             cls.httpd, cls.M, cls.url = server.start(os.path.join(cls.home, "rollbook.db"), cls.cache, 0, offline=True)
         threading.Thread(target=cls.httpd.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()

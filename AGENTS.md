@@ -51,7 +51,14 @@ tools/demo.py           synthetic demo athlete (export + DB + seeded caches), ne
 tools/screenshots.py    regenerates docs/screenshots/*.png from the demo, headless Chrome, --offline
 CHANGELOG.md            release notes; `rollbook --version` = __version__ in bin/rollbook
 samples/*.gpx           two hand-checked rides used as regression fixtures
-web/server.py           `rollbook web`: stdlib HTTP server + JSON API, read-only DB
+web/server.py           `rollbook web`: wiring + routing (handler, start/serve), read-only DB
+web/api.py              JSON API: GET views (`GET` table), POST actions (`POST` table), the stores
+web/http_base.py        responses, `_read_json`, Host / same-origin / --lan token checks, CSP
+web/analysis.py         derive() and its helpers (efforts, laps, power, tracks) + Metrics cache
+web/conditions.py       weather + wind / slope split per out-and-back
+web/lanaccess.py        --lan: token, addresses, TLS listener, banner
+web/tiles.py            OSM tile proxy + disk cache
+web/favorites.py        starred sessions / segments (data/favorites.json)
 web/segments.py         auto-generated segments + effort matching
 web/profile.py          athlete profile (data/profile.json) + per-sport calorie models
 web/weather.py          historical weather per outdoor session (Open-Meteo, cached)
@@ -225,7 +232,7 @@ DB doesn't hold — best 30/45/60 min, out/back legs, **wind-neutral** speed,
 route kind, HR histogram — are derived from `samples` in a background thread
 on first start (~1 min for all activities) and cached in
 `data/cache/web_metrics.json`. Entries invalidate when an activity's sample
-count changes or `METRICS_VERSION` in `web/server.py` is bumped; bump it after
+count changes or `METRICS_VERSION` in `web/analysis.py` is bumped; bump it after
 changing `derive()`.
 
 * **`web --lan` / `--lan-write`** (phone access): the loopback listener is
@@ -287,7 +294,7 @@ changing `derive()`.
   weight, resting/max HR; first prefilled from the export's `profile.csv`.
   A profile max HR overrides the recorded one for zones. BMR is
   Mifflin–St Jeor.
-* **Weather / conditions** (`web/weather.py`, `conditions()` in server.py):
+* **Weather / conditions** (`web/weather.py`, `web/conditions.py`):
   Open-Meteo hourly temperature, 10 m wind and gusts per 0.1° cell and UTC
   day (archive API, forecast API `past_days` for the last week), cached in
   `data/cache/weather.json`; never for indoor/Virtual sessions. For
@@ -398,7 +405,7 @@ changing `derive()`.
 * **Page cleanup**: `route()` runs every `onLeave()` callback first (maps,
   replay loops) and bumps `routeSeq`; a view that awaited checks it so a late
   response never draws over the next page. The HTML carries a
-  Content-Security-Policy (`CSP` in server.py; no inline scripts anywhere).
+  Content-Security-Policy (`CSP` in http_base.py; no inline scripts anywhere).
 * **Favorites** (star toggle on sessions and segments, "favorites only" filters,
   a Favorites panel on the progress page) live in `data/favorites.json`,
   server-side so the app window and browser tabs share them. Starred
@@ -464,7 +471,15 @@ changing `derive()`.
   `file_removed` one). In memory only, saved with the next edit or the
   importer's `remap`. The importer pairs old/new ids only 1:1. Keys in
   `edits.json` must be ASCII digits (≤ 18).
-* **JSON POST bodies** (`_read_json` in server.py, every JSON endpoint):
+* **POST routing** (`api.POST`): every action is a `Post(fn, limit, what)`
+  entry; `do_POST` alone applies the checks (LAN gate / `--lan-write`, then
+  same origin + `X-Rollbook: 1`), reads the JSON body when `limit` is set
+  (else validates `Content-Length` for raw actions like the upload), calls
+  `fn(api.Req)` → `(status, json)` and maps ValueError/TypeError → 400,
+  OSError → 500 "<what> not saved". Add an endpoint there, never a new
+  branch in `do_POST`; `tests` iterate `api.POST` for the 403 checks.
+  `/api/bye` (a beacon) is the one special case. GETs: `api.GET`.
+* **JSON POST bodies** (`_read_json` in http_base.py, every JSON endpoint):
   `Content-Length` 0…limit (64 KiB, dismiss 4 KiB) else 413/400 through
   `_reject` (≤ 1 MiB drained, else the connection closed; nothing is read from
   a LAN client before its token cookie checks out) — never
@@ -481,7 +496,7 @@ changing `derive()`.
   empty, never a startup crash). Memory changes only after the write: a
   failed save leaves the store as it was, and a deleted import's file is
   removed only once its edit is on disk.
-* **Best efforts** (#6, `best_effort()` in server.py): the fastest *elapsed*
+* **Best efforts** (#6, `best_effort()` in analysis.py): the fastest *elapsed*
   time over 400 m, 1 km, 5 km, 10 km, half and full marathon anywhere in a
   session (no 400 m for rides, none for virtual rides), in the metrics cache as
   `be` {label: [s, start t, start m]} and in the list as `be<label>` seconds.
@@ -495,7 +510,7 @@ changing `derive()`.
   as sortable list columns (first click fastest first), as a Progress trend
   (per-session speed plus the record progression) and in compare. 400 m / 1 km
   read slower on 6 s recording than on 1 Hz.
-* **Power** (`power_grid` etc. in server.py): readings go on a 1 s grid,
+* **Power** (`power_grid` etc. in analysis.py): readings go on a 1 s grid,
   each held until the next one for at most 10 s (a paused trainer stops
   recording, so longer gaps are 0 W). From it: best mean power over 5 s,
   1/5/20/60 min (`pw` in the metrics cache, `pw5s`…`pw60m` in the list) and

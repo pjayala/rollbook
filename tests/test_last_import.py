@@ -18,6 +18,7 @@ from helpers import ROOT, tmpdir
 from test_end_to_end import make_export, run
 
 import lastimport
+import api
 import server
 import store
 
@@ -196,7 +197,7 @@ class Api(unittest.TestCase):
         shutil.rmtree(cls.home, True)
 
     def setUp(self):
-        server.LAST.data = None
+        api.LAST.data = None
 
     def get(self, path):
         with urllib.request.urlopen(self.url.rstrip("/") + path, timeout=60) as r:
@@ -224,7 +225,7 @@ class Api(unittest.TestCase):
         self.assertEqual(self.dismiss(1.0)[0], 404)
 
     def test_lists_visible_sessions_with_sport(self):
-        server.LAST.record([1002, 1001, 424242], ["x"])
+        api.LAST.record([1002, 1001, 424242], ["x"])
         li = self.get("/api/last_import")
         self.assertEqual(li["new"], [{"id": 1002, "type": "Inline Skate"}, {"id": 1001, "type": "Inline Skate"}])
         self.assertNotIn("new_ids", li)
@@ -238,7 +239,7 @@ class Api(unittest.TestCase):
         self.assertEqual(len(self.get("/api/last_import")["new"]), 2)
 
     def test_get_never_dismisses(self):
-        d = server.LAST.record([1001], ["x"])
+        d = api.LAST.record([1001], ["x"])
         self.get("/api/last_import")
         self.get("/api/last_import")
         code, _ = self.post("/api/last_import/dismiss", method="GET")
@@ -247,7 +248,7 @@ class Api(unittest.TestCase):
         self.assertEqual(self.get("/api/last_import")["finished"], d["finished"])
 
     def test_dismiss_csrf_and_rebinding(self):
-        d = server.LAST.record([1001], ["x"])
+        d = api.LAST.record([1001], ["x"])
         ok, port = {"X-Rollbook": "1", "Content-Type": "application/json"}, self.port
         bad = [{}, {"X-Rollbook": "0"}, {**ok, "Origin": "https://evil.example"}, {**ok, "Origin": "null"},
                {**ok, "Origin": f"http://evil.example:{port}"}, {**ok, "Host": "evil.example"},
@@ -255,12 +256,12 @@ class Api(unittest.TestCase):
         for h in bad:
             with self.subTest(headers=h):
                 self.assertEqual(self.dismiss(d["finished"], h)[0], 403)
-        self.assertFalse(server.LAST.get()["dismissed"])
+        self.assertFalse(api.LAST.get()["dismissed"])
         self.assertEqual(self.dismiss(d["finished"], {**ok, "Origin": f"http://127.0.0.1:{port}"})[0], 200)
         self.assertTrue(self.get("/api/last_import")["dismissed"])
 
     def test_dismiss_bodies(self):
-        d = server.LAST.record([1001], ["x"])
+        d = api.LAST.record([1001], ["x"])
         h = {"X-Rollbook": "1", "Content-Type": "application/json"}
         for body in (b"[1]", b"not json", b'"x"'):
             self.assertEqual(self.post("/api/last_import/dismiss", body, h)[0], 400, body)
@@ -268,12 +269,12 @@ class Api(unittest.TestCase):
         self.assertEqual(self.post("/api/last_import/dismiss", b"{}", h)[0], 409)
         big = json.dumps({"finished": d["finished"], "pad": "x" * 10000}).encode()
         self.assertEqual(self.post("/api/last_import/dismiss", big, h)[0], 413)  # body capped at 4 KiB
-        self.assertFalse(server.LAST.get()["dismissed"])
+        self.assertFalse(api.LAST.get()["dismissed"])
         code, raw = self.dismiss(d["finished"])
         self.assertEqual((code, json.loads(raw)), (200, {"dismissed": True}))
 
     def test_items_not_served(self):
-        server.LAST.record([1001], ["export_123456_2026-10-01.zip"])
+        api.LAST.record([1001], ["export_123456_2026-10-01.zip"])
         self.assertNotIn("items", self.get("/api/last_import"))
 
     def raw_post(self, length_header, body):
@@ -296,12 +297,12 @@ class Api(unittest.TestCase):
             c.close()
 
     def test_body_length_out_of_range(self):
-        d = server.LAST.record([1001], ["x"])
+        d = api.LAST.record([1001], ["x"])
         body = json.dumps({"finished": d["finished"], "pad": "x" * 6000}).encode()
         self.assertEqual(self.raw_post(str(len(body)), body), 413)
         self.assertEqual(self.raw_post("-1", b""), 400)
         self.assertEqual(self.raw_post("abc", b""), 400)
-        self.assertFalse(server.LAST.get()["dismissed"])
+        self.assertFalse(api.LAST.get()["dismissed"])
         ok = json.dumps({"finished": d["finished"]}).encode()
         self.assertEqual(self.raw_post(str(len(ok)), ok), 200)
 
@@ -309,7 +310,7 @@ class Api(unittest.TestCase):
         path = os.path.join(self.home, "last_import.json")
         with open(path, "w") as f:
             f.write('{"finished": 1, "new_ids": ["<img src=x>"]}')
-        server.LAST = lastimport.LastImport(path)
+        api.LAST = lastimport.LastImport(path)
         self.assertEqual(self.get("/api/last_import"), {})
 
 
