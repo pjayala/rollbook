@@ -26,7 +26,9 @@ import sys
 import time
 
 import edits
+import profile as athlete
 import server as srv
+import store
 
 PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")  # newest first
 MAX_ROWS = 5000
@@ -201,13 +203,9 @@ class Rollbook:
         return m
 
     def hrmax(self):
-        try:
-            with open(os.path.join(self.home, "profile.json")) as f:
-                p = json.load(f)
-            if p.get("hr_max"):
-                return p["hr_max"]
-        except (OSError, ValueError):
-            pass
+        hr = athlete.validate(store.load_object(os.path.join(self.home, "profile.json"), athlete.MAX_FILE)).get("hr_max")
+        if hr:
+            return hr
         return self.db.execute("SELECT MAX(hr_max) FROM activities "
                                "WHERE date >= date('now','-365 days') AND hr_max < 230").fetchone()[0]
 

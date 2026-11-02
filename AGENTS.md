@@ -58,6 +58,7 @@ web/weather.py          historical weather per outdoor session (Open-Meteo, cach
 web/geonames.py         segment place names (Nominatim reverse geocoding, cached)
 web/importer.py         Import dialog backend: uploads + background db build / enrich
 web/edits.py            session edits (data/edits.json) as a TEMP view overlay on the read-only DB
+web/store.py            atomic 0600 JSON writes + object-only loads for the small stores in data/
 web/lastimport.py       what the last import added (data/last_import.json), for the new-records summary
 web/tls.py              self-signed cert for `web --lan` (openssl, else pure-Python RSA + DER)
 web/qr.py               stdlib QR encoder (byte mode, level M, v1-10) for the --lan link
@@ -453,6 +454,33 @@ changing `derive()`.
   stays, restorable, until a fresh build); re-uploading that file un-deletes.
   A sport change drops the session's metrics cache entry. The CLI
   (`db query`, `v_activities`) shows the raw, unedited DB.
+  Edits follow a session that an import replaces under a new id (dedup:
+  upload, then the export's copy): the dashboard importer calls
+  `EDITS.remap({old: new})`; for CLI `db build` / `strava sync` each edit
+  keeps the session's `start` and `km`, and when `main.activities` changes
+  (`count, total(id), max(id)`), an edit whose id is gone moves to the single
+  session starting within 120 s, with km within 5% when both are known (a
+  hiding edit needs both), that has no edit (none if two qualify; never a
+  `file_removed` one). In memory only, saved with the next edit or the
+  importer's `remap`. The importer pairs old/new ids only 1:1. Keys in
+  `edits.json` must be ASCII digits (≤ 18).
+* **JSON POST bodies** (`_read_json` in server.py, every JSON endpoint):
+  `Content-Length` 0…limit (64 KiB, dismiss 4 KiB) else 413/400 through
+  `_reject` (≤ 1 MiB drained, else the connection closed; nothing is read from
+  a LAN client before its token cookie checks out) — never
+  `read(min(n, cap))`, which read to EOF on a negative length. No
+  `Content-Length` is 411, any `Transfer-Encoding` 501 (the server is
+  HTTP/1.0). NaN/Infinity/1e999, nesting too deep and non-objects are 400.
+  The upload refuses a negative length too. Sockets time out after 60 s
+  (`REQUEST_TIMEOUT_S`). Favorites keep only a validated segment `meta`
+  (type, start/end lat-lon, m) and at most `FAV_MAX` per kind; the profile
+  file is re-validated against `FIELDS` on load (MCP uses the same check). The stores (`edits`, `profile`, `favorites`,
+  `last_import`) write via `store.write_json` (unique O_EXCL/O_NOFOLLOW temp,
+  0600, fsync, replace, one retry; ASCII with escapes, so any text
+  round-trips) and load via `store.load_object` (anything but a JSON object =
+  empty, never a startup crash). Memory changes only after the write: a
+  failed save leaves the store as it was, and a deleted import's file is
+  removed only once its edit is on disk.
 * **Best efforts** (#6, `best_effort()` in server.py): the fastest *elapsed*
   time over 400 m, 1 km, 5 km, 10 km, half and full marathon anywhere in a
   session (no 400 m for rides, none for virtual rides), in the metrics cache as

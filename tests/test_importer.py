@@ -403,6 +403,33 @@ class Job(StoreBase):
         sqlite3.connect(self.imp.db_path).close()  # empty DB file, no table yet
         self.assertEqual(self.imp._ids(), set())
 
+    def test_replacement_hands_edits_over(self):
+        moved = []
+        self.imp.on_remap = moved.append  # server.start wires EDITS.remap here
+        t = 2460000.5
+        _, st = self.build_with_starts([{1, 2}, {1, 5001, 9}],
+                                       [{1: t - 9, 2: t}, {1: t - 9, 5001: t + 30 / 86400, 9: t + 1}])
+        self.assertEqual(st["state"], "done")
+        self.assertEqual(moved, [{2: 5001}])  # also without a new-records store (self.imp.last is None)
+
+    def test_replacements_pair_one_to_one(self):
+        # two replaced sessions 60 s apart: each new id is near both old ones -> no guess
+        moved = []
+        self.imp.on_remap = moved.append
+        self.store()
+        t, m = 2460000.5, 1 / 1440
+        _, st = self.build_with_starts([{2, 3}, {5001, 5002}],
+                                       [{2: t, 3: t + m}, {5001: t + 10 / 86400, 5002: t + m + 10 / 86400}])
+        self.assertEqual((st["state"], st["new_total"]), ("done", 0))  # not announced as new either
+        self.assertEqual(moved, [])
+
+    def test_remap_failure_does_not_fail_the_import(self):
+        self.imp.on_remap = mock.Mock(side_effect=OSError("disk full"))
+        t = 2460000.5
+        _, st = self.build_with_starts([{2}, {5001}], [{2: t}, {5001: t + 30 / 86400}])
+        self.assertEqual(st["state"], "done")
+        self.assertTrue(any("edits of replaced sessions not moved" in x for x in st["log"]))
+
     def test_replacement_window_is_two_minutes(self):
         self.store()
         t = 2460000.5
@@ -534,6 +561,195 @@ class Dedup(unittest.TestCase):
         self.assertIn("activities/5001.fit: skipped, same session as activities/skate.fit", r.stderr)
         self.assertEqual(rows(os.path.join(home, "rollbook.db"), "SELECT id FROM activities"),
                          [(edits.import_id("activities/skate.fit"),)])
+
+
+class EditsFollowReplacement(unittest.TestCase):
+    """An edit made on an uploaded file follows it when the export's copy replaces it."""
+
+    def test_cli_build_reattaches_by_start(self):
+        home = tmpdir(self)
+        imp = imports_dir(home, {"skate.fit": (T0, 6.0, 600)})
+        self.assertEqual(run(home, "db", "build", "--no-samples", imp).returncode, 0)
+        old, path = edits.import_id("activities/skate.fit"), os.path.join(home, "rollbook.db")
+        e = edits.Edits(home)
+        db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        e.sync(db)
+        e.update(db, old, {"name": "Mine", "type": "Ride"})
+        db.close()
+        self.assertTrue(edits.Edits(home).get(old)["start"])
+        r = run(home, "db", "build", "--no-samples",
+                Dedup().make_export(home, T0 + timedelta(seconds=5), distance="3594.0"))
+        self.assertIn("replaces activities/skate.fit", r.stderr)
+        with open(os.path.join(home, "edits.json"), "rb") as f:
+            before = f.read()
+        e = edits.Edits(home)  # as a restarted server / the MCP server would
+        db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        self.addCleanup(db.close)
+        e.sync(db)
+        self.assertEqual(db.execute("SELECT id, name, type FROM activities").fetchall(), [(5001, "Mine", "Ride")])
+        with open(os.path.join(home, "edits.json"), "rb") as f:
+            self.assertEqual(f.read(), before)  # a GET never writes
+        e.update(db, 5001, {"hidden": True})  # the next edit saves the move
+        with open(os.path.join(home, "edits.json"), encoding="utf-8") as f:
+            self.assertEqual(set(json.load(f)["sessions"]), {"5001"})
+
+
+class EditsReattach(unittest.TestCase):
+    """Edits._reconcile / remap on a hand-made DB."""
+
+    def setUp(self):
+        self.home = tmpdir(self)
+        self.path = os.path.join(self.home, "rollbook.db")
+        self.rw = sqlite3.connect(self.path)
+        self.rw.execute("CREATE TABLE activities (id INTEGER PRIMARY KEY, name TEXT, type TEXT, "
+                        "filename TEXT, datetime TEXT, km REAL)")
+        self.addCleanup(self.rw.close)
+
+    def rows(self, *rows):
+        """(id, start) or (id, start, km)."""
+        self.rw.execute("DELETE FROM activities")
+        self.rw.executemany("INSERT INTO activities VALUES (?, 'n', 'Ride', NULL, ?, ?)",
+                            [(r + (None,))[:3] for r in rows])
+        self.rw.commit()
+
+    def store(self, sessions, raw=None):
+        with open(os.path.join(self.home, "edits.json"), "w", encoding="utf-8") as f:
+            f.write(raw if raw is not None else json.dumps({"sessions": sessions}))
+        e = edits.Edits(self.home)
+        db = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True)
+        self.addCleanup(db.close)
+        e.sync(db)
+        return e, db
+
+    def on_disk(self):
+        with open(os.path.join(self.home, "edits.json"), encoding="utf-8") as f:
+            return json.load(f)["sessions"]
+
+    def test_one_candidate_moves(self):
+        self.rows((8, "2026-05-01T08:00:30+00:00"), (9, "2026-05-01T09:00:00+00:00"))
+        e, db = self.store({"7": {"name": "x", "start": "2026-05-01T08:00:00+00:00"}})
+        self.assertEqual(set(e.all()["sessions"]), {"8"})
+        self.assertEqual(db.execute("SELECT name FROM activities WHERE id=8").fetchone(), ("x",))
+        self.assertEqual(set(self.on_disk()), {"7"})  # a GET never writes
+
+    def test_two_candidates_stay(self):
+        self.rows((8, "2026-05-01T08:00:30+00:00"), (9, "2026-05-01T08:01:00+00:00"))
+        e, _ = self.store({"7": {"name": "x", "start": "2026-05-01T08:00:00+00:00"}})
+        self.assertEqual(set(e.all()["sessions"]), {"7"})
+
+    def test_distance_must_match(self):
+        # watch + ROUVY copies of one ride 30 s apart: only the same distance qualifies
+        self.rows((8, "2026-05-01T08:00:30+00:00", 30.0), (9, "2026-05-01T08:00:40+00:00", 21.0))
+        e, _ = self.store({"7": {"name": "x", "start": "2026-05-01T08:00:00+00:00", "km": 20.5}})
+        self.assertEqual(set(e.all()["sessions"]), {"9"})
+        self.rows((8, "2026-05-01T08:00:30+00:00", 30.0))
+        e, _ = self.store({"7": {"name": "x", "start": "2026-05-01T08:00:00+00:00", "km": 20.5}})
+        self.assertEqual(set(e.all()["sessions"]), {"7"})
+
+    def test_hidden_needs_both_distances(self):
+        self.rows((8, "2026-05-01T08:00:30+00:00"))
+        e, _ = self.store({"7": {"hidden": True, "start": "2026-05-01T08:00:00+00:00", "km": 20.0}})
+        self.assertEqual(set(e.all()["sessions"]), {"7"})  # never hide a session that may be another
+        self.rows((8, "2026-05-01T08:00:30+00:00", 20.2))
+        e, _ = self.store({"7": {"hidden": True, "start": "2026-05-01T08:00:00+00:00", "km": 20.0}})
+        self.assertEqual(set(e.all()["sessions"]), {"8"})
+
+    def test_window_and_guards(self):
+        self.rows((8, "2026-05-01T08:02:30+00:00"), (9, "2026-05-02T08:00:10+00:00", 12.5),
+                  (10, "2026-05-03T08:00:10+00:00"))
+        e, _ = self.store({
+            "7": {"name": "late", "start": "2026-05-01T08:00:00+00:00"},       # 150 s: too far
+            "6": {"name": "taken", "start": "2026-05-02T08:00:00+00:00"},
+            "9": {"name": "own"},                                               # 9 has its own edit
+            "5": {"hidden": True, "deleted": True, "file_removed": True,
+                  "start": "2026-05-03T08:00:00+00:00"},                        # never re-hides another
+            "4": {"name": "no start"}})
+        self.assertEqual(set(e.all()["sessions"]), {"7", "6", "9", "5", "4"})
+        self.assertEqual((e.get(9)["start"], e.get(9)["km"]), ("2026-05-02T08:00:10+00:00", 12.5))  # noted
+
+    def test_bad_keys_and_empty_edits_dropped(self):
+        self.rows((8, "2026-05-01T08:00:30+00:00"))
+        e, db = self.store(None, json.dumps({"sessions": {
+            "\u00b2": {"name": "sup"}, "\u0661\u0662": {"name": "arabic"}, "9" * 25: {"name": "big"},
+            "x": {"name": "x"}, "3": {"updated": "2026-01-01", "start": "2026-05-01T08:00:00+00:00"},
+            "8": {"name": "ok"}}}))
+        self.assertEqual(set(e.all()["sessions"]), {"8"})
+        self.assertEqual(db.execute("SELECT name FROM activities").fetchall(), [("ok",)])
+
+    def test_follows_a_later_build(self):
+        self.rows((7, "2026-05-01T08:00:00+00:00"))
+        e, db = self.store({"7": {"name": "x"}})
+        self.rows((8, "2026-05-01T08:00:20+00:00"))  # a build replaced 7 while the server ran
+        e.sync(db)
+        self.assertEqual(db.execute("SELECT id, name FROM activities").fetchall(), [(8, "x")])
+
+    def test_remap_saves_what_reconcile_moved(self):
+        # a request during the build moved 7 -> 8 in memory first: the importer's remap must still save it
+        self.rows((7, "2026-05-01T08:00:00+00:00"))
+        e, db = self.store({"7": {"name": "x"}})  # an old edit, no start on disk
+        self.rows((8, "2026-05-01T08:00:20+00:00"))
+        e.sync(db)
+        e.remap({7: 8})
+        self.assertEqual(set(self.on_disk()), {"8"})
+
+    def test_bad_values_in_file_dropped(self):
+        self.rows((8, "2026-05-01T08:00:30+00:00"), (9, None), (10, None), (11, None))
+        e, db = self.store({"8": {"name": ["x"], "type": "Ride2"}, "9": {"name": "\ud800"},
+                            "10": {"type": {}}, "11": {"hidden": "yes", "name": "ok", "km": 10 ** 400},
+                            "7": {"name": "gone", "start": "2026-05-01T08:00:00+00:00", "km": 1e308}})
+        self.assertEqual(e.all()["sessions"], {"8": {"type": "Ride2", "start": "2026-05-01T08:00:30+00:00"},
+                                               "11": {"name": "ok"}, "7": {"name": "gone",
+                                                                           "start": "2026-05-01T08:00:00+00:00"}})
+        self.assertEqual(db.execute("SELECT id, name, type FROM activities ORDER BY id").fetchall(),
+                         [(8, "n", "Ride2"), (9, "n", "Ride"), (10, "n", "Ride"), (11, "ok", "Ride")])
+
+    def test_reconcile_is_serialized(self):
+        # a second sync waits for a running one, and an edit made meanwhile survives it
+        self.rows((7, "2026-05-01T08:00:00+00:00"))
+        e, db = self.store({"7": {"name": "x"}})
+        self.rows((8, "2026-05-01T08:00:20+00:00"), (9, "2026-05-01T10:00:00+00:00"))
+        entered, release = threading.Event(), threading.Event()
+
+        class Slow:  # the rows query of _reconcile blocks until released
+            def __init__(self, real):
+                self.real = real
+
+            def execute(self, sql, *a):
+                if "julianday(datetime), km" in sql:
+                    entered.set()
+                    release.wait(10)
+                return self.real.execute(sql, *a)
+        db1 = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, check_same_thread=False)
+        self.addCleanup(db1.close)
+        t1 = threading.Thread(target=e._reconcile, args=(Slow(db1),))
+        t1.start()
+        self.assertTrue(entered.wait(10))
+        e.update(db, 9, {"name": "meanwhile"})  # takes self.lock only: not blocked
+        db2 = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, check_same_thread=False)
+        self.addCleanup(db2.close)
+        done2 = threading.Event()
+        t2 = threading.Thread(target=lambda: (e._reconcile(db2), done2.set()))
+        t2.start()
+        self.assertFalse(done2.wait(0.2))  # waits on _rlock
+        release.set()
+        t1.join(10)
+        t2.join(10)
+        self.assertEqual({k: v["name"] for k, v in e.all()["sessions"].items()}, {"8": "x", "9": "meanwhile"})
+
+    def test_remap(self):
+        self.rows((8, "2026-05-01T08:00:30+00:00"), (9, None))
+        e, _ = self.store({"7": {"name": "x"}, "9": {"name": "mine"}, "3": {"name": "y"}})
+        e.remap({7: 8, 3: 9})  # 9 already has an edit: it stays
+        self.assertEqual({k: v["name"] for k, v in self.on_disk().items()}, {"8": "x", "9": "mine", "3": "y"})
+
+    def test_remap_write_failure_changes_nothing(self):
+        import store
+        self.rows((8, None))
+        e, _ = self.store({"7": {"name": "x"}})
+        with mock.patch.object(store, "write_json", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                e.remap({7: 8})
+        self.assertEqual(set(e.all()["sessions"]), {"7"})
 
 
 class OverlayColumns(unittest.TestCase):

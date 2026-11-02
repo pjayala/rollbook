@@ -14,6 +14,7 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
+from unittest import mock
 
 from helpers import SAMPLES, TOOL, tmpdir
 
@@ -296,6 +297,237 @@ class Api(Build):
         self.assertNotIn("1002", self.get("/api/edits")["sessions"])
         self.assertEqual(self.get("/api/activity/1002")["name"], "The come back")
 
+    # ---- every JSON POST reads its body whole or not at all (web/server.py _read_json)
+
+    ENDPOINTS = ("/api/profile", "/api/edit", "/api/favorites", "/api/last_import/dismiss")
+
+    def raw(self, path, length=None, body=b"", extra=()):
+        """Status of a hand-made POST. The server speaks HTTP/1.0 (one request per
+        connection), so "still usable" = it answers the next connection."""
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
+        try:
+            c.putrequest("POST", path)
+            hs = [("X-Rollbook", "1"), ("Content-Type", "application/json"), *extra]
+            if length is not None:
+                hs.append(("Content-Length", length))
+            for k, v in hs:
+                c.putheader(k, v)
+            c.endheaders()
+            c.send(body)
+            r = c.getresponse()
+            r.read()
+            return r.status
+        finally:
+            c.close()
+
+    def alive(self):
+        self.assertEqual(self.get("/api/status").get("readonly"), False)
+
+    def test_out_of_range_lengths(self):
+        for path in self.ENDPOINTS:
+            limit = 4096 if path.endswith("dismiss") else 65536
+            big = b'{"pad":"' + b"x" * limit + b'"}'
+            with self.subTest(path=path):
+                self.assertEqual(self.raw(path, str(len(big)), big), 413)
+                self.assertEqual(self.raw(path, "-1"), 400)  # used to read until EOF
+                self.assertEqual(self.raw(path, "abc"), 400)
+                self.assertEqual(self.raw(path), 411)  # no length: never guess the body is {}
+                self.assertEqual(self.raw(path, None, b"2\r\n{}\r\n0\r\n\r\n",
+                                          [("Transfer-Encoding", "chunked")]), 501)
+        self.alive()
+
+    def test_upload_negative_length(self):
+        self.assertEqual(self.raw("/api/import/upload?name=a.gpx", "-1"), 400)  # used to read to EOF
+        self.assertEqual(self.raw("/api/import/upload?name=a.gpx", "x"), 400)
+        self.alive()
+
+    def test_bad_json(self):
+        for path in self.ENDPOINTS:
+            for body in (b"not json", b"[1]", b'"x"', b'{"id": NaN}', b'{"a": Infinity}', b'{"a": 1e999}',
+                         b"[" * 2000 + b"]" * 2000, b"\xff\xfe"):
+                with self.subTest(path=path, body=body[:12]):
+                    self.assertEqual(self.raw(path, str(len(body)), body), 400)
+        self.assertEqual(self.get("/api/activity/1001")["name"], "Outdoor cycle")
+        self.alive()
+
+    def test_edit_bad_text_does_not_wedge_the_store(self):
+        # a lone surrogate used to stay in memory and fail every later save
+        body = b'{"id": "1001", "name": "\\ud800"}'
+        self.assertEqual(self.raw("/api/edit", str(len(body)), body), 400)
+        try:
+            code, r = self.edit({"id": "1001", "name": "Caf\u00e9 \u2192 river"})
+            self.assertEqual(code, 200, r)
+            with open(os.path.join(self.home, "edits.json"), encoding="ascii") as f:  # escapes only
+                self.assertEqual(json.load(f)["sessions"]["1001"]["name"], "Caf\u00e9 \u2192 river")
+        finally:
+            self.edit({"id": "1001", "name": ""})
+        self.assertEqual(self.edit({"id": "9" * 19})[0], 400)  # beyond int64: refused, not a dropped connection
+
+    def test_favorites_meta_is_checked(self):
+        h = {"X-Rollbook": "1", "Content-Type": "application/json"}
+
+        def fav(meta, on=True, key="ab12"):
+            body = json.dumps({"kind": "segments", "id": key, "on": on, "meta": meta}).encode()
+            return self.post("/api/favorites", body, h)[0]
+        try:
+            self.assertEqual(fav([1]), 200)
+            self.assertEqual(self.get("/api/favorites")["segments"]["ab12"].keys(), {"added"})
+            good = {"type": "Inline Skate", "start": [51.5, -0.1], "end": [51.6, -0.2], "m": 2500}
+            self.assertEqual(fav({**good, "x": 1}), 200)
+            self.assertEqual({k: v for k, v in self.get("/api/favorites")["segments"]["ab12"].items()
+                              if k != "added"}, good)
+            self.assertEqual(fav({"type": "x" * 41, "start": [91, 0], "end": [0, 0, 0], "m": {"a": [[[]]]}}), 200)
+            self.assertEqual(self.get("/api/favorites")["segments"]["ab12"].keys(), {"added"})
+            with mock.patch.object(server, "FAV_MAX", 1):
+                self.assertEqual(fav({}, key="cd34"), 400)  # full
+                self.assertEqual(fav(good), 200)  # re-starring an existing one is fine
+        finally:
+            fav(None, on=False)
+
+
+class Stores(unittest.TestCase):
+    """The small JSON stores: atomic 0600 writes, files that aren't an object."""
+
+    def setUp(self):
+        self.home = tmpdir(self)
+
+    def write(self, name, raw):
+        with open(os.path.join(self.home, name), "w", encoding="utf-8") as f:
+            f.write(raw)
+
+    def test_non_object_files_load_as_empty(self):
+        import profile as athlete
+        for raw in ("[]", "1", '"x"', "null", '{"sessions": []}', '{"sessions": {"1": 5}}', "{nope"):
+            with self.subTest(raw=raw):
+                self.write("edits.json", raw)
+                self.write("favorites.json", raw)
+                self.write("profile.json", raw)
+                self.assertEqual(edits.Edits(self.home).all()["sessions"], {})
+                fav = server.Favorites(os.path.join(self.home, "favorites.json")).get()
+                self.assertEqual((fav["sessions"], fav["segments"]), ({}, {}))
+                self.assertIsInstance(athlete.Profile(self.home).get(), dict)
+
+    def test_write_is_atomic_and_private(self):
+        import store
+        path = os.path.join(self.home, "x.json")
+        store.write_json(path, {"a": 1})
+        self.assertEqual(store.load_object(path), {"a": 1})
+        if os.name == "posix":
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        with self.assertRaises(ValueError):
+            store.write_json(path, {"a": float("nan")})
+        self.assertEqual(store.load_object(path), {"a": 1})
+        self.assertEqual([n for n in os.listdir(self.home) if n.endswith(".tmp")], [])
+
+    def test_write_failure_raises_and_keeps_old_file(self):
+        import store
+        from unittest import mock
+        path = os.path.join(self.home, "x.json")
+        store.write_json(path, {"a": 1})
+        with mock.patch.object(store.os, "replace", side_effect=OSError("locked")) as rep, \
+                mock.patch.object(store.time, "sleep"):
+            with self.assertRaises(OSError):
+                store.write_json(path, {"a": 2})
+        self.assertEqual(rep.call_count, 2)  # one retry (Windows: a reader holds the file)
+        self.assertEqual(store.load_object(path), {"a": 1})
+        self.assertEqual([n for n in os.listdir(self.home) if n.endswith(".tmp")], [])
+
+    def test_retry_succeeds(self):
+        import store
+        from unittest import mock
+        path = os.path.join(self.home, "x.json")
+        real = os.replace
+        calls = []
+
+        def flaky(a, b):
+            calls.append(a)
+            if len(calls) == 1:
+                raise PermissionError("locked")
+            return real(a, b)
+        with mock.patch.object(store.os, "replace", side_effect=flaky), mock.patch.object(store.time, "sleep"):
+            store.write_json(path, {"a": 3})
+        self.assertEqual(store.load_object(path), {"a": 3})
+
+    def test_planted_symlink_never_followed(self):
+        import store
+        if not hasattr(os, "symlink") or os.name != "posix":
+            self.skipTest("posix only")
+        from unittest import mock
+        victim = os.path.join(self.home, "victim")
+        with open(victim, "w") as f:
+            f.write("keep")
+        path = os.path.join(self.home, "x.json")
+        planted = path + ".planted.tmp"
+        os.symlink(victim, planted)
+        with mock.patch.object(store, "_tmp_name", return_value=planted):
+            with self.assertRaises(OSError):
+                store.write_json(path, {"a": 1})
+        self.assertTrue(os.path.islink(planted))  # left alone, not written through
+        with open(victim) as f:
+            self.assertEqual(f.read(), "keep")
+
+    def test_profile_file_values_checked(self):
+        import profile as athlete
+        self.write("profile.json", json.dumps({"hr_max": "190", "weight_kg": 70, "height_cm": 1e9,
+                                               "sex": "robot", "name": ["x"], "ftp": True, "hr_rest": 50.0,
+                                               "birth_year": 1980.5, "extra": 1}))
+        p = athlete.Profile(self.home).get()
+        self.assertEqual((p.get("hr_max"), p.get("weight_kg"), p.get("height_cm"), p.get("sex"), p.get("name"),
+                          p.get("ftp"), p.get("hr_rest"), p.get("birth_year"), p.get("extra")),
+                         (190, 70, None, None, None, None, 50, None, None))
+
+    def test_profile_set_checks_and_write_failure(self):
+        import profile as athlete
+        import store
+        pr = athlete.Profile(self.home)
+        for bad in ({"name": [1] * 3}, {"name": {"a": 1}}, {"hr_max": True}, {"hr_max": "nan"},
+                    {"weight_kg": "inf"}, {"sex": "robot"}, {"hr_max": [190]}, {"hr_rest": "60.5"},
+                    {"hr_max": "1e999"}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                pr.set(bad)
+        p = pr.set({"hr_max": "188", "hr_rest": "60.0", "name": " Ann "})  # form strings still fine
+        self.assertEqual((p["hr_max"], p["hr_rest"], type(p["hr_rest"])), (188, 60, int))
+        with mock.patch.object(store, "write_json", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                pr.set({"hr_max": 170})
+        self.assertEqual((pr.get()["hr_max"], pr.get()["name"]), (188, "Ann"))
+
+    def test_favorites_file_checked_on_load(self):
+        segs = {f"s{i}": {"added": "2026-01-01"} for i in range(server.FAV_MAX + 5)}
+        segs["ab"] = {"added": "x" * 50, "type": "Ride", "start": [1, 2], "m": "big", "junk": [[1]]}
+        self.write("favorites.json", json.dumps({"sessions": {"../x": {}, "12": {"added": "2026-01-02", "z": 1},
+                                                              "13": 5}, "segments": segs}))
+        d = server.Favorites(os.path.join(self.home, "favorites.json")).get()
+        self.assertEqual(d["sessions"], {"12": {"added": "2026-01-02"}})
+        self.assertEqual(len(d["segments"]), server.FAV_MAX)
+        self.assertNotIn("ab", d["segments"])  # past the cap (insertion order)
+        self.write("favorites.json", json.dumps({"segments": {"ab": segs["ab"]}}))
+        self.assertEqual(server.Favorites(os.path.join(self.home, "favorites.json")).get()["segments"]["ab"],
+                         {"type": "Ride", "start": [1, 2]})
+
+    def test_favorites_write_failure_keeps_memory(self):
+        import store
+        fav = server.Favorites(os.path.join(self.home, "favorites.json"))
+        with mock.patch.object(store, "write_json", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                fav.set("sessions", "1", True)
+        self.assertEqual(fav.get()["sessions"], {})
+
+    def test_edit_write_failure_keeps_memory(self):
+        export = os.path.join(self.home, "export")
+        make_export(export)
+        self.assertEqual(run(self.home, "db", "build", "--no-samples", export).returncode, 0)
+        import store
+        from unittest import mock
+        e = edits.Edits(self.home)
+        db = sqlite3.connect(f"file:{os.path.join(self.home, 'rollbook.db')}?mode=ro", uri=True)
+        self.addCleanup(db.close)
+        e.sync(db)
+        with mock.patch.object(store, "write_json", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                e.update(db, 1001, {"name": "x"})
+        self.assertEqual(e.get(1001), {})
+
 
 class PowerBuild(unittest.TestCase):
     """Power through the whole pipeline, and an older DB without the power columns."""
@@ -429,6 +661,34 @@ class EditsStore(unittest.TestCase):
         self.assertEqual(db.execute("SELECT name FROM activities").fetchall(), [("b",)])
         e.forget_removed("activities/a.gpx")  # what the importer calls on re-upload
         self.assertEqual(e.get(aid), {})
+
+    def test_delete_file_only_after_edit_saved(self):
+        import store
+        imp = os.path.join(self.home, "imports")
+        os.makedirs(os.path.join(imp, "activities"))
+        shutil.copy(os.path.join(SAMPLES, "Outdoor_cycle.gpx"), os.path.join(imp, "activities", "a.gpx"))
+        with open(os.path.join(imp, "activities.csv"), "w", newline="") as f:
+            csv.writer(f).writerows([["Activity ID", "Activity Date", "Activity Name", "Activity Type", "Filename"],
+                                     ["", "", "a", "Inline Skate", "activities/a.gpx"]])
+        self.assertEqual(run(self.home, "db", "build", "--no-samples", imp).returncode, 0)
+        aid, f = edits.import_id("activities/a.gpx"), os.path.join(imp, "activities", "a.gpx")
+        e = edits.Edits(self.home)
+        db = self.ro(e)
+        with mock.patch.object(store, "write_json", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                e.update(db, aid, {"delete": True, "remove_file": True})
+        self.assertTrue(os.path.exists(f))  # the edit wasn't saved, so the file stays
+        self.assertEqual(e.get(aid), {})
+        with mock.patch.object(edits.os, "remove", side_effect=PermissionError(13, "in use")):
+            with self.assertRaises(edits.RemoveFailed):
+                e.update(db, aid, {"delete": True, "remove_file": True})
+        self.assertTrue(e.get(aid)["deleted"])
+        self.assertNotIn("file_removed", e.get(aid))  # it is still there: no false claim
+        with open(os.path.join(imp, "activities.csv")) as fh:  # its row went first; a retry finishes
+            self.assertEqual([r[-1] for r in csv.reader(fh)], ["Filename"])
+        e.update(db, aid, {"delete": True, "remove_file": True})
+        self.assertFalse(os.path.exists(f))
+        self.assertTrue(e.get(aid)["file_removed"])
 
 
 if __name__ == "__main__":
