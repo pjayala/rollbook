@@ -124,6 +124,115 @@ def _km_close(a, b):
     return abs(a - b) <= REATTACH_KM * max(abs(a), abs(b))  # both _finite
 
 
+def db_signature(db):
+    """Cheap fingerprint of main.activities: changes when a build adds / replaces rows."""
+    return db.execute("SELECT count(*), total(id), max(id) FROM main.activities").fetchone()
+
+
+def db_snapshot(db, starts):
+    """(info {id: (start, julian start, km)}, {start string: julian day}) for reattach()."""
+    rows = db.execute("SELECT id, datetime, julianday(datetime), km FROM main.activities").fetchall()
+    jstart = {st: db.execute("SELECT julianday(?)", (st,)).fetchone()[0] for st in starts}
+    return {r[0]: (r[1], r[2], r[3] if _finite(r[3]) else None) for r in rows}, jstart
+
+
+def reattach(sess, info, jstart, needs_km=lambda e: False, skip=lambda e: False):
+    """Move entries of `sess` ({id str: {..., start, km}}) whose id vanished to the
+    one session that replaced it, in place; note start / km on the others.
+    Returns True if anything changed.
+
+    A replacement must start within REATTACH_S and, when both distances are
+    known, be within REATTACH_KM, as `db build` dedup requires; an entry with
+    needs_km(e) also needs both distances. Exactly one session without an entry
+    of its own may qualify, else the entry stays where it is."""
+    changed = False
+    for k, e in sess.items():
+        dt, _, km = info.get(int(k), (None, None, None))
+        if isinstance(dt, str) and "start" not in e:
+            e["start"] = dt
+            changed = True
+        if km is not None and "km" not in e:
+            e["km"] = km
+            changed = True
+    taken = {int(k) for k in sess}
+    for k in [k for k in sess if int(k) not in info]:
+        e = sess[k]
+        if not isinstance(e.get("start"), str) or skip(e):
+            continue
+        t = jstart.get(e["start"])
+        if t is None:
+            continue
+        ekm = e.get("km") if _finite(e.get("km")) else None
+        near = []
+        for i, (_, ti, km) in info.items():
+            if i in taken or ti is None or abs(ti - t) * 86400 >= REATTACH_S:
+                continue
+            if ekm is not None and km is not None:
+                if not _km_close(ekm, km):
+                    continue
+            elif needs_km(e):  # e.g. hiding the wrong session would make it vanish
+                continue
+            near.append(i)
+        if len(near) == 1:
+            sess[str(near[0])] = sess.pop(k)
+            taken.add(near[0])
+            changed = True
+    return changed
+
+
+class Follower:
+    """Keeps a store's per-session entries ({id str: {..., start, km}}) on their
+    session when an import replaces it under another id. Shared by edits and gear.
+
+    reconcile(db) runs on reads: cheap when the DB is unchanged (one signature
+    query, no lock), else one pass at a time under its own lock, so a slower
+    thread never applies an older snapshot over a newer one. Moves happen in
+    memory (`put`) and set `dirty`; the store saves them with its next write or
+    when the importer calls its remap (a GET never writes)."""
+
+    def __init__(self, lock, get, put, needs_km=lambda e: False, skip=lambda e: False):
+        self.lock, self.get, self.put, self.needs_km, self.skip = lock, get, put, needs_km, skip
+        self._dbsig = None
+        self._rlock = threading.Lock()
+        self.dirty = False
+
+    def reconcile(self, db):
+        try:
+            sig = db_signature(db)
+        except sqlite3.Error:
+            return
+        if sig == self._dbsig:  # the usual case: no lock taken
+            return
+        with self._rlock:
+            try:
+                sig = db_signature(db)
+                if sig == self._dbsig:
+                    return
+                with self.lock:
+                    starts = {e["start"] for e in self.get().values() if isinstance(e.get("start"), str)}
+                info, jstart = db_snapshot(db, starts)
+            except sqlite3.Error:  # no table yet, or a DB without start times: nothing to match on
+                return
+            with self.lock:
+                self._dbsig = sig
+                sess = {k: dict(e) for k, e in self.get().items()}
+                if reattach(sess, info, jstart, self.needs_km, self.skip):
+                    self.put(sess)
+                    self.dirty = True
+
+    def remap(self, mapping):
+        """{old id: new id} applied to a copy of the entries; None if nothing to save.
+        Caller holds the lock and saves the result (which clears dirty)."""
+        sess = dict(self.get())
+        moved = False
+        for old, new in mapping.items():
+            e = sess.get(str(old))
+            if e is not None and str(new) not in sess and not self.skip(e):
+                sess[str(new)] = sess.pop(str(old))
+                moved = True
+        return sess if moved or self.dirty else None
+
+
 class Edits:
     def __init__(self, home):
         self.home = home
@@ -132,9 +241,13 @@ class Edits:
         self.data = (store.load_object(self.path, MAX_FILE) if self.path else None) or {}
         self.data["sessions"] = _clean_sessions(self.data.get("sessions"))
         self.version = next(_VERSIONS)
-        self._dbsig = None
-        self._rlock = threading.Lock()  # one _reconcile at a time, start to finish
-        self._dirty = False  # _reconcile moved edits in memory; saved by the next write
+        self.follow = Follower(self.lock, lambda: self.data["sessions"], self._put_moved,
+                               needs_km=lambda e: bool(e.get("hidden")),  # hiding the wrong session would make it vanish
+                               skip=lambda e: bool(e.get("file_removed")))
+
+    def _put_moved(self, sess):
+        self.data = {**self.data, "sessions": sess}
+        self.version = next(_VERSIONS)
 
     # ------------------------------------------------------------ read
 
@@ -179,85 +292,16 @@ class Edits:
         db.commit()
 
     def _reconcile(self, db):
-        """After the DB changed: move edits of vanished ids to their replacement
-        (see the module doc) and note start / km on edits made before they were
-        kept. In memory only; the next save writes it.
-
-        A replacement must start within REATTACH_S and, when both distances are
-        known, be within REATTACH_KM, as `db build` dedup requires; an edit that
-        hides a session also needs both distances. Exactly one session without
-        an edit of its own may qualify, else the edit stays where it is."""
-        try:
-            sig = db.execute("SELECT count(*), total(id), max(id) FROM main.activities").fetchone()
-        except sqlite3.Error:
-            return
-        if sig == self._dbsig:  # the usual case: no lock taken
-            return
-        with self._rlock:  # a slower thread must not apply an older snapshot over a newer one
-            try:
-                sig = db.execute("SELECT count(*), total(id), max(id) FROM main.activities").fetchone()
-                if sig == self._dbsig:
-                    return
-                rows = db.execute("SELECT id, datetime, julianday(datetime), km FROM main.activities").fetchall()
-                with self.lock:
-                    starts = {e["start"] for e in self.data["sessions"].values() if isinstance(e.get("start"), str)}
-                jstart = {st: db.execute("SELECT julianday(?)", (st,)).fetchone()[0] for st in starts}
-            except sqlite3.Error:  # no table yet, or a DB without start times: nothing to match on
-                return
-            info = {r[0]: (r[1], r[2], r[3] if _finite(r[3]) else None) for r in rows}
-            with self.lock:
-                self._dbsig = sig
-                sess = {k: dict(e) for k, e in self.data["sessions"].items()}
-                changed = False
-                for k, e in sess.items():
-                    dt, _, km = info.get(int(k), (None, None, None))
-                    if isinstance(dt, str) and "start" not in e:
-                        e["start"] = dt
-                        changed = True
-                    if km is not None and "km" not in e:
-                        e["km"] = km
-                        changed = True
-                taken = {int(k) for k in sess}
-                for k in [k for k, e in sess.items() if int(k) not in info]:
-                    e = sess[k]
-                    if not isinstance(e.get("start"), str) or e.get("file_removed"):
-                        continue
-                    t = jstart.get(e["start"])
-                    if t is None:
-                        continue
-                    ekm = e.get("km") if _finite(e.get("km")) else None
-                    near = []
-                    for i, (_, ti, km) in info.items():
-                        if i in taken or ti is None or abs(ti - t) * 86400 >= REATTACH_S:
-                            continue
-                        if ekm is not None and km is not None:
-                            if not _km_close(ekm, km):
-                                continue
-                        elif e.get("hidden"):  # hiding the wrong session would make it vanish
-                            continue
-                        near.append(i)
-                    if len(near) == 1:
-                        sess[str(near[0])] = sess.pop(k)
-                        taken.add(near[0])
-                        changed = True
-                if changed:
-                    self.data = {**self.data, "sessions": sess}
-                    self.version = next(_VERSIONS)
-                    self._dirty = True
+        """See Follower: edits of a vanished id move to the session that replaced it."""
+        self.follow.reconcile(db)
 
     def remap(self, mapping):
         """{old id: new id} from an import that replaced sessions: edits follow.
         Also saves what _reconcile already moved in memory (a request during
         the build may have got there first)."""
         with self.lock:
-            sess = dict(self.data["sessions"])
-            moved = False
-            for old, new in mapping.items():
-                e = sess.get(str(old))
-                if e is not None and str(new) not in sess and not e.get("file_removed"):
-                    sess[str(new)] = sess.pop(str(old))
-                    moved = True
-            if moved or self._dirty:
+            sess = self.follow.remap(mapping)
+            if sess is not None:
                 self._commit(sess)
 
     @staticmethod
@@ -403,5 +447,5 @@ class Edits:
         if self.path:
             store.write_json(self.path, data)
         self.data = data
-        self._dirty = False
+        self.follow.dirty = False
         self.version = next(_VERSIONS)

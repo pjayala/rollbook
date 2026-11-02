@@ -22,6 +22,7 @@
     <a href="#/sessions" data-nav="sessions"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M5.5 3.5h9M5.5 8h9M5.5 12.5h9"/><circle cx="2.25" cy="3.5" r=".6"/><circle cx="2.25" cy="8" r=".6"/><circle cx="2.25" cy="12.5" r=".6"/></svg><span>Sessions</span></a>
     <a href="#/map" data-nav="map"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 3.5l4-1.5 5 2 4-1.5v10l-4 1.5-5-2-4 1.5z"/><path d="M5.5 2v10M10.5 4v10"/></svg><span>Map</span></a>
     <a href="#/segments" data-nav="segments"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="3" cy="12.5" r="1.5"/><circle cx="13" cy="3.5" r="1.5"/><path d="M4.5 12.5h5a2.5 2.5 0 000-5h-3a2.5 2.5 0 010-5h5"/></svg><span>Segments</span></a>
+    <a href="#/gear" data-nav="gear" aria-label="Gear"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6"/><circle cx="8" cy="8" r="1.6"/><path d="M8 2v4.4M8 9.6V14M2.8 11l3.8-2.2M9.4 7.2L13.2 5"/></svg><span>Gear</span><b class="navbadge" id="gear-badge" hidden></b></a>
   </nav>
   <a class="user" id="profile-btn" href="#/profile" data-nav="profile" title="Your profile">
     <span class="avatar" id="profile-init" aria-hidden="true">?</span>
@@ -79,6 +80,7 @@
     <label class="pfield"><span>Name</span><input id="ed-name" type="text" maxlength="200"><small class="muted" id="ed-name-orig"></small></label>
     <label class="pfield"><span>Sport</span><input id="ed-type" type="text" maxlength="40" list="ed-types"><small class="muted" id="ed-type-orig"></small></label>
     <datalist id="ed-types"></datalist>
+    <label class="pfield" id="ed-gear-row" hidden><span>Gear</span><select id="ed-gear"></select><small class="muted">Default follows the sport's default gear; set those on the <a href="#/gear">Gear</a> page.</small></label>
     <label class="pfield"><span>Hidden</span><span><input type="checkbox" id="ed-hidden"> leave out of stats, lists, maps and segments</span></label>
     <div class="toolbar"><button class="btn primary" type="submit">Save</button><span id="ed-msg" class="small"></span></div>
   </form>
@@ -89,6 +91,7 @@
   </div>
 </dialog>
 <script src="/map.js"></script>
+<script src="/gear.js"></script>
 <script src="/app.js"></script>
 <script src="/compare.js"></script>
 </body>

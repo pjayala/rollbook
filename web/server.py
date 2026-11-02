@@ -30,6 +30,7 @@ import analysis
 import api
 import conditions
 import edits
+import gear
 import geonames
 import profile as athlete
 import weather
@@ -189,6 +190,18 @@ def _port_answers(port):
         return False
 
 
+def _remap_all(mapping):
+    """The importer replaced sessions: edits and gear choices follow (each on its own)."""
+    err = None
+    for fn in (api.EDITS.remap, api.GEAR.remap):
+        try:
+            fn(mapping)
+        except Exception as e:  # noqa: BLE001  the other store must still move
+            err = e
+    if err:
+        raise err
+
+
 def start(db_path, cache_path, port=8765, offline=False, lan=None):
     """Bind and return (httpd, metrics, url); caller runs httpd.serve_forever().
     With lan (a Lan from lan_setup), httpd.lan_httpd is the network listener,
@@ -204,7 +217,8 @@ def start(db_path, cache_path, port=8765, offline=False, lan=None):
     api.SEGS = segments.SegmentStore(db_path, M, os.path.join(cache, "web_segments.json"))
     imp = api.IMPORTER = importer.Importer(db_path, M)
     imp.on_store = api.EDITS.forget_removed
-    imp.on_remap = api.EDITS.remap
+    api.GEAR = gear.Gear(home)
+    imp.on_remap = _remap_all
     imp.offline = offline
     imp.last = api.LAST = lastimport.LastImport(os.path.join(home, "last_import.json"))
     api.PROFILE = athlete.Profile(home)

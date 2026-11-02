@@ -226,6 +226,25 @@ svg.cal rect:hover { stroke: #fff; stroke-width: 1.5; }
   background: var(--pill-bg); color: var(--pill-ink); white-space: nowrap; vertical-align: 1px; }
 tr.best td { color: var(--hue); }
 .pill-pr { background: #3a2414; color: #ffb27a; }
+.pill-warn { background: var(--pill-warn-bg); color: var(--pill-warn-ink); }
+.pill-neg { background: #2c1a1c; color: var(--negative); }
+/* gear: service bar (grey while fine, amber near the interval, red past it) */
+.svc { display: inline-block; width: 64px; height: 6px; border-radius: 3px; background: var(--raised); vertical-align: middle; overflow: hidden; }
+.svc i { display: block; height: 100%; background: #6b6b6b; }
+.svc.warn i { background: var(--warning); } .svc.over i { background: var(--negative); }
+.svc-t { color: var(--muted); } .svc-t.warn { color: var(--warning); } .svc-t.over { color: var(--negative); }
+td.acts, td.svccell { white-space: nowrap; }
+.plink { color: var(--text); font-weight: 600; text-decoration: none; text-align: left; }
+.plink:hover { text-decoration: underline; }
+.gear-r { display: none; } body.readonly .gear-r { display: inline; }
+.gdefs, .gsess { max-width: 760px; }
+fieldset.pfield { border: 0; margin: 0; padding: 0; min-width: 0; }
+fieldset.pfield > legend { float: left; width: 150px; padding: 0; color: var(--muted); font-size: 13px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+dialog.dlg form .subhead { margin: 6px 0 0; }
+.navbadge { margin-left: auto; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; font-size: 11px; line-height: 18px; text-align: center;
+  background: #2c1a1c; color: var(--negative); font-weight: 600; }
+.navbadge[hidden] { display: none; }
 tr.best td.l { color: var(--hue); }
 tr.sel td { background: var(--active) !important; }
 tr.muted td { color: var(--faint); font-size: 12px; }
@@ -243,9 +262,9 @@ tr.muted td { color: var(--faint); font-size: 12px; }
 .selhost .selbox { top: 48px; }
 
 /* ------------------------------------------------------------ dialogs */
-dialog#import-dlg, dialog#edit-dlg { background: var(--surface); color: var(--text); border: 1px solid #262626; border-radius: var(--radius-card);
+dialog#import-dlg, dialog#edit-dlg, dialog.dlg:not(#cmp-dlg) { background: var(--surface); color: var(--text); border: 1px solid #262626; border-radius: var(--radius-card);
   padding: 20px 22px 22px; width: min(640px, 92vw); box-shadow: 0 24px 64px rgba(0,0,0,.6); } /* taste-skill-ignore: dialog */
-dialog#import-dlg::backdrop, dialog#edit-dlg::backdrop { background: rgba(0,0,0,.72); }
+dialog#import-dlg::backdrop, dialog#edit-dlg::backdrop, dialog.dlg::backdrop { background: rgba(0,0,0,.72); }
 .dlg-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
 .dlg-head h2 { margin: 0; padding: 0; font-size: 18px; font-weight: 600; }
 .drop { display: flex; flex-direction: column; gap: 8px; align-items: center; text-align: center; padding: 30px 18px; border: 1px dashed #444; border-radius: 14px; cursor: pointer;
@@ -310,7 +329,7 @@ tr.hiddenrow td { opacity: .5; }
 .pstat b { font-size: 18px; font-weight: 500; font-variant-numeric: tabular-nums; } .pstat small { color: var(--faint); }
 
 /* `rollbook web --lan` without --lan-write: the server refuses changes, so hide the controls */
-body.readonly #edit, body.readonly #psave, body.readonly .hiddenbar button, body.readonly .nr-x { display: none; }
+body.gear-ro .gear-w, body.readonly .gear-w, body.readonly #edit, body.readonly #psave, body.readonly .hiddenbar button, body.readonly .nr-x { display: none; }
 body.readonly button.star { pointer-events: none; }
 body.readonly button.star:not(.on) { display: none; }
 /* new records after an import (Import dialog + Progress page) */
@@ -325,6 +344,8 @@ body.readonly button.star:not(.on) { display: none; }
   .side { padding: 0 10px 12px; align-items: center; }
   .brand { padding: 0; justify-content: center; }
   .brand span, .nav a span, .user-text { display: none; }
+  .nav a { position: relative; }
+  .navbadge { position: absolute; top: 6px; right: 6px; min-width: 8px; width: 8px; height: 8px; padding: 0; font-size: 0; background: var(--negative); }
   .nav a { width: 44px; height: 40px; justify-content: center; padding: 0; }
   .user { padding: 6px; }
   .card { grid-column: span var(--st, 15); }
@@ -336,7 +357,16 @@ body.readonly button.star:not(.on) { display: none; }
   .side { top: auto; right: 0; width: auto; height: 64px; flex-direction: row; justify-content: space-around; align-items: stretch;
     padding: 0 4px env(safe-area-inset-bottom); border-right: 0; border-top: 1px solid var(--line); }
   .side .brand { display: none; }
-  .nav { flex-direction: row; flex: 4; margin: 0; justify-content: space-around; }
+  .nav { flex-direction: row; flex: 5; margin: 0; justify-content: space-around; }
+  .nav a { position: relative; }
+  .navbadge { position: absolute; top: 6px; right: calc(50% - 16px); min-width: 8px; width: 8px; height: 8px; padding: 0; font-size: 0; background: var(--negative); }
+  /* gear tables: drop the secondary columns, let the identity cell wrap */
+  table.gparts .svc { display: none; }  /* the coloured text says it */
+  table.gp-main td:nth-child(4), table.gp-main th:nth-child(4),
+  table.gparts td:nth-child(2), table.gparts th:nth-child(2), table.gtbl td:nth-child(3), table.gtbl th:nth-child(3),
+  table.gtbl td:nth-child(5), table.gtbl th:nth-child(5) { display: none; }
+  table.gparts td.l:not(.acts):not(.svccell), table.gtbl td.l { white-space: normal; }
+  fieldset.pfield > legend { float: none; width: auto; }
   .nav a, .user { flex: 1; flex-direction: column; justify-content: center; gap: 3px; width: auto; height: auto; padding: 0; border-radius: 12px; background: transparent !important; }
   .nav a span { display: block; font-size: 11px; line-height: 14px; }
   .nav a.on { color: var(--text); }

@@ -84,6 +84,7 @@ def main():
         shoot(chrome, profile, "power.png", f"#/session/{virt['id']}", 1440, 1440)
         prev_laps = [a for a in skate if a.get("laps_n") and a["name"] == laps["name"] and a["id"] != laps["id"]][-1]
         shoot(chrome, profile, "compare.png", f"#/compare/{laps['id']}/{prev_laps['id']}", 1440, 1200)
+        shoot(chrome, profile, "gear.png", "#/gear", 1440, 1100)
     finally:
         srv.terminate()
         srv.wait(10)

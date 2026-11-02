@@ -13,6 +13,7 @@ import sqlite3
 import analysis
 import conditions as cond
 import edits
+import gear as gearmod
 import geonames
 import profile as athlete
 import strava_web
@@ -37,6 +38,7 @@ FAVS = None  # Favorites, set in server.start()
 GEO = None  # geonames.Geonames, set in server.start()
 PROFILE = None  # athlete.Profile, set in server.start()
 EDITS = edits.Edits(None)  # in-memory until start() points it at $ROLLBOOK_HOME/edits.json
+GEAR = gearmod.Gear(None)  # likewise, $ROLLBOOK_HOME/gear.json
 
 
 def connect(path):
@@ -104,9 +106,12 @@ def api_activities(db, q, M):
         r["temp"], r["wind"] = c.get("temp"), c.get("ws")
         r["adj_neutral"] = c.get("adjusted")
     prof = PROFILE.get()
+    res = GEAR.resolver(db)
     for r in rows:
         k = athlete.calories(r, prof) or {}
         r["kcal"], r["kcal_src"] = k.get("kcal"), k.get("source")
+        r["gear_id"], r["gear_src"] = res.of(r["id"], r["type"], r["date"])
+        r["gear_name"] = res.name(r["gear_id"])
     return rows
 
 
@@ -117,6 +122,12 @@ def api_activity(db, q, M, aid):
     act = dict(row)
     act["edit"] = EDITS.get(aid)
     act["import_file"] = EDITS.import_file(aid, act.get("filename")) is not None
+    res = GEAR.resolver(db)
+    act["gear_id"], act["gear_src"] = res.of(aid, act["type"], act.get("date"))
+    act["gear_name"] = res.name(act["gear_id"])
+    act["gear_parts"] = res.part_info(act["gear_id"], act.get("date"))
+    dg, _ = res.default_of(act["type"], act.get("date"))  # what "Default" means for this session
+    act["gear_default"] = {"id": dg, "name": res.name(dg)} if dg else None
     m = M.get_many(db, [(aid, act["samples"])])[aid]
     splits = [dict(r) for r in db.execute(
         "SELECT km, moving_s, elapsed_s, pause_s, kmh, hr FROM splits WHERE activity_id=? ORDER BY km",
@@ -266,6 +277,7 @@ GET = {
     "import": lambda db, q, M: IMPORTER.status(),
     "last_import": lambda db, q, M: api_last_import(db, LAST),
     "strava": api_strava,
+    "gear": lambda db, q, M: GEAR.view(db),
 }
 ACTIVITY_ID = re.compile(r"[0-9]{1,15}")
 
@@ -348,6 +360,18 @@ def post_strava_sync(r):
     return IMPORTER.sync_strava()
 
 
+def post_gear(r):
+    try:
+        out = GEAR.apply(r.db(), r.body)
+    except gearmod.NotFound:
+        return 404, {"error": "no such gear, part or session"}
+    except gearmod.Conflict as e:
+        return 409, {"error": str(e)}
+    except gearmod.Broken as e:
+        return 503, {"error": str(e)}
+    return 200, {**out, "gear": GEAR.view(r.db())}
+
+
 JSON_LIMIT = 65536
 
 
@@ -367,4 +391,5 @@ POST = {
     "/api/import/upload": Post(post_upload, None),
     "/api/import/run": Post(post_import_run, None),
     "/api/strava/sync": Post(post_strava_sync, None),
+    "/api/gear": Post(post_gear, what="gear"),
 }

@@ -1600,7 +1600,9 @@ async function viewSessions() {
   const cols = [
     ["pick", `<span class="vh">Select to compare</span>`, a => `<input type="checkbox" class="pick" data-pick="${a.id}" ${pick.includes(a.id) ? "checked" : ""} aria-label="Select ${esc(a.name)} on ${esc(a.date)} to compare">`, "pickc"],
     ["fav", `<span class="star on" title="Favorite">${ICON.star}</span>`, a => starSlot("sessions", a.id)], ["date", "date", a => `${fdate(a._d)}`, "l"],
-    ["name", "name", a => esc(a.name) + (a.hidden ? ` <span class="pill">${a.deleted ? "deleted" : "hidden"}</span>` : ""), "l"], ["km", "km", a => fkm(a.km)],
+    ["name", "name", a => esc(a.name) + (a.hidden ? ` <span class="pill">${a.deleted ? "deleted" : "hidden"}</span>` : ""), "l"],
+    ...(acts.some(a => a.gear_id) ? [["gear_name", "gear", a => a.gear_id ? `<span class="${a.gear_src === "default" ? "muted" : ""}" title="${a.gear_src === "default" ? "the sport's default" : "chosen for this session"}">${esc(a.gear_name)}</span>` : `<span class="muted">–</span>`, "l"]] : []),
+    ["km", "km", a => fkm(a.km)],
     ["elapsed_s", "elapsed", a => dur(a.elapsed_s, true)], ["moving_s", "moving", a => dur(a.moving_s, true)], ["pause_s", "paused", a => dur(a.pause_s)],
     ["kmh_moving", "avg km/h", a => f2(a.kmh_moving)], ["pace", "pace /km", a => pace(a.kmh_moving)], ["best10min_kmh", "best 10", a => f2(a.best10min_kmh)],
     ["b60", "best 60", a => f2(a.b60)],
@@ -1613,10 +1615,15 @@ async function viewSessions() {
   ];
   if (acts.some(a => isNum(pwAvg(a)))) cols.splice(cols.findIndex(c => c[0] === "hr_avg"), 0,
     ["watts", "avg W", a => f0(pwAvg(a))], ["np", "weighted W", a => f0(a.np)], ["pw20m", "best 20 W", a => f0(a.pw20m)]);
+  const gearOpts = [...new Map(acts.filter(a => a.gear_id).map(a => [a.gear_id, a.gear_name])).entries()];
+  const gearKey = "gearFilter:" + S.type;  // per sport: a gear belongs to its sports
+  let gearF = localStorage[gearKey] || "";
+  if (gearF && !(gearF === "none" ? gearOpts.length : gearOpts.some(([id]) => id === gearF))) { gearF = ""; delete localStorage[gearKey]; }
   const app = $("#app");
   app.innerHTML = `<div class="head"><div><h1>${esc(S.type)} sessions</h1><div class="muted" id="cnt"></div></div></div>
     <div class="panel"><div class="toolbar"><input id="q" placeholder="filter: name, date, route…" value="${esc(S.q)}" style="width:260px">
       <label class="muted small">min km <input id="mink" type="number" value="${Math.max(0, +localStorage.minKm || 0)}" style="width:70px"></label>
+      ${gearOpts.length ? `<label class="muted small">gear <select id="gearf"><option value="">all</option>${gearOpts.map(([id, n]) => `<option value="${esc(id)}" ${id === gearF ? "selected" : ""}>${esc(n)}</option>`).join("")}<option value="none" ${gearF === "none" ? "selected" : ""}>none</option></select></label>` : ""}
       <label class="muted small"><input type="checkbox" id="favonly" ${localStorage.favOnly === "1" ? "checked" : ""}> Favorites only</label>
       <label class="muted small" title="hidden and deleted sessions never count towards stats, maps or segments"><input type="checkbox" id="showhidden" ${showHidden ? "checked" : ""}> show hidden</label>
       <span class="cmpbar" id="cmpbar" hidden><span class="muted small" id="cmpcnt"></span><button class="btn small" id="cmpgo" disabled>Compare</button><button class="linkbtn" id="cmpclr">Clear</button></span></div>
@@ -1626,7 +1633,8 @@ async function viewSessions() {
     const k = S.sort.k, dir = S.sort.dir;
     const val = a => k === "watts" ? pwAvg(a) : k === "pace" ? (a.kmh_moving ? -a.kmh_moving : null) : k === "date" ? a._t : k === "fav" ? (isFav("sessions", a.id) ? 1 : 0) : a[k];
     const favOnly = $("#favonly").checked;
-    const rows = acts.filter(a => (a.km || 0) >= mink && (!favOnly || isFav("sessions", a.id)) && (!q || `${a.name} ${a.date} ${a.route} ${a.device}`.toLowerCase().includes(q)))
+    const rows = acts.filter(a => (a.km || 0) >= mink && (!favOnly || isFav("sessions", a.id)) && gearFilterMatch(a, gearF)
+      && (!q || `${a.name} ${a.date} ${a.route} ${a.device} ${a.gear_name || ""}`.toLowerCase().includes(q)))
       .sort((a, b) => { const x = val(a), y = val(b); if (x == null) return y == null ? 0 : 1; if (y == null) return -1; return (x > y ? 1 : x < y ? -1 : 0) * dir; });
     const nh = rows.filter(a => a.hidden).length;
     $("#cnt").textContent = `${rows.length} of ${acts.length} sessions · ${fkm(rows.reduce((s, a) => s + (a.hidden ? 0 : a.km || 0), 0))} km` + (nh ? ` · ${nh} hidden` : "");
@@ -1644,6 +1652,7 @@ async function viewSessions() {
   $("#q").oninput = e => { S.q = e.target.value; draw(); };
   $("#mink").oninput = e => { localStorage.minKm = e.target.value; draw(); };
   $("#favonly").onchange = e => { localStorage.favOnly = e.target.checked ? "1" : "0"; draw(); };
+  if ($("#gearf")) $("#gearf").onchange = e => { gearF = localStorage[gearKey] = e.target.value; draw(); };
   $("#showhidden").onchange = e => { localStorage.showHidden = e.target.checked ? "1" : "0"; viewSessions(); };
   $("#cmpclr").onclick = () => { pick = []; savePick(pick); draw(); };
   $("#cmpgo").onclick = () => {
@@ -1726,10 +1735,10 @@ async function viewSession(id) {
   app.innerHTML = `
     <div class="head">
       <div><h1>${starSlot("sessions", a.id)} ${esc(a.name)}</h1>
-        <div class="muted">${esc(a.type)} · ${fdate(d)} · ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")} · ${esc(a.device || "")} · ${routePill(m.route)}</div></div>
+        <div class="muted">${esc(a.type)} · ${fdate(d)} · ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")} · ${esc(a.device || "")}${gearChip(a)} · ${routePill(m.route)}</div></div>
       <div class="headnav">
         <button class="btn" id="cmp" title="Compare with another session">Compare…</button>
-        <button class="btn" id="edit" title="Rename, change sport, hide or delete">Edit</button>
+        <button class="btn" id="edit" title="Rename, change sport or gear, hide or delete">Edit</button>
         <button class="btn" id="prev" ${prev ? "" : "disabled"}>← previous</button>
         <button class="btn" id="next" ${next ? "" : "disabled"}>next →</button>
       </div>
@@ -2204,6 +2213,7 @@ async function route() {
     else if (page === "segment" && arg) await viewSegment(arg);
     else if (page === "profile") await viewProfile();
     else if (page === "compare") await viewCompare(arg, arg2, seq);
+    else if (page === "gear") await (arg ? viewGearOne(arg, seq) : viewGear(seq));
     else await viewProgress();
     const y = history.state && history.state.y;
     if (Nav.pop && y) requestAnimationFrame(() => scrollTo(0, y));  // back/forward: where you were
@@ -2359,7 +2369,7 @@ async function runStravaSync() {
  * With `dest`, navigate there instead of redrawing the current page. */
 async function refreshData(dest) {
   S.acts = {}; S.tracks = {}; S.segs = {}; S.segsP = {}; S.lastImport = null; S.mapView = {};
-  [S.types, { hrmax: S.hrmax }, S.favs] = await Promise.all([api("types"), api("hrmax"), api("favorites")]);
+  [S.types, { hrmax: S.hrmax }, S.favs] = await Promise.all([api("types"), api("hrmax"), api("favorites"), loadGear(true).catch(() => null)]);
   S.hrmax = S.hrmax || 185;
   const sel = $("#type"), cur = S.type;
   sel.innerHTML = S.types.map(t => `<option value="${esc(t.type)}">${esc(t.type)} (${t.n})</option>`).join("");
@@ -2380,7 +2390,8 @@ async function postEdit(body) {
   if (!r.ok) throw new Error(j.error || r.status);
   return j;
 }
-function openEdit(a) {
+async function openEdit(a) {
+  await loadGear(true).catch(() => null);  // the gear list and its rev as they are now
   const dlg = $("#edit-dlg"), msg = $("#ed-msg"), e = a.edit || {};
   $("#ed-name").value = a.name || ""; $("#ed-name").placeholder = a.orig_name || "";
   $("#ed-type").value = a.type || ""; $("#ed-type").placeholder = a.orig_type || "";
@@ -2391,17 +2402,19 @@ function openEdit(a) {
   $("#ed-rmrow").hidden = !a.import_file; $("#ed-rmfile").checked = false;
   $("#ed-delete").disabled = !!a.deleted;
   msg.textContent = "";
-  const save = async (body, dest) => {
+  const gearChange = editGearField(a);
+  const save = async (body, dest, gearOp) => {
     msg.className = "small muted"; msg.textContent = "saving…";
     try {
-      const j = await postEdit({ id: String(a.id), ...body });
+      if (gearOp) await postGear(gearOp);  // first: the likelier one to fail (a stale tab, a bad store)
+      const j = await postEdit({ id: String(a.id), ...body }).catch(e => { throw new Error(gearOp ? `gear saved, the rest not: ${e.message}` : e.message); });
       dlg.close();
       const type = (j.edit && j.edit.type) || a.orig_type;
       if (type && type !== S.type && !j.edit.hidden) S.type = localStorage.type = type;  // follow the session to its sport
       await refreshData(dest);
     } catch (err) { msg.className = "small down"; msg.textContent = "Could not save: " + err.message; }
   };
-  $("#ed-form").onsubmit = ev => { ev.preventDefault(); save({ name: $("#ed-name").value, type: $("#ed-type").value, hidden: $("#ed-hidden").checked }); };
+  $("#ed-form").onsubmit = ev => { ev.preventDefault(); save({ name: $("#ed-name").value, type: $("#ed-type").value, hidden: $("#ed-hidden").checked }, undefined, gearChange()); };
   $("#ed-delete").onclick = () => {
     const rm = $("#ed-rmfile").checked;
     if (!confirm(`Delete "${a.name}"?\n\n` + (rm ? "Its imported file is removed from data/imports for good; the session can still be restored until the next fresh rebuild."
@@ -2438,7 +2451,8 @@ if (new URLSearchParams(location.search).has("app"))
 
 async function boot() {
   let st;
-  [S.types, { hrmax: S.hrmax }, S.favs, st] = await Promise.all([api("types"), api("hrmax"), api("favorites"), api("status").catch(() => ({}))]);
+  [S.types, { hrmax: S.hrmax }, S.favs, st] = await Promise.all([api("types"), api("hrmax"), api("favorites"), api("status").catch(() => ({})),
+    loadGear().catch(() => null)]);
   // opened from a phone via `rollbook web --lan` (without --lan-write): the
   // server refuses every change, so don't offer any
   S.readonly = !!st.readonly;

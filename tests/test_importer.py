@@ -594,6 +594,30 @@ class EditsFollowReplacement(unittest.TestCase):
             self.assertEqual(set(json.load(f)["sessions"]), {"5001"})
 
 
+class GearFollowsReplacement(unittest.TestCase):
+    def test_cli_build_reattaches_gear_choice(self):
+        import gear
+        home = tmpdir(self)
+        imp = imports_dir(home, {"skate.fit": (T0, 6.0, 600)})
+        self.assertEqual(run(home, "db", "build", "--no-samples", imp).returncode, 0)
+        old, path = edits.import_id("activities/skate.fit"), os.path.join(home, "rollbook.db")
+        db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        g = gear.Gear(home)
+        gid = g.apply(db, {"op": "gear.save", "rev": 0, "name": "Skates"})["id"]
+        g.apply(db, {"op": "assign", "rev": 1, "ids": [old], "gear": gid})
+        db.close()
+        r = run(home, "db", "build", "--no-samples",
+                Dedup().make_export(home, T0 + timedelta(seconds=5), distance="3594.0"))
+        self.assertIn("replaces activities/skate.fit", r.stderr)
+        g = gear.Gear(home)  # a restarted server
+        db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        self.addCleanup(db.close)
+        self.assertEqual(g.resolver(db).of(5001, "Inline Skate", "2026-05-01"), (gid, "explicit"))
+        g.remap({})  # what the importer calls afterwards (or the next change) saves the move
+        with open(os.path.join(home, "gear.json"), encoding="utf-8") as f:
+            self.assertEqual(set(json.load(f)["sessions"]), {"5001"})
+
+
 class EditsReattach(unittest.TestCase):
     """Edits._reconcile / remap on a hand-made DB."""
 

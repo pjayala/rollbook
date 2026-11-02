@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.8.0 (2026-11-02)
+
+### Gear (#10, part 1)
+
+- A **Gear** page: your skates, bikes and shoes, made of parts (wheels,
+  frame, boots, bearings, tyres, chain, shoes…) with their specs (diameter,
+  hardness, frame length and setup, shoe size…). Km, time and sessions per
+  gear and per part; a part counts only for the days it was fitted, so
+  swapping or rotating wheels keeps the history right.
+- A default gear per sport from a date: new sessions (dashboard import,
+  Strava sync, `db build`) get it, older ones keep theirs. Change a single
+  session's gear in its **Edit** dialog.
+- Service reminders: set an interval in km per part, log a service, rotation
+  or replacement; parts near or past it are flagged on the page and in the
+  sidebar.
+- The session page shows its gear (and the parts on it that day); the
+  session list gets a gear column and filter.
+- Kept in `data/gear.json`, which a rebuild never touches. A file that can't
+  be read is left as it is and gear goes read-only until it's fixed.
+
 ## 0.7.0 (2026-10-30)
 
 ### Best efforts by distance (#6)

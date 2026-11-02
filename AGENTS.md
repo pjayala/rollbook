@@ -59,6 +59,7 @@ web/conditions.py       weather + wind / slope split per out-and-back
 web/lanaccess.py        --lan: token, addresses, TLS listener, banner
 web/tiles.py            OSM tile proxy + disk cache
 web/favorites.py        starred sessions / segments (data/favorites.json)
+web/gear.py             gear, parts, defaults, per-session choices (data/gear.json) + totals
 web/segments.py         auto-generated segments + effort matching
 web/profile.py          athlete profile (data/profile.json) + per-sport calorie models
 web/weather.py          historical weather per outdoor session (Open-Meteo, cached)
@@ -73,7 +74,7 @@ web/app.py              `rollbook app`: desktop window (pywebview / Chrome-Edge 
 web/mcp_server.py       `rollbook mcp`: read-only MCP tools over stdio JSON-RPC
 web/strava_web.py       `rollbook strava`: session-cookie sync of new activities from strava.com
 opencode.json           registers `./rollbook mcp` as the `rollbook` MCP server
-web/static/             index.html / app.js / map.js / compare.js / style.css, vanilla JS + SVG/canvas, no CDN
+web/static/             index.html / app.js / map.js / compare.js / gear.js / style.css, vanilla JS + SVG/canvas, no CDN
 web/static/icon.svg     app icon master; favicon.svg is its 16-32 px simplification
 web/static/inter-*.woff2 Inter variable font (Latin subset, OFL, Inter-OFL.txt), served locally
 assets/                 rendered icons: rollbook-{128..1024}.png, rollbook.icns, rollbook.ico
@@ -406,6 +407,30 @@ changing `derive()`.
   replay loops) and bumps `routeSeq`; a view that awaited checks it so a late
   response never draws over the next page. The HTML carries a
   Content-Security-Policy (`CSP` in http_base.py; no inline scripts anywhere).
+* **Gear** (#10; `web/gear.py`, `web/static/gear.js`, `#/gear`,
+  `#/gear/<id>`): parts (`KINDS`: kind → label, group, typed specs) are
+  fitted to gear by dated mounts `{part, from, to}` — a part counts for a
+  session on day D when `from <= D < to` (swap day = the new part), and is on
+  at most one gear at a time. A session's gear: its explicit choice
+  (`sessions[id]`, null = none), else its (edited) sport's default — the
+  `defaults[sport]` entry with the latest `since <= date`, unless that gear was
+  retired by then. Totals over the visible sessions (the `activities` view):
+  sessions, km, time, first/last per gear and part; `km_since_service` from
+  the last service (a session on that day counts after it; never serviced =
+  from install plus `km_offset`), due at `>= service_km`, never when retired;
+  trainer (Virtual) km don't wear a tyre. Nothing goes into SQLite or the
+  metrics cache; `api_activities` / `api_activity` add `gear_id`,
+  `gear_name`, `gear_src` (explicit / default) and `gear_parts` (Strava's own
+  `gear` column is untouched). `POST /api/gear {op, rev, ...}` (ops in
+  `gear.OPS`): each op runs on a copy, then the whole store is `validate()`d
+  — the same check as on load — and written (previous version to
+  `gear.json.bak`); a stale `rev` is 409, unknown ids 404, ids are made by
+  the server. A `gear.json` that fails to load is never overwritten: writes
+  503 until it is fixed or moved. Explicit choices keep `start` / `km` and
+  follow a replaced session like edits (`edits.reattach`, importer
+  `_remap_all`). The page uses `Map`s for anything keyed by id or sport;
+  every user string goes through `esc()`; write controls carry `.gear-w`
+  (hidden read-only). Reminder badge: `#gear-badge`.
 * **Favorites** (star toggle on sessions and segments, "favorites only" filters,
   a Favorites panel on the progress page) live in `data/favorites.json`,
   server-side so the app window and browser tabs share them. Starred
