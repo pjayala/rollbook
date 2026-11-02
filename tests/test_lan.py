@@ -11,6 +11,7 @@ import socket
 import ssl
 import tempfile
 import threading
+import time
 import unittest
 
 from test_end_to_end import make_export, run
@@ -222,6 +223,26 @@ class PlainHttp(LanBase):
         out = io.StringIO()
         server.lan_banner(self.lan, "never", out)
         self.assertIn("unencrypted", out.getvalue())
+
+
+    def test_unauthenticated_body_never_read(self):
+        # a client without the cookie (or with a foreign Host) is answered at once and
+        # cut off: the server doesn't sit reading a body it announced but never sends
+        for method in ("GET", "POST"):
+            for host, cookie in ((None, ""), ("evil.example", f"{server.LAN_COOKIE}={self.lan.token}")):
+                with self.subTest(method=method, host=host), \
+                        socket.create_connection(("127.0.0.1", self.port), timeout=10) as sk:
+                    sk.sendall(f"{method} /api/edit HTTP/1.1\r\nHost: {host or self.host}\r\n"
+                               f"Cookie: {cookie}\r\nContent-Length: 1000000\r\n\r\n".encode())
+                    t = time.monotonic()
+                    got = b""
+                    while True:
+                        b = sk.recv(4096)
+                        if not b:
+                            break
+                        got += b
+                    self.assertTrue(got.startswith(b"HTTP/1.0 403"), got[:40])
+                    self.assertLess(time.monotonic() - t, 5)
 
 
 class Token(unittest.TestCase):

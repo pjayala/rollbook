@@ -136,11 +136,53 @@ def bmr(p):
     return 10 * w + 6.25 * h - 5 * age + (5 if sex == "male" else -161)
 
 
+MAX_FILE = 1 << 20
+SEXES = ("male", "female", "other")
+
+
+def _field(k, v):
+    """A FIELDS value checked and converted (form fields arrive as strings)."""
+    typ, lo, hi = FIELDS[k]
+    if typ is str:
+        if not isinstance(v, str):
+            raise ValueError(f"{k}: must be text")
+        v = v.strip()[:hi]
+        if k == "sex" and v not in SEXES:
+            raise ValueError("sex must be male, female or other")
+        return v
+    if isinstance(v, bool) or not isinstance(v, (int, float, str)):
+        raise ValueError(f"{k}: not a number")
+    try:
+        f = float(v)
+        if typ is int:
+            if f != int(f):  # "60.0" from a number input is fine, 60.5 is not
+                raise ValueError
+            f = int(f)
+        v = f
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"{k}: not a number")
+    if not lo <= v <= hi:  # also NaN / inf
+        raise ValueError(f"{k}: must be between {lo} and {hi}")
+    return v
+
+
+def validate(d):
+    """The known, valid fields of a stored profile (the file is not trusted)."""
+    out = {}
+    for k in FIELDS:
+        if isinstance(d, dict) and d.get(k) not in (None, ""):
+            try:
+                out[k] = _field(k, d[k])
+            except ValueError:
+                pass
+    return out
+
+
 class Profile:
     def __init__(self, home):
         self.path = os.path.join(home, "profile.json")
         self.home, self.lock = home, threading.Lock()
-        self.data = store.load_object(self.path) or {}
+        self.data = validate(store.load_object(self.path, MAX_FILE))
         if not self.data:
             self.data = self._from_export()
 
@@ -177,22 +219,11 @@ class Profile:
 
     def set(self, body):
         clean = {}
-        for k, (typ, lo, hi) in FIELDS.items():
+        for k in FIELDS:
             v = body.get(k)
-            if v in (None, ""):
+            if v is None or v == "":
                 continue
-            if typ is str:
-                v = str(v).strip()[:hi]
-                if k == "sex" and v not in ("male", "female", "other"):
-                    raise ValueError("sex must be male, female or other")
-            else:
-                try:
-                    v = typ(v)
-                except (TypeError, ValueError):
-                    raise ValueError(f"{k}: not a number")
-                if not lo <= v <= hi:
-                    raise ValueError(f"{k}: must be between {lo} and {hi}")
-            clean[k] = v
+            clean[k] = _field(k, v)
         with self.lock:
             store.write_json(self.path, clean)
             self.data = clean

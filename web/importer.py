@@ -71,7 +71,7 @@ class Importer:
         """Store one uploaded file; returns a dict for the client."""
         if self.job.get("state") == "running":
             return 409, {"error": "an import is already running"}
-        if not length or length > MAX_BYTES:
+        if type(length) is not int or length <= 0 or length > MAX_BYTES:
             return 413, {"error": "empty or too large"}
         name = safe_name(name)
         low = name.lower()
@@ -259,13 +259,18 @@ class Importer:
         try:
             starts = self._starts()
             gone = {i: starts0[i] for i in before - after if starts0.get(i) is not None}
+            added = after - before
+            near = lambda t, u: t is not None and u is not None and abs(t - u) * 86400 < 120  # noqa: E731
+            cand = {i: [g for g, tg in gone.items() if near(starts.get(i), tg)] for i in added}
+            back = {g: [i for i in added if g in cand[i]] for g in gone}
             new, remap = [], {}
-            for i in after - before:
-                t = starts.get(i)
-                old = next((g for g, tg in gone.items() if t is not None and abs(t - tg) * 86400 < 120), None)
-                if old is not None:
-                    remap[old] = i
-                else:
+            for i in added:
+                # a replacement only when the pairing is 1:1 both ways; two sessions
+                # within 2 min of each other must not swap edits (Edits._reconcile,
+                # which also compares km, gets the rest)
+                if len(cand[i]) == 1 and back[cand[i][0]] == [i]:
+                    remap[cand[i][0]] = i
+                elif not cand[i]:
                     new.append(i)
             new.sort(key=lambda i: (starts.get(i) or 0, i))  # oldest first: the store keeps the newest
             j = self.job

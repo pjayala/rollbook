@@ -26,6 +26,7 @@ import sys
 import time
 
 import edits
+import profile as athlete
 import server as srv
 import store
 
@@ -202,9 +203,8 @@ class Rollbook:
         return m
 
     def hrmax(self):
-        p = store.load_object(os.path.join(self.home, "profile.json")) or {}
-        hr = p.get("hr_max")
-        if type(hr) in (int, float) and 0 < hr < 260:
+        hr = athlete.validate(store.load_object(os.path.join(self.home, "profile.json"), athlete.MAX_FILE)).get("hr_max")
+        if hr:
             return hr
         return self.db.execute("SELECT MAX(hr_max) FROM activities "
                                "WHERE date >= date('now','-365 days') AND hr_max < 230").fetchone()[0]

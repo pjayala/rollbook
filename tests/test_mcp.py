@@ -52,7 +52,8 @@ class MCP(unittest.TestCase):
         path = os.path.join(self.home, "profile.json")
         self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
         db_max = self.srv.rb.hrmax() if not os.path.exists(path) else None
-        for raw in ("[]", '"x"', '{"hr_max": "190"}', '{"hr_max": NaN}', "{bad"):
+        for raw in ("[]", '"x"', '{"hr_max": "abc"}', '{"hr_max": NaN}', "{bad", '{"hr_max": true}',
+                    '{"hr_max": 300}', '{"hr_max": 1e999}', '{"hr_max": [190]}'):
             with open(path, "w") as f:
                 f.write(raw)
             self.assertEqual(self.srv.rb.hrmax(), db_max, raw)  # falls back to the recorded max

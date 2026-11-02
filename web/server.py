@@ -847,6 +847,11 @@ PROFILE = None  # athlete.Profile, set in start()
 EDITS = edits.Edits(None)  # in-memory until start() points it at $ROLLBOOK_HOME/edits.json
 
 
+FAV_MAX = 5000  # per kind
+FAV_KEY = re.compile(r"[0-9a-zA-Z]{1,24}")
+STORE_MAX = 8 << 20  # edits / profile / favorites file size read at start
+
+
 class Favorites:
     """Starred sessions and segments, in $ROLLBOOK_HOME/favorites.json.
 
@@ -858,25 +863,51 @@ class Favorites:
 
     def __init__(self, path):
         self.path, self.lock = path, threading.Lock()
-        self.data = store.load_object(path) or {}
-        for k in ("sessions", "segments"):
-            b = self.data.get(k)
-            self.data[k] = {i: v for i, v in b.items() if isinstance(v, dict)} if isinstance(b, dict) else {}
+        d = store.load_object(path, STORE_MAX) or {}
+        self.data = {}
+        for k in ("sessions", "segments"):  # the file is checked like a request
+            b = d.get(k) if isinstance(d.get(k), dict) else {}
+            ok = {}
+            for i, v in b.items():
+                if len(ok) < FAV_MAX and FAV_KEY.fullmatch(i) and isinstance(v, dict):
+                    added = v.get("added")
+                    ok[i] = {**({"added": added} if isinstance(added, str) and len(added) <= 10 else {}),
+                             **(self._meta(v) if k == "segments" else {})}
+            self.data[k] = ok
 
     def get(self):
         with self.lock:
             return json.loads(json.dumps(self.data))
 
+    @staticmethod
+    def _meta(meta):
+        """What a starred segment keeps to be re-found: sport, end points, length."""
+        if not isinstance(meta, dict):
+            return {}
+        out = {}
+        t = meta.get("type")
+        if isinstance(t, str) and 0 < len(t) <= edits.TYPE_MAX:
+            out["type"] = t
+        for k in ("start", "end"):
+            p = meta.get(k)
+            if (isinstance(p, list) and len(p) == 2 and all(type(x) in (int, float) for x in p)
+                    and -90 <= p[0] <= 90 and -180 <= p[1] <= 180):
+                out[k] = p
+        m = meta.get("m")
+        if type(m) in (int, float) and 0 < m < 1e6:
+            out["m"] = m
+        return out
+
     def set(self, kind, key, on, meta=None):
-        if kind not in ("sessions", "segments") or not re.fullmatch(r"[0-9a-zA-Z]{1,24}", str(key)):
+        if kind not in ("sessions", "segments") or not FAV_KEY.fullmatch(str(key)):
             raise ValueError("bad favorite")
         with self.lock:
             data = json.loads(json.dumps(self.data))
             bucket = data[kind]
             if on:
-                m = {k: v for k, v in (meta if isinstance(meta, dict) else {}).items()
-                     if k in ("type", "start", "end", "m")}
-                bucket[str(key)] = {"added": time.strftime("%Y-%m-%d"), **m}
+                if str(key) not in bucket and len(bucket) >= FAV_MAX:
+                    raise ValueError(f"at most {FAV_MAX} favorite {kind}")
+                bucket[str(key)] = {"added": time.strftime("%Y-%m-%d"), **self._meta(meta)}
             else:
                 bucket.pop(str(key), None)
             store.write_json(self.path, data)  # memory changes only once it is on disk
@@ -1088,7 +1119,9 @@ class TileCache:
 
 LAN_COOKIE = "rb_lan"
 LAN_COOKIE_AGE = 365 * 86400
-TLS_TIMEOUT_S = 60  # handshake and idle keep-alive on the LAN listener
+TLS_TIMEOUT_S = 60  # TLS handshake on the LAN listener
+REQUEST_TIMEOUT_S = 60  # any socket read / write once a request is being handled
+REJECT_DRAIN = 1 << 20  # a refused body up to this is read and dropped (keeps the connection), else close
 LAN_READONLY_MSG = "read-only from the network; restart with `rollbook web --lan-write` to allow changes"
 
 
@@ -1246,6 +1279,7 @@ def make_handler(db_path, M, tiles, lan=None):
         return local.db
 
     class H(BaseHTTPRequestHandler):
+        timeout = REQUEST_TIMEOUT_S  # per socket operation: a stalled client frees its thread
         server_version = "rollbook"
 
         def log_message(self, format, *args):
@@ -1293,7 +1327,7 @@ def make_handler(db_path, M, tiles, lan=None):
                 return False
             if self.headers.get("Host") not in lan.hosts:
                 self._reject(403, "unknown host name: open one of the addresses printed by "
-                                  "`rollbook web --lan`\n", "text/plain")
+                                  "`rollbook web --lan`\n", "text/plain", drain=False)
                 return True
             if "t" in q and self.command == "GET":
                 if not lan.ok_token(q["t"]):
@@ -1312,7 +1346,7 @@ def make_handler(db_path, M, tiles, lan=None):
             if lan.ok_token(self._lan_cookie()):
                 return False
             self._reject(403, "not signed in: open the link (or scan the QR code) printed by "
-                              "`rollbook web --lan` once on this device\n", "text/plain")
+                              "`rollbook web --lan` once on this device\n", "text/plain", drain=False)
             return True
 
         def do_GET(self):
@@ -1357,26 +1391,37 @@ def make_handler(db_path, M, tiles, lan=None):
                 return False
             return origin is None or origin in tuple("http://" + o for o in ours)
 
-        def _reject(self, code, body, ctype="application/json"):
+        def _reject(self, code, body, ctype="application/json", drain=True):
             """Refuse a POST without breaking the connection: read (and drop) a
             small request body first, otherwise close instead of keeping alive."""
             try:
                 n = int(self.headers.get("Content-Length") or 0)
             except ValueError:
                 n = -1  # unparseable: can't drain it, so close
-            if 0 < n <= 32 * 1024 * 1024:
+            if self.headers.get("Transfer-Encoding"):
+                n = -1  # chunked: length unknown, close
+            if drain and 0 < n <= REJECT_DRAIN:
                 while n > 0:
                     n -= len(self.rfile.read(min(n, 1 << 20)) or b"x" * n)
             else:
                 self.close_connection = True
             return self.send(code, body, ctype)
 
+        def _not_saved(self, what, e):
+            """A failed store write: the details (paths) go to the log, not the client."""
+            self.log_error("%s not saved: %r", what, e)
+            return self.json({"error": f"{what} not saved: {e.strerror or type(e).__name__}"}, 500)
+
         def _read_json(self, limit=65536):
             """The request body as a JSON object, or None after answering 400/413.
             The body is read whole or not at all (a refused one is drained, or the
-            connection closed), so keep-alive never parses its tail as a request."""
+            connection closed: the client then sees the answer, not a reset)."""
+            if self.headers.get("Content-Length") is None:
+                self.close_connection = True
+                self.json({"error": "Content-Length required"}, 411)
+                return None
             try:
-                n = int(self.headers.get("Content-Length") or 0)
+                n = int(self.headers["Content-Length"])
             except ValueError:
                 n = -1
             if not 0 <= n <= limit:
@@ -1393,6 +1438,9 @@ def make_handler(db_path, M, tiles, lan=None):
             return b
 
         def do_POST(self):
+            if self.headers.get("Transfer-Encoding"):  # every client here sends Content-Length
+                self.close_connection = True
+                return self.send(501, json.dumps({"error": "Transfer-Encoding not supported"}))
             u = urllib.parse.urlparse(self.path)
             q = {k: v[-1] for k, v in urllib.parse.parse_qs(u.query).items()}
             if lan is not None:
@@ -1421,7 +1469,7 @@ def make_handler(db_path, M, tiles, lan=None):
                 except (ValueError, TypeError, AttributeError) as e:
                     return self.json({"error": str(e)}, 400)
                 except OSError as e:
-                    return self.json({"error": f"profile not saved: {e}"}, 500)
+                    return self._not_saved("profile", e)
             if u.path == "/api/edit":
                 if not self._same_origin() or self.headers.get("X-Rollbook") != "1":
                     return self._reject(403, json.dumps({"error": "forbidden"}))
@@ -1430,7 +1478,7 @@ def make_handler(db_path, M, tiles, lan=None):
                     return
                 try:
                     aid = b.get("id")
-                    if not re.fullmatch(r"\d{1,20}", str(aid)):
+                    if not re.fullmatch(r"[0-9]{1,18}", str(aid)):
                         raise ValueError("bad id")
                     e, type_changed = EDITS.update(dbc(), int(aid), b)
                     if type_changed:  # derive() treats Virtual sessions differently
@@ -1440,8 +1488,13 @@ def make_handler(db_path, M, tiles, lan=None):
                     return self.json({"id": int(aid), "edit": e, "edits": EDITS.all()})
                 except KeyError:
                     return self.json({"error": "no such activity"}, 404)
-                except (ValueError, TypeError, OSError) as e:
+                except (ValueError, TypeError) as e:
                     return self.json({"error": str(e)}, 400)
+                except edits.RemoveFailed as e:  # the hide is saved; the page reloads it
+                    self.log_error("import file not removed: %r", e.__cause__)
+                    return self.json({"error": str(e), "edits": EDITS.all()}, 500)
+                except OSError as e:
+                    return self._not_saved("edit", e)
             if u.path == "/api/favorites":
                 if not self._same_origin() or self.headers.get("X-Rollbook") != "1":
                     return self._reject(403, json.dumps({"error": "forbidden"}))
@@ -1453,7 +1506,7 @@ def make_handler(db_path, M, tiles, lan=None):
                 except (ValueError, TypeError) as e:
                     return self.json({"error": str(e)}, 400)
                 except OSError as e:
-                    return self.json({"error": f"favorites not saved: {e}"}, 500)
+                    return self._not_saved("favorite", e)
             if u.path == "/api/last_import/dismiss":  # POST only: viewing never dismisses
                 if not self._same_origin() or self.headers.get("X-Rollbook") != "1":
                     return self._reject(403, json.dumps({"error": "forbidden"}))
@@ -1473,7 +1526,12 @@ def make_handler(db_path, M, tiles, lan=None):
                     return self._reject(403, json.dumps({"error": "forbidden"}))
                 try:
                     if u.path == "/api/import/upload":
-                        n = int(self.headers.get("Content-Length") or 0)
+                        try:
+                            n = int(self.headers.get("Content-Length") or 0)
+                        except ValueError:
+                            n = -1
+                        if n < 0:  # read(-1) would read to EOF, past MAX_BYTES
+                            return self._reject(400, json.dumps({"error": "bad Content-Length"}))
                         code, body = IMPORTER.receive(self.rfile, n, q.get("name", ""), q.get("type"))
                     elif u.path == "/api/import/run":
                         code, body = IMPORTER.run()

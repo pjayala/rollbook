@@ -40,11 +40,20 @@ import time
 import store
 
 NAME_MAX = 200
+MAX_FILE = 8 << 20
 TYPE_MAX = 40
 OVERRIDES = ("name", "type")
 REATTACH_S = 120  # same window as the importer's / `db build`'s dedup
-META = ("updated", "start")  # bookkeeping keys: an edit with only these is no edit
+REATTACH_KM = 0.05  # and the same distance tolerance
+# bookkeeping keys: an edit with only these is no edit. start / km identify the
+# session if an import replaces it under another id (see _reconcile)
+META = ("updated", "start", "km")
+_KEY = re.compile(r"[0-9]{1,18}")  # activity ids; longer would overflow SQLite's int64
 _VERSIONS = itertools.count(1)  # process-wide, so two stores never share a version
+
+
+class RemoveFailed(OSError):
+    """The delete was saved (session hidden) but its import file is still there."""
 
 
 def import_id(rel):
@@ -62,7 +71,57 @@ def _text(v, limit, what):
         raise ValueError(f"{what} is longer than {limit} characters")
     if re.search(r"[\x00-\x1f\x7f]", v):
         raise ValueError(f"{what} has control characters")
+    if re.search(r"[\ud800-\udfff]", v):  # lone surrogates can't be written as UTF-8
+        raise ValueError(f"{what} is not valid text")
     return v
+
+
+def _finite(x):
+    return type(x) in (int, float) and abs(x) < 1e9  # NaN / inf compare False; no float() of a huge int
+
+
+def _clean_edit(e):
+    """One edit as loaded from the file, checked like a request: unknown or bad
+    fields are dropped (a list as a name would fail every query)."""
+    out = {}
+    for k, limit in (("name", NAME_MAX), ("type", TYPE_MAX)):
+        try:
+            v = _text(e.get(k), limit, k)
+        except ValueError:
+            continue
+        if v:
+            out[k] = v
+    for k in ("hidden", "deleted", "file_removed"):
+        if e.get(k) is True:
+            out[k] = True
+    for k in ("updated", "start"):
+        v = e.get(k)
+        if isinstance(v, str) and len(v) <= 40:
+            try:
+                _text(v, 40, k)
+            except ValueError:
+                continue
+            out[k] = v
+    if _finite(e.get("km")):
+        out["km"] = e["km"]
+    return out
+
+
+def _clean_sessions(sess):
+    """Edits as loaded from the file: digit keys, valid values, real edits only."""
+    if not isinstance(sess, dict):
+        return {}
+    out = {}
+    for k, v in sess.items():
+        if isinstance(k, str) and _KEY.fullmatch(k) and isinstance(v, dict):
+            e = _clean_edit(v)
+            if set(e) - set(META):
+                out[k] = e
+    return out
+
+
+def _km_close(a, b):
+    return abs(a - b) <= REATTACH_KM * max(abs(a), abs(b))  # both _finite
 
 
 class Edits:
@@ -70,12 +129,12 @@ class Edits:
         self.home = home
         self.path = os.path.join(home, "edits.json") if home else None
         self.lock = threading.Lock()
-        self.data = (store.load_object(self.path) if self.path else None) or {}
-        sess = self.data.get("sessions")
-        self.data["sessions"] = {k: v for k, v in sess.items() if isinstance(v, dict)} \
-            if isinstance(sess, dict) else {}
+        self.data = (store.load_object(self.path, MAX_FILE) if self.path else None) or {}
+        self.data["sessions"] = _clean_sessions(self.data.get("sessions"))
         self.version = next(_VERSIONS)
         self._dbsig = None
+        self._rlock = threading.Lock()  # one _reconcile at a time, start to finish
+        self._dirty = False  # _reconcile moved edits in memory; saved by the next write
 
     # ------------------------------------------------------------ read
 
@@ -113,7 +172,7 @@ class Edits:
             ver = self.version
             rows = [(int(k), e.get("name"), e.get("type"), 1 if e.get("hidden") else None,
                      1 if e.get("deleted") else None)
-                    for k, e in self.data["sessions"].items() if k.isdigit()]
+                    for k, e in self.data["sessions"].items()]
         db.execute("DELETE FROM temp.rollbook_edits")
         db.executemany("INSERT INTO temp.rollbook_edits VALUES (?,?,?,?,?)", rows)
         db.execute("UPDATE temp.rollbook_edits_v SET v=?", (ver,))
@@ -121,62 +180,85 @@ class Edits:
 
     def _reconcile(self, db):
         """After the DB changed: move edits of vanished ids to their replacement
-        (see the module doc) and note the start of edits made before `start`
-        was kept. In memory only; the next save writes it."""
+        (see the module doc) and note start / km on edits made before they were
+        kept. In memory only; the next save writes it.
+
+        A replacement must start within REATTACH_S and, when both distances are
+        known, be within REATTACH_KM, as `db build` dedup requires; an edit that
+        hides a session also needs both distances. Exactly one session without
+        an edit of its own may qualify, else the edit stays where it is."""
         try:
             sig = db.execute("SELECT count(*), total(id), max(id) FROM main.activities").fetchone()
         except sqlite3.Error:
             return
-        if sig == self._dbsig:
+        if sig == self._dbsig:  # the usual case: no lock taken
             return
-        try:
-            rows = db.execute("SELECT id, datetime, julianday(datetime) FROM main.activities").fetchall()
-        except sqlite3.Error:  # a DB without start times: nothing to match on
-            self._dbsig = sig
-            return
-        jd = {r[0]: r[2] for r in rows}
-        dt = {r[0]: r[1] for r in rows}
-        with self.lock:
-            self._dbsig = sig
-            sess = self.data["sessions"]
-            moved = False
-            for k, e in sess.items():
-                if k.isdigit() and int(k) in dt and isinstance(dt[int(k)], str) and "start" not in e:
-                    e["start"] = dt[int(k)]
-            orphans = [k for k, e in sess.items() if k.isdigit() and int(k) not in jd
-                       and isinstance(e.get("start"), str) and not e.get("file_removed")]
-            if orphans:
-                taken = {int(k) for k in sess if k.isdigit()}
-                for k in orphans:
-                    t = db.execute("SELECT julianday(?)", (sess[k]["start"],)).fetchone()[0]
+        with self._rlock:  # a slower thread must not apply an older snapshot over a newer one
+            try:
+                sig = db.execute("SELECT count(*), total(id), max(id) FROM main.activities").fetchone()
+                if sig == self._dbsig:
+                    return
+                rows = db.execute("SELECT id, datetime, julianday(datetime), km FROM main.activities").fetchall()
+                with self.lock:
+                    starts = {e["start"] for e in self.data["sessions"].values() if isinstance(e.get("start"), str)}
+                jstart = {st: db.execute("SELECT julianday(?)", (st,)).fetchone()[0] for st in starts}
+            except sqlite3.Error:  # no table yet, or a DB without start times: nothing to match on
+                return
+            info = {r[0]: (r[1], r[2], r[3] if _finite(r[3]) else None) for r in rows}
+            with self.lock:
+                self._dbsig = sig
+                sess = {k: dict(e) for k, e in self.data["sessions"].items()}
+                changed = False
+                for k, e in sess.items():
+                    dt, _, km = info.get(int(k), (None, None, None))
+                    if isinstance(dt, str) and "start" not in e:
+                        e["start"] = dt
+                        changed = True
+                    if km is not None and "km" not in e:
+                        e["km"] = km
+                        changed = True
+                taken = {int(k) for k in sess}
+                for k in [k for k, e in sess.items() if int(k) not in info]:
+                    e = sess[k]
+                    if not isinstance(e.get("start"), str) or e.get("file_removed"):
+                        continue
+                    t = jstart.get(e["start"])
                     if t is None:
                         continue
-                    near = [i for i, ti in jd.items()
-                            if ti is not None and i not in taken and abs(ti - t) * 86400 < REATTACH_S]
-                    if len(near) == 1:  # ambiguous = leave it where it is
+                    ekm = e.get("km") if _finite(e.get("km")) else None
+                    near = []
+                    for i, (_, ti, km) in info.items():
+                        if i in taken or ti is None or abs(ti - t) * 86400 >= REATTACH_S:
+                            continue
+                        if ekm is not None and km is not None:
+                            if not _km_close(ekm, km):
+                                continue
+                        elif e.get("hidden"):  # hiding the wrong session would make it vanish
+                            continue
+                        near.append(i)
+                    if len(near) == 1:
                         sess[str(near[0])] = sess.pop(k)
                         taken.add(near[0])
-                        moved = True
-            if moved:
-                self.version = next(_VERSIONS)
+                        changed = True
+                if changed:
+                    self.data = {**self.data, "sessions": sess}
+                    self.version = next(_VERSIONS)
+                    self._dirty = True
 
     def remap(self, mapping):
-        """{old id: new id} from an import that replaced sessions: edits follow."""
+        """{old id: new id} from an import that replaced sessions: edits follow.
+        Also saves what _reconcile already moved in memory (a request during
+        the build may have got there first)."""
         with self.lock:
-            sess = self.data["sessions"]
-            prev = dict(sess)
+            sess = dict(self.data["sessions"])
             moved = False
             for old, new in mapping.items():
                 e = sess.get(str(old))
                 if e is not None and str(new) not in sess and not e.get("file_removed"):
                     sess[str(new)] = sess.pop(str(old))
                     moved = True
-            if moved:
-                try:
-                    self._save()
-                except OSError:
-                    self.data["sessions"] = prev
-                    raise
+            if moved or self._dirty:
+                self._commit(sess)
 
     @staticmethod
     def _ncols(db):
@@ -212,7 +294,7 @@ class Edits:
         """
         if not isinstance(body, dict):
             raise ValueError("expected a JSON object")
-        row = db.execute("SELECT name, type, filename, datetime FROM main.activities WHERE id=?",
+        row = db.execute("SELECT name, type, filename, datetime, km FROM main.activities WHERE id=?",
                          (aid,)).fetchone()
         if row is None:
             raise KeyError(aid)
@@ -246,26 +328,31 @@ class Edits:
             if body.get("delete"):
                 cur["hidden"] = cur["deleted"] = True
             if remove:
-                self._remove_file(remove, row[2])
                 cur["file_removed"] = True
             for k in META:
                 cur.pop(k, None)
-            prev = self.data["sessions"].get(str(aid))
+            sess = dict(self.data["sessions"])
             if cur:
                 cur["updated"] = time.strftime("%Y-%m-%d")
                 if isinstance(row[3], str):
                     cur["start"] = row[3]
-                self.data["sessions"][str(aid)] = cur
+                if _finite(row[4]):
+                    cur["km"] = row[4]
+                sess[str(aid)] = cur
             else:
-                self.data["sessions"].pop(str(aid), None)
-            try:
-                self._save()
-            except OSError:
-                if prev is None:
-                    self.data["sessions"].pop(str(aid), None)
-                else:
-                    self.data["sessions"][str(aid)] = prev
-                raise
+                sess.pop(str(aid), None)
+            self._commit(sess)  # the edit is on disk before the file goes
+            if remove:
+                try:
+                    self._remove_file(remove, row[2])
+                except OSError as err:
+                    if os.path.exists(remove):  # still there: don't claim it was removed
+                        cur = {k: v for k, v in cur.items() if k != "file_removed"}
+                        try:
+                            self._commit({**sess, str(aid): cur})
+                        except OSError as e2:
+                            raise err from e2
+                    raise RemoveFailed(f"hidden, but the file was not removed: {err.strerror or err}") from err
             return dict(cur), cur.get("type") != before
 
     def forget_removed(self, rel):
@@ -275,11 +362,13 @@ class Edits:
             cur = self.data["sessions"].get(key)
             if not cur or not cur.get("file_removed"):
                 return
-            for k in ("hidden", "deleted", "file_removed"):
-                cur.pop(k, None)
-            if not set(cur) - set(META):
-                self.data["sessions"].pop(key)
-            self._save()
+            sess = dict(self.data["sessions"])
+            cur = {k: v for k, v in cur.items() if k not in ("hidden", "deleted", "file_removed")}
+            if set(cur) - set(META):
+                sess[key] = cur
+            else:
+                sess.pop(key)
+            self._commit(sess)
 
     def import_file(self, aid, filename):
         """Path of the stored single-file import behind this activity, or None."""
@@ -290,24 +379,29 @@ class Edits:
         return p if os.path.dirname(p) == root and os.path.isfile(p) else None
 
     def _remove_file(self, path, filename):
-        os.remove(path)
+        """Its activities.csv row first, the file last: a failure part way leaves
+        the file, which a later delete can still remove."""
         index = os.path.join(self.home, "imports", "activities.csv")
         try:
             with open(index, newline="", encoding="utf-8-sig") as f:
                 rows = list(csv.reader(f))
         except OSError:
-            return
-        if not rows or "Filename" not in rows[0]:
-            return
-        i = rows[0].index("Filename")
-        keep = [rows[0]] + [r for r in rows[1:] if not (len(r) > i and r[i].strip() == filename)]
-        tmp = index + ".tmp"
-        with open(tmp, "w", newline="", encoding="utf-8") as f:
-            csv.writer(f).writerows(keep)
-        os.replace(tmp, index)
+            rows = []
+        if rows and "Filename" in rows[0]:
+            i = rows[0].index("Filename")
+            keep = [rows[0]] + [r for r in rows[1:] if not (len(r) > i and r[i].strip() == filename)]
+            tmp = index + ".tmp"
+            with open(tmp, "w", newline="", encoding="utf-8") as f:
+                csv.writer(f).writerows(keep)
+            os.replace(tmp, index)
+        os.remove(path)
 
-    def _save(self):
-        """Caller holds the lock."""
+    def _commit(self, sessions):
+        """Write the edits with these sessions, then make them current; on a
+        failed write (OSError) nothing changes. Caller holds the lock."""
+        data = {**self.data, "sessions": sessions}
         if self.path:
-            store.write_json(self.path, self.data)
+            store.write_json(self.path, data)
+        self.data = data
+        self._dirty = False
         self.version = next(_VERSIONS)
