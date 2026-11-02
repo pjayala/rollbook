@@ -331,7 +331,55 @@ def main(home):
     with open(os.path.join(home, "profile.json"), "w") as f:
         json.dump({"name": "Demo Athlete", "sex": "female", "birth_year": 1991, "height_cm": 169,
                    "weight_kg": 64, "hr_rest": 52, "hr_max": 192}, f)
+    write_gear(home)
     print(f"demo: {len(rows)} sessions in {home}")
+
+
+def write_gear(home):
+    """Skates, a trainer bike and running shoes with their parts, fixed ids so the
+    demo stays byte-for-byte reproducible; one wheel swap and a rotation part way."""
+    import sqlite3
+    db = sqlite3.connect(os.path.join(home, "rollbook.db"))
+    days = {t: [r[0] for r in db.execute("SELECT date FROM activities WHERE type=? ORDER BY date", (t,))]
+            for t in ("Inline Skate", "Virtual Ride", "Run")}
+    db.close()
+    sk = days["Inline Skate"]
+    start, mid, late = sk[0], sk[len(sk) // 2], sk[(len(sk) * 3) // 4]
+    gid = lambda n: f"{n:016x}"  # noqa: E731
+    part = lambda kind, name, brand, specs, svc=None, **kw: {  # noqa: E731
+        "kind": kind, "name": name, "brand": brand, "specs": specs, "bought": None, "km_offset": kw.get("off", 0),
+        "service_km": svc, "services": kw.get("services", []), "retired": kw.get("retired"), "notes": ""}
+    parts = {
+        gid(1): part("boots", "Next 110", "Powerslide", {"size_eu": 40, "shell": "carbon"}),
+        gid(2): part("frame", "Trinity 3x110", "Powerslide", {"length_mm": 325, "material": "aluminium",
+                                                               "setup": "3x110", "mount": "Trinity"}),
+        gid(3): part("wheels", "Spinner 110", "Powerslide", {"diameter_mm": 110, "hardness_a": 85, "count": 6},
+                     900, retired=mid),
+        gid(4): part("wheels", "Matter Image 110", "Matter", {"diameter_mm": 110, "hardness_a": 86, "count": 6,
+                                                               "profile": "race"}, 900,
+                     services=[{"date": late, "action": "rotate", "note": "front to back"}]),
+        gid(5): part("bearings", "Wicked ABEC 9", "Wicked", {"size": "608", "rating": "ABEC 9", "count": 12}, 3000),
+        gid(6): part("bike", "Trainer bike", "", {"type": "trainer"}),
+        gid(7): part("chain", "11-speed chain", "Shimano", {"speeds": 11}, 3000, off=1200),
+        gid(8): part("shoes", "Trail shoes", "Inov-8", {"size_eu": 39, "drop_mm": 4}, 700),
+    }
+    on = lambda p, f, t=None: {"part": gid(p), "from": f, "to": t}  # noqa: E731
+    gear = {
+        gid(101): {"name": "Powerslide 3x110", "sports": ["Inline Skate"], "retired": None, "notes": "",
+                   "parts": [on(1, start), on(2, start), on(3, start, mid), on(4, mid), on(5, start)]},
+        gid(102): {"name": "Trainer bike", "sports": ["Virtual Ride"], "retired": None, "notes": "",
+                   "parts": [on(6, days["Virtual Ride"][0]), on(7, days["Virtual Ride"][0])]},
+        gid(103): {"name": "Inov-8 trail shoes", "sports": ["Run"], "retired": None, "notes": "",
+                   "parts": [on(8, days["Run"][0])]},
+    }
+    defaults = {"Inline Skate": [{"gear": gid(101), "since": start}],
+                "Virtual Ride": [{"gear": gid(102), "since": days["Virtual Ride"][0]}],
+                "Run": [{"gear": gid(103), "since": days["Run"][0]}]}
+    sys.path.insert(0, os.path.join(os.path.dirname(TOOL), "..", "web"))
+    import gear as gearmod  # the server's own check: a demo store that would not load fails here
+    import store
+    store.write_json(os.path.join(home, "gear.json"), gearmod.validate(
+        {"v": 1, "rev": 1, "parts": parts, "gear": gear, "defaults": defaults, "sessions": {}}))
 
 
 def place_names():
