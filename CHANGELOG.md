@@ -2,6 +2,16 @@
 
 ## 0.8.0 (2026-11-02)
 
+### Gear in compare and MCP (#10, part 3)
+
+- Comparing two sessions names their gear, and says which parts differed
+  (e.g. other wheels or frame, with their specs): part of the gap may be the
+  gear. The picker suggests "same route, other gear" and tags rows on other
+  gear.
+- MCP: a read-only `gear` tool (gear, fitted parts, km, hours, service state,
+  defaults) and the session's gear in `activity`. Notes and purchase dates
+  are never sent.
+
 ### Gear pages (#10, part 2)
 
 - A gear's page shows its **parts over time** (when each was fitted and

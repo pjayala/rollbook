@@ -26,6 +26,7 @@ import sys
 import time
 
 import edits
+import gear as gearmod
 import profile as athlete
 import analysis as srv
 import store
@@ -75,6 +76,10 @@ Which metric to trust:
 - km / ascent_m prefer Strava's figure; *_calc are recomputed; s_* columns are
   Strava's own summary. Summed watch climbing is unreliable, use ascent_m.
 
+Gear (`gear` tool, and `gear` in `activity`): compare gear only with
+best10min_kmh (best 20 min power indoors), never kmh_moving; each gear was
+used in its own period, so form and season differ too.
+
 Start with `sports` or `schema`, then `activities` / `trend` / `records`;
 `query` takes any SELECT (activities = edited view, main.activities = raw,
 samples is per second and large: always filter by activity_id).
@@ -116,6 +121,7 @@ class Rollbook:
         self.qdb.set_progress_handler(self._progress, 20000)
         self._edits, self._edits_mtime = None, None
         self._metrics, self._metrics_mtime = None, None
+        self._gear, self._gear_mtime = None, None
 
     def close(self):
         self.db.close()
@@ -144,8 +150,10 @@ class Rollbook:
 
     @staticmethod
     def _mtime(path):
+        """Change key of a file: mtime alone misses a rewrite within the clock's granularity."""
         try:
-            return os.stat(path).st_mtime_ns
+            st = os.stat(path)
+            return st.st_mtime_ns, st.st_size, st.st_ino
         except OSError:
             return None
 
@@ -156,6 +164,9 @@ class Rollbook:
             self._edits, self._edits_mtime = edits.Edits(self.home), m
         self._edits.sync(self.db)
         self._edits.sync(self.qdb)  # runs unlocked: called only between queries
+        m = self._mtime(os.path.join(self.home, "gear.json"))
+        if self._gear is None or m != self._gear_mtime:  # read only: this process never writes gear.json
+            self._gear, self._gear_mtime = gearmod.Gear(self.home), m
         m = self._mtime(self.cache_path)
         if self._metrics is None or m != self._metrics_mtime:
             self._metrics, self._metrics_mtime = srv.Metrics(self.db_path, self.cache_path), m
@@ -331,10 +342,28 @@ class Rollbook:
             out["hr_zones"] = {"hrmax": hrmax,
                                "seconds": {k: round(s) for k, s in zip(names, z)},
                                "pct": {k: round(s / tot * 100, 1) for k, s in zip(names, z)}}
+        res = self._gear.resolver(self.db) if self._gear and not self._gear.error else None
+        gid, src = res.of(a["id"], a.get("type"), a.get("date")) if res else (None, None)
+        if gid:
+            out["gear"] = {"id": gid, "name": res.name(gid), "source": src,
+                           "parts": [{k: p[k] for k in ("kind", "name", "brand", "specs") if p.get(k)}
+                                     for p in res.part_info(gid, a.get("date"))]}
         if args.get("splits", True):
             out["splits"] = [_r(dict(r)) for r in self.db.execute(
                 "SELECT km, moving_s, elapsed_s, pause_s, kmh, hr FROM splits WHERE activity_id=? ORDER BY km",
                 (a["id"],))]
+        return out
+
+    def t_gear(self, args):
+        """Gear and the parts on it today (see gear.summary). No notes, service notes or
+        purchase dates: tool output goes to a model provider."""
+        g = self._gear
+        if g is None or g.error:
+            raise ToolError("gear.json could not be loaded" if g else "no gear store")
+        out = g.summary(self.db, time.strftime("%Y-%m-%d"), sport=args.get("sport"),
+                        include_retired=bool(args.get("include_retired")))
+        out["note"] = ("km per part count only the days it was fitted; compare gear with best10min_kmh "
+                       "(best 20 min power indoors), and mind that each gear was used in its own period")
         return out
 
     def t_compare(self, args):
@@ -480,6 +509,12 @@ TOOLS = [
                 "distance, duration, ascent and power, and best efforts by distance (fastest 400 m … marathon, per sport).",
      _props(**FILTERS, limit={"type": "integer", "minimum": 1, "maximum": 25, "description": "Per record, default 5."}),
      Rollbook.t_records),
+    ("gear", "Gear (skates, bikes, shoes) and the parts fitted to them now: km, hours, sessions, first/last "
+             "use, service interval and whether a part is due, which gear is a sport's default. Sessions "
+             "get gear from their own choice or their sport's dated default; a part's km count only the "
+             "days it was fitted. Gear lives in gear.json, not in the database: `query` can't see it.",
+     _props(sport=FILTERS["sport"], include_retired={"type": "boolean", "description": "Also retired gear and parts."}),
+     Rollbook.t_gear),
 ]
 TOOL_FN = {name: fn for name, _, _, fn in TOOLS}
 

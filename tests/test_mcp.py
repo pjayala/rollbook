@@ -74,7 +74,7 @@ class MCP(unittest.TestCase):
     def test_tools_list_is_read_only(self):
         tools = self.rpc("tools/list")["result"]["tools"]
         self.assertEqual({t["name"] for t in tools},
-                         {"sports", "schema", "query", "activities", "activity", "compare", "trend", "records"})
+                         {"sports", "schema", "query", "activities", "activity", "compare", "trend", "records", "gear"})
         for t in tools:
             self.assertTrue(t["annotations"]["readOnlyHint"])
             self.assertEqual(t["inputSchema"]["type"], "object")
@@ -193,6 +193,94 @@ class MCP(unittest.TestCase):
         self.assertEqual(self.call("query", sql="SELECT COUNT(*) FROM main.activities")["rows"], [[2]])
         os.remove(path)
         self.assertEqual(self.call("activities")["matching"], 2)
+
+
+    def test_gear_tool(self):
+        import gear
+        path = os.path.join(self.home, "gear.json")
+        self.addCleanup(lambda: [os.remove(p) for p in (path, path + ".bak") if os.path.exists(p)])
+        self.assertEqual(self.call("gear")["gear"], [])  # no file: empty, not an error
+        p, g = "a" * 16, "b" * 16
+        with open(path, "w") as f:
+            json.dump({**gear.empty(), "rev": 3,
+                       "parts": {p: {"kind": "wheels", "name": "W", "brand": "Matter", "specs": {"diameter_mm": 110},
+                                     "service_km": 10, "notes": "SECRET-NOTE", "bought": "2020-01-02",
+                                     "services": [{"date": "2020-01-03", "action": "service", "note": "SECRET-SVC"}]}},
+                       "gear": {g: {"name": "Skates", "sports": ["Inline Skate"], "notes": "SECRET-GEAR",
+                                    "parts": [{"part": p, "from": "2020-01-01", "to": None}]}},
+                       "defaults": {"Inline Skate": [{"gear": g, "since": "2020-01-01"}]}}, f)
+        with open(path, "rb") as f:
+            before = f.read()
+        r = self.call("gear")
+        self.assertEqual([(x["name"], x["sessions"], x["default_for"]) for x in r["gear"]], [("Skates", 2, ["Inline Skate"])])
+        w = r["gear"][0]["parts"][0]
+        self.assertEqual((w["name"], w["due"], w["km"] > 30), ("W", True, True))
+        self.assertEqual(r["due"], ["W"])
+        text = json.dumps(r) + json.dumps(self.call("activity", id=1001, splits=False))
+        for secret in ("SECRET", "2020-01-02"):
+            self.assertNotIn(secret, text)  # notes and the purchase date never reach the model
+        self.assertEqual(w["last_service"], "2020-01-03")
+        self.assertEqual(self.call("activity", id=1001, splits=False)["gear"]["name"], "Skates")
+        self.assertEqual(self.call("gear", sport="Run")["gear"], [])
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), before)  # never written
+        self.assertFalse(os.path.exists(path + ".bak"))
+        with open(path, "w") as f:
+            f.write("[]")
+        self.assertIn("could not be loaded", self.call("gear", ok=False))
+        self.assertNotIn("gear", self.call("activity", id=1001, splits=False))  # the rest still works
+
+    def write_gear(self, data):
+        import gear
+        path = os.path.join(self.home, "gear.json")
+        with open(path, "w") as f:
+            json.dump({**gear.empty(), **data}, f)
+        st = os.stat(path)
+        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 2_000_000_000))  # a new key even on coarse clocks
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        return path
+
+    def test_gear_as_of_today_and_never_writes(self):
+        import gear
+        import store
+        from unittest import mock
+        p, q, g, h = "a" * 16, "c" * 16, "b" * 16, "d" * 16
+        self.write_gear({
+            "parts": {p: {"kind": "wheels", "name": "Now"}, q: {"kind": "wheels", "name": "Later"}},
+            "gear": {g: {"name": "Old", "sports": ["Inline Skate"], "retired": "2026-01-01",
+                         "parts": [{"part": p, "from": "2020-01-01", "to": None}]},
+                     h: {"name": "Next", "sports": ["Inline Skate"], "parts": [{"part": q, "from": "2999-01-01", "to": None}]}},
+            "defaults": {"Inline Skate": [{"gear": g, "since": "2020-01-01"}, {"gear": h, "since": "2999-01-01"}]},
+            "sessions": {"1002": {"gear": h}}})
+        with mock.patch.object(store, "write_json", side_effect=AssertionError("wrote")), \
+                mock.patch.object(gear.Gear, "remap", side_effect=AssertionError("remap")):
+            r = self.call("gear", include_retired=True)
+            a = self.call("activity", id=1002, splits=False)
+        by = {x["name"]: x for x in r["gear"]}
+        self.assertEqual(by["Old"]["default_for"], [])  # retired: no longer anybody's default
+        self.assertEqual(by["Next"]["default_for"], [])  # its default starts in the future
+        self.assertEqual([x["name"] for x in by["Next"]["parts"]], [])  # fitted only from 2999
+        self.assertEqual([x["name"] for x in r["spare_parts"]], ["Later"])
+        self.assertEqual((a["gear"]["name"], a["gear"]["source"]), ("Next", "explicit"))
+        self.assertEqual(self.call("gear", sport="inline skate")["gear"], [x for x in self.call("gear")["gear"]])
+
+    def test_gear_broken_store_is_a_tool_error(self):
+        self.write_gear({})
+        with open(os.path.join(self.home, "gear.json"), "w") as f:
+            f.write('{"v":')
+        lines = [json.dumps({"jsonrpc": "2.0", "id": i, "method": m, "params": pa}) for i, (m, pa) in enumerate(
+            [("tools/list", {}), ("tools/call", {"name": "gear", "arguments": {}}),
+             ("tools/call", {"name": "activity", "arguments": {"id": 1001, "splits": False}})], 1)]
+        srv = mcp_server.Server(mcp_server.Rollbook(self.db, self.cache), "test")
+        self.addCleanup(srv.rb.close)
+        out = []
+        for ln in lines:
+            r = srv.handle(json.loads(ln))
+            out.append(json.dumps(r))
+        msgs = [json.loads(x) for x in out]
+        self.assertTrue(msgs[1]["result"]["isError"])
+        self.assertNotIn("JSONDecodeError", msgs[1]["result"]["content"][0]["text"])
+        self.assertFalse(msgs[2]["result"]["isError"])  # the other tools keep working
 
 
 if __name__ == "__main__":

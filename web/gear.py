@@ -410,6 +410,45 @@ def totals(data, rows):
     return {"gear": gt, "parts": pt}, due
 
 
+def public_part(p, t):
+    """A part as told to a model (MCP): no notes, service notes or purchase date."""
+    out = {"kind": p["kind"], "name": p["name"], "retired": bool(p["retired"]), "km": round(t["km_total"], 1),
+           "sessions": t["sessions"], "due": t["due"], "last_service": t["last_service"]}
+    if p.get("brand"):
+        out["brand"] = p["brand"]
+    if p.get("specs"):
+        out["specs"] = p["specs"]
+    if p["service_km"]:
+        out.update(service_every_km=p["service_km"], km_since_service=round(t["km_since_service"], 1))
+    return out
+
+
+def summary(data, tot, due, today, sport=None, include_retired=False):
+    """Gear as of `today` for the MCP `gear` tool: each gear with the parts on it
+    that day and the sports it is the default of then, plus spare parts."""
+    res = Resolver(data)
+    default_for = {}
+    for s in data["defaults"]:
+        gid, _ = res.default_of(s, today)
+        if gid:
+            default_for.setdefault(gid, []).append(s)
+    on = {p: gid for gid in data["gear"] for p in res.parts(gid, today)}
+    want = sport.lower() if isinstance(sport, str) else None
+    gear = []
+    for gid, g in data["gear"].items():
+        if (want and want not in (x.lower() for x in g["sports"])) or (g["retired"] and not include_retired):
+            continue
+        t = tot["gear"][gid]
+        gear.append({"id": gid, "name": g["name"], "sports": g["sports"], "retired": bool(g["retired"]),
+                     "default_for": default_for.get(gid, []), "sessions": t["sessions"], "km": round(t["km"], 1),
+                     "hours": round(t["moving_s"] / 3600, 1), "first": t["first"], "last": t["last"],
+                     "parts": [public_part(data["parts"][p], tot["parts"][p]) for p, gg in on.items() if gg == gid]})
+    gear.sort(key=lambda x: x["last"] or "", reverse=True)
+    spare = [] if want else [public_part(p, tot["parts"][k]) for k, p in data["parts"].items()
+                             if k not in on and (include_retired or not p["retired"])]
+    return {"gear": gear, "spare_parts": spare, "due": [data["parts"][p]["name"] for p in due]}
+
+
 # ------------------------------------------------------------------ store
 
 LOAD_ERROR = "gear.json could not be loaded; it is left untouched and gear is read-only until it is fixed or moved away"
@@ -454,6 +493,16 @@ class Gear:
             self.follow.reconcile(db)
         with self.lock:
             return Resolver(self.data)
+
+    def summary(self, db, today, **kw):
+        """See summary(): read-only, for the MCP server."""
+        self.follow.reconcile(db)
+        rows = db.execute("SELECT id, date, type, km, moving_s, elapsed_s, name FROM activities "
+                          "WHERE parse_error IS NULL").fetchall()
+        with self.lock:
+            d = self.data
+        tot, due = totals(d, [tuple(r) for r in rows])
+        return summary(d, tot, due, today, **kw)
 
     def view(self, db):
         """Everything the gear page shows, with totals over the visible (edited) sessions."""

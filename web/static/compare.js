@@ -190,6 +190,28 @@ const cmpDate = (a, other) => {
 const fclock = s => isNum(s) ? dur(s, s >= 3600) : "–";
 const isVirt = a => /^Virtual/.test(a.type || "");
 
+/** What differed in the gear of two sessions (api_activity rows: gear_id, gear_name,
+ * gear_parts) -> {same, a, b, parts: [{kind, a, b}]}: parts by kind whose part or
+ * specs differ, so "different wheels: 90 mm 85A vs 110 mm 86A" can be said. */
+function gearDiff(A, B, kinds) {
+  const out = { same: A.gear_id === B.gear_id, a: A.gear_name || null, b: B.gear_name || null, parts: [] };
+  if (!A.gear_id && !B.gear_id) return out;
+  const byKind = x => { const m = new Map(); for (const p of x.gear_parts || []) if (!m.has(p.kind)) m.set(p.kind, p); return m; };
+  const pa = byKind(A), pb = byKind(B);
+  const specs = p => kinds ? specLine(kinds, p) : Object.values(p.specs || {}).join(" · ");
+  const desc = p => [p.brand, p.name, specs(p)].filter(Boolean).join(" ");
+  const sameSpecs = (x, y) => Object.keys({ ...x, ...y }).every(k => x[k] === y[k]);
+  const order = kinds ? Object.keys(kinds) : [];
+  const ks = [...pa.keys()].filter(k => pb.has(k)).sort((x, y) => (order.indexOf(x) - order.indexOf(y)) || x.localeCompare(y));
+  for (const k of ks) {  // kinds both have: a part missing on one side is unrecorded, not different
+    const x = pa.get(k), y = pb.get(k);
+    if (x.id === y.id) continue;
+    if (x.name === y.name && (x.brand || "") === (y.brand || "") && sameSpecs(x.specs || {}, y.specs || {})) continue;  // same model
+    out.parts.push({ kind: k, a: desc(x), b: desc(y) });
+  }
+  return out;
+}
+
 /** Metrics of the strip and the all-metrics table: value getter, decimals, unit and the
  * good direction (+1 higher is better, −1 lower is better, 0 neither: drawn grey). */
 function cmpMetrics(A, B) {
@@ -283,6 +305,11 @@ function renderCompare(A, B, peers, seq) {
   }));
   const ctx = [[A, labA], [B, labB]].filter(([x]) => x.cond && isNum(x.cond.temp))
     .map(([x, l]) => `${esc(l)} ${f0(x.cond.temp)}°C, wind ${fwind(x.cond)}`).join(" · ");
+  // gear: a real confounder when it differs (other wheels, other bike), so say it
+  const GD = gearDiff(A, B, S.gear && S.gear.kinds);
+  const gearLine = GD.a || GD.b ? (GD.same ? `Same gear: ${esc(GD.a)}` : `Gear: ${esc(GD.a || "none")} vs ${esc(GD.b || "none")}`) : "";
+  const gearNote = GD.parts.length ? GD.parts.map(d => `Different ${esc((S.gear && S.gear.kinds[d.kind] || { label: d.kind }).label.toLowerCase())}: ${esc(d.a)} vs ${esc(d.b)}.`).join(" ")
+    + " Part of the difference may be the gear." : "";
   const flags = [A, B].filter(x => x.hidden).map(x => `<span class="pill">${esc(cmpDate(x, x === A ? B : A))} ${x.deleted ? "deleted" : "hidden"}</span>`).join(" ");
 
   const right = hasGps ? `<div class="panel span2 stick" id="p-replay"><h2>Replay <span class="muted">both on one clock</span></h2>
@@ -302,9 +329,10 @@ function renderCompare(A, B, peers, seq) {
         <button class="btn" id="cmp-change">Change…</button>
       </div></div>
     ${flags ? `<div class="cmpnote">${flags} Left out of stats, lists and segments.</div>` : ""}
+    ${gearNote ? `<div class="cmpnote" id="cmp-gear">${gearNote}</div>` : ""}
     <div class="cmpnote" id="cmp-note" hidden></div>
     ${strip}
-    ${ctx ? `<div class="cmpctx">${ctx}</div>` : ""}
+    ${ctx || gearLine ? `<div class="cmpctx">${[ctx, gearLine].filter(Boolean).join(" · ")}</div>` : ""}
     <div class="cmpgrid">
       <div class="panel ${right ? "span4" : "span6"}" id="p-lead"></div>
       ${right}
@@ -617,12 +645,17 @@ function comparePicker(a, m, peers) {
   const sugg = [];
   if (before[0]) sugg.push([before[0], "last time on this route"]);
   if (best && best !== before[0]) sugg.push([best, "route best"]);
+  if (a.gear_id) {  // testing gear: the same route on something else
+    const og = before.find(p => p.gear_id && p.gear_id !== a.gear_id);
+    if (og && !sugg.some(([p]) => p === og)) sugg.push([og, "same route, other gear"]);
+  }
   const iso = p => p.date;
   const row = (p, tag) => {
     const r = mk("a", "cmprow"); r.href = `#/compare/${a.id}/${p.id}`;
     const d = isNum(p.best10min_kmh) && isNum(a.best10min_kmh) ? p.best10min_kmh - a.best10min_kmh : null;
     r.append(mk("span", "c-date num", iso(p)));
     const nm = mk("span", "c-name", p.name || ""); if (tag) nm.append(" ", mk("span", "pill", tag));
+    else if (a.gear_id && p.gear_id && p.gear_id !== a.gear_id) nm.append(" ", mk("span", "pill", p.gear_name || "other gear"));
     r.append(nm, mk("span", "c-n num", fkm(p.km) + " km"), mk("span", "c-n num", dur(p.moving_s, true)), mk("span", "c-n num", f2(p.kmh_moving)),
       mk("span", "c-n num", f2(p.best10min_kmh)), mk("span", "c-n num muted", isNum(d) ? (d >= 0 ? "+" : "−") + Math.abs(d).toFixed(2) : "–"));
     r.onclick = () => dlg.close();
