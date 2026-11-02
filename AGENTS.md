@@ -420,7 +420,8 @@ changing `derive()`.
   from install plus `km_offset`), due at `>= service_km`, never when retired;
   trainer (Virtual) km don't wear a tyre. Nothing goes into SQLite or the
   metrics cache; `api_activities` / `api_activity` add `gear_id`,
-  `gear_name`, `gear_src` (explicit / default) and `gear_parts` (Strava's own
+  `gear_name`, `gear_src` (explicit / default), `api_activity` also
+  `gear_parts` and `gear_default` (what "Default" gives that day; Strava's own
   `gear` column is untouched). `POST /api/gear {op, rev, ...}` (ops in
   `gear.OPS`): each op runs on a copy, then the whole store is `validate()`d
   — the same check as on load — and written (previous version to

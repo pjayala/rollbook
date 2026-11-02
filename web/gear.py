@@ -42,7 +42,7 @@ import store
 VERSION = 1
 MAX_FILE = 2 << 20
 MAX_PARTS, MAX_GEAR, MAX_MOUNTS, MAX_SERVICES, MAX_SERVICES_ALL = 500, 200, 50, 200, 5000
-MAX_SESSIONS, MAX_ASSIGN, MAX_SPORTS, MAX_DEFAULTS = 100_000, 2000, 50, 200
+MAX_SESSIONS, MAX_ASSIGN, MAX_SPORTS, MAX_DEFAULTS = 20_000, 2000, 50, 200  # 20k choices ~ the 2 MiB file
 NAME_MAX, NOTE_MAX, SERVICE_NOTE_MAX = 120, 2000, 500
 ID = re.compile(r"[0-9a-f]{16}")
 DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
@@ -477,7 +477,7 @@ class Gear:
                 raise ValueError("not a regular file")
             if st.st_size > MAX_FILE:
                 raise ValueError("too big")
-            raw = store.loads(f.read(MAX_FILE + 1).decode("utf-8"))
+            raw = store.loads(f.read(MAX_FILE + 1).decode("utf-8-sig"))  # a BOM from a Windows editor is fine
         if not isinstance(raw, dict):
             raise ValueError("not a JSON object")
         return raw
@@ -554,7 +554,9 @@ class Gear:
         pre = op.pre(db, body) if op.pre else None  # DB reads before taking the lock
         self.follow.reconcile(db)
         with self.lock:
-            if type(body.get("rev")) is not int or body["rev"] != self.data["rev"]:
+            if type(body.get("rev")) is not int:
+                raise ValueError("rev: the store version the page read")
+            if body["rev"] != self.data["rev"]:
                 raise Conflict("gear changed in another window: reload")
             d = copy.deepcopy(self.data)
             res = op.fn(d, body, pre)
@@ -625,7 +627,7 @@ def _close_mounts(d, which, day):
 
 def op_part_service(d, b, _):
     p = _get(d, "parts", b.get("id"))
-    if b.get("delete") is not None:
+    if "delete" in b and b["delete"] is not False and b["delete"] is not None:
         i = b["delete"]
         if type(i) is not int or not 0 <= i < len(p["services"]):
             raise NotFound(i)
@@ -696,9 +698,16 @@ def _mount(g, b):
     return i
 
 
+def _fit_check(g, p, to):
+    """No fitting on retired gear / of a retired part past its retirement (its km would still count)."""
+    for x, what in ((g, "gear"), (p, "part")):
+        if x["retired"] and (to is None or to > x["retired"]):
+            raise ValueError(f"that {what} was retired on {x['retired']}: un-retire it, or set the removal date")
+
+
 def op_mount_add(d, b, _):
     g = _get(d, "gear", b.get("gear"))
-    _get(d, "parts", b.get("part"))
+    _fit_check(g, _get(d, "parts", b.get("part")), b.get("to"))
     g["parts"].append({"part": b["part"], "from": b.get("from"), "to": b.get("to")})
     return {"id": b["gear"]}
 
@@ -719,7 +728,9 @@ def op_mount_delete(d, b, _):
 def op_default_set(d, b, _):
     sport, since, gid = _sport(b.get("sport")), _day(b.get("since"), "since", False), b.get("gear")
     if gid is not None:
-        _get(d, "gear", gid)
+        g = _get(d, "gear", gid)
+        if g["retired"] and since >= g["retired"] and not b.get("delete"):
+            raise ValueError(f"{g['name']} was retired on {g['retired']}: it can't be the default after that")
     hist = [e for e in d["defaults"].get(sport, []) if e["since"] != since]
     if b.get("delete"):
         if len(hist) == len(d["defaults"].get(sport, [])):

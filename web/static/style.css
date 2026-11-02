@@ -236,6 +236,7 @@ tr.best td { color: var(--hue); }
 td.acts, td.svccell { white-space: nowrap; }
 .plink { color: var(--text); font-weight: 600; text-decoration: none; text-align: left; }
 .plink:hover { text-decoration: underline; }
+.plink:disabled { cursor: default; opacity: 1; text-decoration: none; }
 .gear-r { display: none; } body.readonly .gear-r { display: inline; }
 .gdefs, .gsess { max-width: 760px; }
 fieldset.pfield { border: 0; margin: 0; padding: 0; min-width: 0; }

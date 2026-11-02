@@ -253,7 +253,8 @@ class MCP(unittest.TestCase):
             "defaults": {"Inline Skate": [{"gear": g, "since": "2020-01-01"}, {"gear": h, "since": "2999-01-01"}]},
             "sessions": {"1002": {"gear": h}}})
         with mock.patch.object(store, "write_json", side_effect=AssertionError("wrote")), \
-                mock.patch.object(gear.Gear, "remap", side_effect=AssertionError("remap")):
+                mock.patch.object(gear.Gear, "remap", side_effect=AssertionError("remap")), \
+                mock.patch.object(mcp_server.time, "strftime", return_value="2026-06-01"):  # "today", fixed
             r = self.call("gear", include_retired=True)
             a = self.call("activity", id=1002, splits=False)
         by = {x["name"]: x for x in r["gear"]}

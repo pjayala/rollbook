@@ -246,7 +246,7 @@ class Store(unittest.TestCase):
         self.skates()
         with self.assertRaises(gear.Conflict):
             self.g.apply(self.db, {"op": "gear.save", "rev": 0, "name": "x"})
-        with self.assertRaises(gear.Conflict):
+        with self.assertRaises(ValueError):  # no rev at all: a bad request
             self.g.apply(self.db, {"op": "gear.save", "name": "x"})
 
     # ---- file
@@ -312,6 +312,64 @@ class Store(unittest.TestCase):
         with self.assertRaises(gear.Conflict):
             self.op(op="mount.delete", gear=gid, index=0, part="f" * 16)
         self.op(op="mount.delete", gear=gid, index=0, part=wid)
+
+    def test_retired_refs_rejected(self):
+        gid, wid = self.skates()
+        spare = self.op(op="part.save", kind="bearings", name="B")["id"]
+        self.op(op="part.retire", id=spare, date="2026-02-01")
+        other = self.op(op="gear.save", name="G2", sports=[SK])["id"]
+        with self.assertRaises(ValueError):  # a retired part fitted for good
+            self.op(op="mount.add", gear=other, part=spare, **{"from": "2026-01-01"})
+        self.op(op="mount.add", gear=other, part=spare, **{"from": "2026-01-01", "to": "2026-02-01"})  # before: fine
+        self.op(op="gear.retire", id=other, date="2026-03-01")
+        with self.assertRaises(ValueError):  # a retired gear as the default after its retirement
+            self.op(op="default.set", sport=SK, gear=other, since="2026-03-01")
+        self.op(op="default.set", sport=SK, gear=other, since="2026-02-15")  # while it was in use: fine
+        with self.assertRaises(ValueError):
+            self.op(op="assign", ids=[1], gear=gid, rev=None)  # rev missing: a bad request, not a conflict
+
+    def test_every_op_reloads(self):
+        gid, wid = self.skates()
+        g2 = self.op(op="gear.save", name="G2", sports=[SK, "Run"], notes="n")["id"]
+        p2 = self.op(op="part.save", kind="frame", name="F", specs={"setup": "4x90"}, bought="2025-12-01")["id"]
+        self.op(op="mount.add", gear=g2, part=p2, **{"from": "2026-01-01"})
+        self.op(op="mount.set", gear=g2, index=0, part=p2, to="2026-02-01")
+        self.op(op="part.service", id=wid, date="2026-02-01", action="replace", note="x")
+        self.op(op="part.service", id=wid, delete=0, date="2026-02-01", action="replace")
+        self.op(op="default.set", sport="Run", gear=g2, since="2026-03-01")
+        self.op(op="assign", ids=[4, 5], gear=g2)
+        self.op(op="assign", ids=[5], gear="default")
+        self.op(op="gear.retire", id=g2, date="2026-03-10")
+        self.op(op="part.retire", id=wid, date="2026-03-10")
+        self.op(op="mount.delete", gear=g2, index=0, part=p2)
+        self.op(op="part.delete", id=p2)
+        g = gear.Gear(self.home)
+        self.assertIsNone(g.error)
+        self.assertEqual(g.data, self.g.data)
+
+    def test_bom_and_no_nofollow(self):
+        gid, _ = self.skates()
+        path = os.path.join(self.home, "gear.json")
+        with open(path, "rb") as f:
+            raw = f.read()
+        with open(path, "wb") as f:
+            f.write(b"\xef\xbb\xbf" + raw)  # saved by a Windows editor
+        self.assertIsNone(gear.Gear(self.home).error)
+        with mock.patch.object(gear.os, "O_NOFOLLOW", 0, create=True), \
+                mock.patch.object(store.os, "O_NOFOLLOW", 0, create=True):  # Windows has none
+            g = gear.Gear(self.home)
+            self.assertIsNone(g.error)
+            g.apply(self.db, {"op": "gear.save", "rev": g.data["rev"], "id": gid, "notes": "w"})
+        os.remove(path)
+        os.mkdir(path)  # a directory where the file should be
+        self.assertTrue(gear.Gear(self.home).error)
+
+    def test_choice_needs_matching_km(self):
+        self.skates()
+        self.op(op="assign", ids=[2], gear=None)
+        self.g.view(self.db)
+        self.db.execute("UPDATE main.activities SET id=5002, km=45 WHERE id=2")  # same start, other distance
+        self.assertEqual(self.g.resolver(self.db).of(5002, SK, "2026-02-05")[1], "default")
 
     def test_untrusted_file_shapes_never_crash(self):
         path = os.path.join(self.home, "gear.json")
@@ -427,6 +485,15 @@ class RemapBoth(unittest.TestCase):
                 server._remap_all({1: 2})
         g.remap.assert_called_once_with({1: 2})
 
+    def test_both_failing_reports_both(self):
+        e, g = mock.Mock(), mock.Mock()
+        e.remap.side_effect, g.remap.side_effect = OSError("disk full"), ValueError("store full")
+        with mock.patch.object(api, "EDITS", e), mock.patch.object(api, "GEAR", g):
+            with self.assertRaises(OSError) as cm:
+                server._remap_all({1: 2})
+        self.assertIn("edits: disk full", str(cm.exception))
+        self.assertIn("gear: store full", str(cm.exception))
+
 
 class Http(unittest.TestCase):
     """/api/gear served over the two-session export (1001, 1002, Inline Skate)."""
@@ -435,6 +502,8 @@ class Http(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        cls._gear0 = api.GEAR
+        cls.addClassCleanup(lambda: setattr(api, "GEAR", cls._gear0))  # don't leave a store on a deleted dir
         cls.home = tempfile.mkdtemp(prefix="rollbook-test-gear-")
         make_export(os.path.join(cls.home, "export"))
         r = run(cls.home, "db", "build", "--no-samples", os.path.join(cls.home, "export"))

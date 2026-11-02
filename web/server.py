@@ -192,14 +192,14 @@ def _port_answers(port):
 
 def _remap_all(mapping):
     """The importer replaced sessions: edits and gear choices follow (each on its own)."""
-    err = None
-    for fn in (api.EDITS.remap, api.GEAR.remap):
+    errs = []
+    for what, fn in (("edits", api.EDITS.remap), ("gear", api.GEAR.remap)):
         try:
             fn(mapping)
         except Exception as e:  # noqa: BLE001  the other store must still move
-            err = e
-    if err:
-        raise err
+            errs.append(f"{what}: {e}")
+    if errs:
+        raise OSError("; ".join(errs))
 
 
 def start(db_path, cache_path, port=8765, offline=False, lan=None):

@@ -340,7 +340,8 @@ function partRows(ids) {
 }
 function wirePartButtons(root) {
   root.querySelectorAll("[data-svc]").forEach(b => b.onclick = () => openServiceDialog(b.dataset.svc));
-  root.querySelectorAll("[data-pedit]").forEach(b => b.onclick = () => openPartDialog(b.dataset.pedit));
+  const ro = S.readonly || (S.gear && S.gear.readonly_store);  // the dialog could only fail to save
+  root.querySelectorAll("[data-pedit]").forEach(b => { if (ro) b.disabled = true; else b.onclick = () => openPartDialog(b.dataset.pedit); });
 }
 const W = (html, ro = "") => `<span class="gear-w">${html}</span>${ro ? `<span class="gear-r">${ro}</span>` : ""}`;
 
@@ -536,6 +537,7 @@ function gearChip(a) {
 /** Fill the Edit dialog's gear select (S.gear fresh); returns () -> the assign op to post, or null. */
 function editGearField(a) {
   const sel = $("#ed-gear"), row = $("#ed-gear-row");
+  if ($("#ed-type")) $("#ed-type").oninput = null;  // no handler left from a previous session's dialog
   if (!sel || !S.gear || S.gear.readonly_store) { if (row) row.hidden = true; return () => null; }
   const cur = a.gear_src === "explicit" ? (a.gear_id || "none") : "default";
   const d = a.gear_default;  // the server's answer for this session's date and sport
@@ -553,5 +555,5 @@ function editGearField(a) {
   // the default follows the sport; openEdit sets this handler fresh on each open
   $("#ed-type").oninput = () => fill($("#ed-type").value || a.type);
   row.hidden = false;
-  return () => sel.value === cur ? null : { op: "assign", ids: [a.id], gear: sel.value === "none" ? null : sel.value };
+  return () => !sel.value || sel.value === cur ? null : { op: "assign", ids: [a.id], gear: sel.value === "none" ? null : sel.value };
 }

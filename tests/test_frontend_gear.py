@@ -170,6 +170,11 @@ class GearJs(unittest.TestCase):
                     f" gearDiff({json.dumps(B)}, {json.dumps(A)}, {K}).parts.map(p => p.kind), gearDiff({json.dumps(A)}, {json.dumps(B)}, null).parts[0].a]; }})()")
         self.assertEqual(r, [[], 1, ["wheels"], "Matter 110 · 86"])
 
+    def test_no_gear_store_does_not_throw(self):
+        r = self.js("[gearChip({gear_id: 'g', gear_name: 'G', gear_parts: [{kind: 'wheels', name: 'W'}]}), editGearField({})()]")
+        self.assertIn(">G</a>", r[0])
+        self.assertIsNone(r[1])
+
     def test_user_text_escaped(self):
         view = {"rev": 1, "kinds": KINDS, "actions": ["service"], "sport_group": {}, "due": ["p1"], "defaults": {},
                 "gear": {"g1": {"name": EVIL, "sports": [EVIL], "parts": [{"part": "p1", "from": "2026-01-01", "to": None}]}},
