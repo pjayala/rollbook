@@ -35,7 +35,7 @@ ORIGIN = (52.0, 5.0)  # a neutral reference point, not anyone's home
 TZ = timezone(timedelta(hours=2))
 FIT_EPOCH = datetime(1989, 12, 31, tzinfo=timezone.utc)
 SEMI = 2 ** 31 / 180.0
-K_WIND = 0.0046  # speed fraction per km/h of tailwind (what server.py fits on real data)
+K_WIND = 0.0046  # speed fraction per km/h of tailwind (what conditions.py fits on real data)
 
 # ------------------------------------------------------------------ geometry (metres, x east / y north)
 

@@ -19,6 +19,9 @@ from unittest import mock
 from helpers import SAMPLES, TOOL, tmpdir
 
 import edits
+import analysis
+import api
+import favorites
 import server
 
 IDS = {"Outdoor_cycle.gpx": 1001, "The_come_back.gpx": 1002}
@@ -297,7 +300,7 @@ class Api(Build):
         self.assertNotIn("1002", self.get("/api/edits")["sessions"])
         self.assertEqual(self.get("/api/activity/1002")["name"], "The come back")
 
-    # ---- every JSON POST reads its body whole or not at all (web/server.py _read_json)
+    # ---- every JSON POST reads its body whole or not at all (web/http_base.py _read_json)
 
     ENDPOINTS = ("/api/profile", "/api/edit", "/api/favorites", "/api/last_import/dismiss")
 
@@ -335,6 +338,18 @@ class Api(Build):
                 self.assertEqual(self.raw(path, None, b"2\r\n{}\r\n0\r\n\r\n",
                                           [("Transfer-Encoding", "chunked")]), 501)
         self.alive()
+
+    def test_every_post_needs_header_and_same_origin(self):
+        port = self.port
+        bad = [{}, {"X-Rollbook": "0"}, {"X-Rollbook": "1", "Origin": "https://evil.example"},
+               {"X-Rollbook": "1", "Origin": "null"}, {"X-Rollbook": "1", "Host": "evil.example"},
+               {"X-Rollbook": "1", "Host": f"127.0.0.1:{port + 1}"}]
+        for path in api.POST:
+            for h in bad:
+                with self.subTest(path=path, headers=h):
+                    self.assertEqual(self.post(path, b"{}", {"Content-Type": "application/json", **h})[0], 403)
+        self.assertEqual(self.post("/api/nope", b"{}", {"X-Rollbook": "1"})[0], 404)
+        self.assertEqual(self.post("/api/import/nope", b"{}", {"X-Rollbook": "1"})[0], 404)
 
     def test_upload_negative_length(self):
         self.assertEqual(self.raw("/api/import/upload?name=a.gpx", "-1"), 400)  # used to read to EOF
@@ -378,7 +393,7 @@ class Api(Build):
                               if k != "added"}, good)
             self.assertEqual(fav({"type": "x" * 41, "start": [91, 0], "end": [0, 0, 0], "m": {"a": [[[]]]}}), 200)
             self.assertEqual(self.get("/api/favorites")["segments"]["ab12"].keys(), {"added"})
-            with mock.patch.object(server, "FAV_MAX", 1):
+            with mock.patch.object(favorites, "FAV_MAX", 1):
                 self.assertEqual(fav({}, key="cd34"), 400)  # full
                 self.assertEqual(fav(good), 200)  # re-starring an existing one is fine
         finally:
@@ -403,7 +418,7 @@ class Stores(unittest.TestCase):
                 self.write("favorites.json", raw)
                 self.write("profile.json", raw)
                 self.assertEqual(edits.Edits(self.home).all()["sessions"], {})
-                fav = server.Favorites(os.path.join(self.home, "favorites.json")).get()
+                fav = favorites.Favorites(os.path.join(self.home, "favorites.json")).get()
                 self.assertEqual((fav["sessions"], fav["segments"]), ({}, {}))
                 self.assertIsInstance(athlete.Profile(self.home).get(), dict)
 
@@ -493,21 +508,21 @@ class Stores(unittest.TestCase):
         self.assertEqual((pr.get()["hr_max"], pr.get()["name"]), (188, "Ann"))
 
     def test_favorites_file_checked_on_load(self):
-        segs = {f"s{i}": {"added": "2026-01-01"} for i in range(server.FAV_MAX + 5)}
+        segs = {f"s{i}": {"added": "2026-01-01"} for i in range(favorites.FAV_MAX + 5)}
         segs["ab"] = {"added": "x" * 50, "type": "Ride", "start": [1, 2], "m": "big", "junk": [[1]]}
         self.write("favorites.json", json.dumps({"sessions": {"../x": {}, "12": {"added": "2026-01-02", "z": 1},
                                                               "13": 5}, "segments": segs}))
-        d = server.Favorites(os.path.join(self.home, "favorites.json")).get()
+        d = favorites.Favorites(os.path.join(self.home, "favorites.json")).get()
         self.assertEqual(d["sessions"], {"12": {"added": "2026-01-02"}})
-        self.assertEqual(len(d["segments"]), server.FAV_MAX)
+        self.assertEqual(len(d["segments"]), favorites.FAV_MAX)
         self.assertNotIn("ab", d["segments"])  # past the cap (insertion order)
         self.write("favorites.json", json.dumps({"segments": {"ab": segs["ab"]}}))
-        self.assertEqual(server.Favorites(os.path.join(self.home, "favorites.json")).get()["segments"]["ab"],
+        self.assertEqual(favorites.Favorites(os.path.join(self.home, "favorites.json")).get()["segments"]["ab"],
                          {"type": "Ride", "start": [1, 2]})
 
     def test_favorites_write_failure_keeps_memory(self):
         import store
-        fav = server.Favorites(os.path.join(self.home, "favorites.json"))
+        fav = favorites.Favorites(os.path.join(self.home, "favorites.json"))
         with mock.patch.object(store, "write_json", side_effect=OSError("disk full")):
             with self.assertRaises(OSError):
                 fav.set("sessions", "1", True)
@@ -559,10 +574,10 @@ class PowerBuild(unittest.TestCase):
         self.assertEqual(mx, 400)
         self.assertEqual(db.execute("SELECT COUNT(watts) FROM samples").fetchone(), (1800,))
         db.close()
-        M = server.Metrics(os.path.join(self.home, "rollbook.db"), os.path.join(self.home, "cache", "m.json"))
-        con = server.connect(os.path.join(self.home, "rollbook.db"))
+        M = analysis.Metrics(os.path.join(self.home, "rollbook.db"), os.path.join(self.home, "cache", "m.json"))
+        con = api.connect(os.path.join(self.home, "rollbook.db"))
         self.addCleanup(con.close)
-        a = next(x for x in server.api_activities(con, {"type": "Virtual Ride"}, M) if x["id"] == 2001)
+        a = next(x for x in api.api_activities(con, {"type": "Virtual Ride"}, M) if x["id"] == 2001)
         self.assertEqual(round(a["pw5s"]), 400)
         self.assertEqual(round(a["pw30s"]), 400)
         self.assertEqual(round(a["pw30m"]), round(a["watts_avg"]))
@@ -570,7 +585,7 @@ class PowerBuild(unittest.TestCase):
         self.assertEqual((a["f_np"], a["f_ftp"], a["cad_avg"]), (190, 200, 85))
         self.assertAlmostEqual(a["pw20m"], (30 * 400 + 1170 * 180) / 1200, delta=1)
         self.assertGreater(a["np"], a["watts_avg"])
-        s = server.api_activity(con, {}, M, 2001)
+        s = api.api_activity(con, {}, M, 2001)
         w = s["series_cols"].index("watts")
         self.assertEqual(s["series_cols"][-1], "mv")
         self.assertTrue(all(isinstance(r[w], int) for r in s["series"]))

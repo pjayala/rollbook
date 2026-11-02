@@ -29,7 +29,8 @@ import math
 import os
 import threading
 
-import server as srv
+import analysis as srv
+import api
 
 SEG_VERSION = 4
 CELL_M = 40.0
@@ -426,7 +427,7 @@ class SegmentStore:
         return {"status": "computing", **{k: job[k] for k in ("phase", "done", "total")}}
 
     def _compute(self, typ, job):
-        db = srv.connect(self.db_path)
+        db = api.connect(self.db_path)
         try:
             key, ids = self._key(db, typ)
             job["phase"] = "tracks"

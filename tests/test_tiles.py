@@ -8,7 +8,7 @@ import unittest
 from unittest import mock
 
 import test_end_to_end  # noqa: F401  (puts web/ on sys.path)
-import server
+import tiles
 from helpers import tmpdir
 
 
@@ -31,7 +31,7 @@ class _Resp:
 
 class Tiles(unittest.TestCase):
     def setUp(self):
-        self.cache = server.TileCache(tmpdir(self), offline=False)
+        self.cache = tiles.TileCache(tmpdir(self), offline=False)
         self.calls, self.live, self.peak, self.lock = [], 0, 0, threading.Lock()
 
     def fake(self, req, timeout=None):
@@ -44,7 +44,7 @@ class Tiles(unittest.TestCase):
 
     def burst(self, coords):
         out = {}
-        with mock.patch.object(server.urllib.request, "urlopen", self.fake):
+        with mock.patch.object(tiles.urllib.request, "urlopen", self.fake):
             ts = [threading.Thread(target=lambda c=c, i=i: out.__setitem__(i, self.cache.get("osm", *c))) for i, c in enumerate(coords)]
             for t in ts:
                 t.start()
@@ -61,10 +61,10 @@ class Tiles(unittest.TestCase):
     def test_parallel_fetches_are_capped(self):
         self.burst([(6, x, 3) for x in range(10)])
         self.assertEqual(len(self.calls), 10)
-        self.assertLessEqual(self.peak, server.TileCache.UPSTREAM)
+        self.assertLessEqual(self.peak, tiles.TileCache.UPSTREAM)
 
     def test_user_agent_names_a_contact(self):
-        self.assertIn("https://", server.TILE_UA)
+        self.assertIn("https://", tiles.TILE_UA)
 
 
 if __name__ == "__main__":

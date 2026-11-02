@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Pedro Ayala. Rollbook is free software, see LICENSE.
-"""Weather cache (web/weather.py) and the wind / slope split in server.conditions(). No network."""
+"""Weather cache (web/weather.py) and the wind / slope split in conditions.conditions(). No network."""
 
 import datetime as dt
 import io
@@ -16,7 +16,7 @@ from unittest import mock
 
 from helpers import tmpdir
 
-import server
+import conditions
 import weather
 
 UTC = dt.timezone.utc
@@ -365,17 +365,17 @@ class Conditions(unittest.TestCase):
 
     def cond(self, wind, r=None, m=None, fits=None):
         self.wx = StubWX(wind)
-        with mock.patch.object(server, "WX", self.wx), mock.patch.dict(server.FITS, fits or {}, clear=True):
-            return server.conditions(r or self.R, m or self.M)
+        with mock.patch.object(conditions, "WX", self.wx), mock.patch.dict(conditions.FITS, fits or {}, clear=True):
+            return conditions.conditions(r or self.R, m or self.M)
 
     def test_indoor_never_queries_weather(self):
         boom = mock.Mock(at=mock.Mock(side_effect=AssertionError("weather queried")))
-        with mock.patch.object(server, "WX", boom):
-            self.assertIsNone(server.conditions({"type": "Ride", "datetime": self.R["datetime"]},
+        with mock.patch.object(conditions, "WX", boom):
+            self.assertIsNone(conditions.conditions({"type": "Ride", "datetime": self.R["datetime"]},
                                                 {"ll0": [10, 20], "route": "indoor"}))
-            self.assertIsNone(server.conditions({"type": "Workout", "datetime": self.R["datetime"]}, {"ll0": [10, 20]}))
-            self.assertIsNone(server.conditions({"type": "Virtual Run", "datetime": self.R["datetime"]}, {"ll0": [10, 20]}))
-            self.assertIsNone(server.conditions(self.R, {"route": "out-back"}))  # no position
+            self.assertIsNone(conditions.conditions({"type": "Workout", "datetime": self.R["datetime"]}, {"ll0": [10, 20]}))
+            self.assertIsNone(conditions.conditions({"type": "Virtual Run", "datetime": self.R["datetime"]}, {"ll0": [10, 20]}))
+            self.assertIsNone(conditions.conditions(self.R, {"route": "out-back"}))  # no position
 
     def test_pending(self):
         self.assertEqual(self.cond(None), {"pending": True})
@@ -392,7 +392,7 @@ class Conditions(unittest.TestCase):
         L = c["legs"]
         self.assertAlmostEqual(L["out"]["tail"], 10, places=9)
         self.assertAlmostEqual(L["back"]["tail"], -10, places=9)
-        self.assertAlmostEqual(c["wind_k"], server.WIND_K_DEFAULT["Inline Skate"])
+        self.assertAlmostEqual(c["wind_k"], conditions.WIND_K_DEFAULT["Inline Skate"])
         self.assertAlmostEqual(L["out"]["wind_pct"], 4.0, places=9)
         self.assertAlmostEqual(c["gap_pct"], 100 / 12, places=9)
         self.assertAlmostEqual(c["gap_wind"], 8.0, places=9)
@@ -425,14 +425,14 @@ class Conditions(unittest.TestCase):
     def test_slope_part(self):
         m = {**self.M, "g_out": -0.1, "g_back": 0.1}
         c = self.cond({"temp": 15, "ws": 0, "wd": 0, "gust": 0}, m=m)
-        so, sb = server.slope_pct("Inline Skate", 26.0, -0.1), server.slope_pct("Inline Skate", 24.0, 0.1)
+        so, sb = conditions.slope_pct("Inline Skate", 26.0, -0.1), conditions.slope_pct("Inline Skate", 24.0, 0.1)
         self.assertGreater(so, 0)
         self.assertLess(sb, 0)
         self.assertAlmostEqual(c["gap_slope"], so - sb, places=9)
         self.assertAlmostEqual(c["legs"]["out"]["adj_b10"], 26 / (1 + so / 100), places=9)
 
     def test_tailwind_quartering(self):
-        self.assertAlmostEqual(server.tailwind({"ws": 10, "wd": 225}, 90), 10 * 2 ** -0.5, places=9)
+        self.assertAlmostEqual(conditions.tailwind({"ws": 10, "wd": 225}, 90), 10 * 2 ** -0.5, places=9)
 
 
 if __name__ == "__main__":

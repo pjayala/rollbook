@@ -26,6 +26,7 @@ from unittest import mock
 from helpers import TOOL, line_points, tmpdir, write_fit
 
 import importer
+import api
 import server
 import strava_web as sw
 
@@ -460,11 +461,11 @@ class Api(unittest.TestCase):
         shutil.rmtree(cls.root, True)
 
     def setUp(self):
-        server.IMPORTER.offline = False  # started offline: no tiles / weather from tests
+        api.IMPORTER.offline = False  # started offline: no tiles / weather from tests
 
     def tearDown(self):
         sw.forget_cookie(self.home)
-        server.IMPORTER.offline = True
+        api.IMPORTER.offline = True
 
     def req(self, path, method="GET", headers=None):
         r = urllib.request.Request(self.url.rstrip("/") + path, data=b"" if method == "POST" else None,
@@ -487,7 +488,7 @@ class Api(unittest.TestCase):
         port = self.httpd.server_address[1]
         for h in ({}, {"X-Rollbook": "1", "Origin": "https://evil.example"}, {"X-Rollbook": "1", "Host": "evil.example"}):
             self.assertEqual(self.req("/api/strava/sync", "POST", h)[0], 403, h)
-        with mock.patch.object(server.IMPORTER, "sync_strava", return_value=(200, {"state": "running"})) as s:
+        with mock.patch.object(api.IMPORTER, "sync_strava", return_value=(200, {"state": "running"})) as s:
             code, body = self.req("/api/strava/sync", "POST", {"X-Rollbook": "1", "Origin": f"http://127.0.0.1:{port}"})
             self.assertEqual((code, body), (200, {"state": "running"}))
             s.assert_called_once_with()
@@ -496,7 +497,7 @@ class Api(unittest.TestCase):
             self.assertEqual(code, 400)
             self.assertIn(b"rollbook strava auth", body)
             sw.save_cookie(self.home, GOOD)
-            server.IMPORTER.offline = True
+            api.IMPORTER.offline = True
             self.assertEqual(self.req("/api/strava/sync", "POST", {"X-Rollbook": "1"})[0], 400)
             self.assertEqual(s.call_count, 1)
 

@@ -16,6 +16,8 @@ import unittest
 
 from test_end_to_end import make_export, run
 
+import api
+import lanaccess
 import server
 
 LAN_IP = "192.0.2.10"  # TEST-NET-1: never a real interface
@@ -32,7 +34,7 @@ class LanBase(unittest.TestCase):
         r = run(cls.home, "db", "build", os.path.join(cls.home, "export"))
         assert r.returncode == 0, r.stdout + r.stderr
         cls.db = os.path.join(cls.home, "rollbook.db")
-        cls.lan = server.lan_setup(cls.home, port=0, write=cls.write, https=cls.https, ips=[LAN_IP])
+        cls.lan = lanaccess.lan_setup(cls.home, port=0, write=cls.write, https=cls.https, ips=[LAN_IP])
         cls.lan.bind = "127.0.0.1"  # tests stay on loopback; the Host header plays the phone
         cls.httpd, cls.M, cls.url = server.start(cls.db, os.path.join(cls.home, "cache", "web_metrics.json"),
                                                  0, offline=True, lan=cls.lan)
@@ -56,7 +58,7 @@ class LanBase(unittest.TestCase):
             c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
         h = {"Host": host or self.host}
         if cookie:
-            h["Cookie"] = f"{server.LAN_COOKIE}={self.lan.token}"
+            h["Cookie"] = f"{lanaccess.LAN_COOKIE}={self.lan.token}"
         h.update(headers or {})
         c.request(method, path, body=body, headers=h)
         r = c.getresponse()
@@ -84,7 +86,7 @@ class ReadOnly(LanBase):
             r, body = self.req("GET", path, cookie=False)
             self.assertEqual(r.status, 403, path)
             self.assertIn(b"rollbook web --lan", body)
-        r, _ = self.req("GET", "/api/types", cookie=False, headers={"Cookie": f"{server.LAN_COOKIE}=nope"})
+        r, _ = self.req("GET", "/api/types", cookie=False, headers={"Cookie": f"{lanaccess.LAN_COOKIE}=nope"})
         self.assertEqual(r.status, 403)
         r, _ = self.req("GET", "/?t=wrong", cookie=False)
         self.assertEqual(r.status, 403)
@@ -94,7 +96,7 @@ class ReadOnly(LanBase):
         self.assertEqual(r.status, 302)
         self.assertEqual(r.getheader("Location"), "/")
         ck = r.getheader("Set-Cookie")
-        self.assertIn(f"{server.LAN_COOKIE}={self.lan.token}", ck)
+        self.assertIn(f"{lanaccess.LAN_COOKIE}={self.lan.token}", ck)
         for attr in ("HttpOnly", "SameSite=Lax", "Path=/", "Secure"):
             self.assertIn(attr, ck)
         r, _ = self.req("GET", f"/?x=1&t={self.lan.token}", cookie=False)
@@ -130,7 +132,7 @@ class ReadOnly(LanBase):
         self.assertEqual(r.status, 403)  # the token is never accepted on a POST
 
     def test_last_import_readable_but_not_dismissable(self):
-        d = server.LAST.record([1001], ["x"])
+        d = api.LAST.record([1001], ["x"])
         r, body = self.req("GET", "/api/last_import")
         self.assertEqual(r.status, 200)
         self.assertEqual(json.loads(body)["new"], [{"id": 1001, "type": "Inline Skate"}])
@@ -139,7 +141,7 @@ class ReadOnly(LanBase):
         r, out = self.post("/api/last_import/dismiss", {"finished": d["finished"]})
         self.assertEqual(r.status, 403)
         self.assertIn("lan-write", json.loads(out)["error"])
-        self.assertFalse(server.LAST.get()["dismissed"])
+        self.assertFalse(api.LAST.get()["dismissed"])
 
     def test_plain_http_to_tls_port_does_not_stall(self):
         with socket.create_connection(("127.0.0.1", self.port), timeout=10) as s:
@@ -156,25 +158,25 @@ class ReadOnly(LanBase):
             idle.close()
 
     def test_lan_port_in_use_refused(self):
-        lan = server.Lan("x" * 22, port=self.httpd.server_address[1], names=["127.0.0.1"], https=False)
+        lan = lanaccess.Lan("x" * 22, port=self.httpd.server_address[1], names=["127.0.0.1"], https=False)
         with self.assertRaises(OSError) as cm:
             server.start(self.db, os.path.join(self.home, "cache", "web_metrics.json"), 0, offline=True, lan=lan)
         self.assertIn("in use", str(cm.exception))
 
     def test_banner(self):
         out = io.StringIO()
-        server.lan_banner(self.lan, "always", out)
+        lanaccess.lan_banner(self.lan, "always", out)
         text = out.getvalue()
         self.assertIn(f"https://{LAN_IP}:{self.port}/?t={self.lan.token}", text)
         self.assertIn(self.lan.cert["fingerprint"], text)
         self.assertIn("read-only", text)
         self.assertIn("##", text)  # a QR code (StringIO has no encoding: ASCII fallback)
         utf8 = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
-        server.lan_banner(self.lan, "always", utf8)
+        lanaccess.lan_banner(self.lan, "always", utf8)
         utf8.seek(0)
         self.assertIn("\u2580", utf8.read())
         out = io.StringIO()
-        server.lan_banner(self.lan, "auto", out)  # not a terminal: no QR
+        lanaccess.lan_banner(self.lan, "auto", out)  # not a terminal: no QR
         self.assertNotIn("##", out.getvalue())
 
 
@@ -199,15 +201,15 @@ class ReadWrite(LanBase):
         self.assertIs(json.loads(body)["readonly"], False)
 
     def test_last_import_dismiss_with_lan_write(self):
-        d = server.LAST.record([1001], ["x"])
+        d = api.LAST.record([1001], ["x"])
         r, _ = self.post("/api/last_import/dismiss", {"finished": d["finished"]}, headers={"Origin": "https://evil.example"})
         self.assertEqual(r.status, 403)
         r, _ = self.post("/api/last_import/dismiss", {"finished": d["finished"]}, cookie=False)
         self.assertEqual(r.status, 403)
-        self.assertFalse(server.LAST.get()["dismissed"])
+        self.assertFalse(api.LAST.get()["dismissed"])
         r, body = self.post("/api/last_import/dismiss", {"finished": d["finished"]})
         self.assertEqual(r.status, 200, body)
-        self.assertTrue(server.LAST.get()["dismissed"])
+        self.assertTrue(api.LAST.get()["dismissed"])
 
 
 class PlainHttp(LanBase):
@@ -221,15 +223,22 @@ class PlainHttp(LanBase):
         r, _ = self.req("GET", "/api/types")
         self.assertEqual(r.status, 200)
         out = io.StringIO()
-        server.lan_banner(self.lan, "never", out)
+        lanaccess.lan_banner(self.lan, "never", out)
         self.assertIn("unencrypted", out.getvalue())
 
+
+    def test_every_post_refused_read_only(self):
+        for path in [*api.POST, "/api/bye"]:
+            with self.subTest(path=path):
+                r, body = self.post(path, {})
+                self.assertEqual(r.status, 403)
+                self.assertIn(b"read-only", body)
 
     def test_unauthenticated_body_never_read(self):
         # a client without the cookie (or with a foreign Host) is answered at once and
         # cut off: the server doesn't sit reading a body it announced but never sends
         for method in ("GET", "POST"):
-            for host, cookie in ((None, ""), ("evil.example", f"{server.LAN_COOKIE}={self.lan.token}")):
+            for host, cookie in ((None, ""), ("evil.example", f"{lanaccess.LAN_COOKIE}={self.lan.token}")):
                 with self.subTest(method=method, host=host), \
                         socket.create_connection(("127.0.0.1", self.port), timeout=10) as sk:
                     sk.sendall(f"{method} /api/edit HTTP/1.1\r\nHost: {host or self.host}\r\n"
@@ -249,20 +258,20 @@ class Token(unittest.TestCase):
     def test_token_persists_and_rotates(self):
         d = tempfile.mkdtemp(prefix="rollbook-test-token-")
         self.addCleanup(shutil.rmtree, d, True)
-        t = server.lan_token(d)
+        t = lanaccess.lan_token(d)
         self.assertGreaterEqual(len(t), 22)
-        self.assertEqual(server.lan_token(d), t)
+        self.assertEqual(lanaccess.lan_token(d), t)
         if os.name == "posix":
             self.assertEqual(os.stat(os.path.join(d, "lan_token")).st_mode & 0o777, 0o600)
-        t2 = server.lan_token(d, new=True)
+        t2 = lanaccess.lan_token(d, new=True)
         self.assertNotEqual(t2, t)
-        self.assertEqual(server.lan_token(d), t2)
+        self.assertEqual(lanaccess.lan_token(d), t2)
         with open(os.path.join(d, "lan_token"), "w") as f:
             f.write("short")
-        self.assertNotEqual(server.lan_token(d), "short")
+        self.assertNotEqual(lanaccess.lan_token(d), "short")
 
     def test_lan_ips_excludes_loopback(self):
-        for ip in server.lan_ips():
+        for ip in lanaccess.lan_ips():
             self.assertFalse(ip.startswith(("127.", "169.254.")), ip)
 
     def test_cli_flags(self):

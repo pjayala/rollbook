@@ -14,7 +14,7 @@ import unittest
 
 from helpers import ROOT, load_tool, loop_rows, tmpdir
 
-import server
+import analysis
 
 CIRC = 2 * math.pi * 60.0  # loop_rows default radius: ~377 m
 APP_JS = os.path.join(ROOT, "web", "static", "app.js")
@@ -53,7 +53,7 @@ def lap_at(L, t):
 class StopInLap(unittest.TestCase):
     def setUp(self):
         rows, self.t_stop = with_stop()
-        self.L = server.find_laps(*split(rows))
+        self.L = analysis.find_laps(*split(rows))
         self.assertIsNotNone(self.L)
 
     def test_stopped_lap_is_regular_but_not_counted(self):
@@ -85,7 +85,7 @@ class StopInLap(unittest.TestCase):
 class OdometerCheck(unittest.TestCase):
     def test_lap_with_odometer_far_off_is_not_regular(self):
         rows, t_mid = with_odometer(2.0)  # +240 m on a 377 m lap: ~+64%
-        L = server.find_laps(*split(rows))
+        L = analysis.find_laps(*split(rows))
         self.assertIsNotNone(L)
         bad = lap_at(L, t_mid)
         self.assertGreater(bad["km"], 1.25 * CIRC / 1000)
@@ -98,7 +98,7 @@ class OdometerCheck(unittest.TestCase):
 
     def test_small_odometer_drift_stays_regular(self):
         rows, t_mid = with_odometer(1.1)  # +24 m: ~+6%
-        L = server.find_laps(*split(rows))
+        L = analysis.find_laps(*split(rows))
         self.assertIsNotNone(L)
         self.assertTrue(lap_at(L, t_mid)["regular"])
         self.assertTrue(all(x["counted"] for x in L["laps"]))
@@ -108,16 +108,16 @@ class MinPasses(unittest.TestCase):
     def test_two_passes_is_not_laps(self):
         # 1.8 laps of 754 m: long enough to pass the 3*LAP_MIN_M guard, but every gate sees <= 2 passes
         # (exactly 2.0 laps ends on the start gate, which is a 3rd pass)
-        self.assertIsNone(server.find_laps(*split(loop_rows(laps=1.8, radius_m=120))))
+        self.assertIsNone(analysis.find_laps(*split(loop_rows(laps=1.8, radius_m=120))))
 
     def test_three_passes_is_two_laps(self):
-        L = server.find_laps(*split(loop_rows(laps=2.2, radius_m=120)))
+        L = analysis.find_laps(*split(loop_rows(laps=2.2, radius_m=120)))
         self.assertIsNotNone(L)
         self.assertEqual(len(L["laps"]), 2)
         self.assertAlmostEqual(L["lap_km"], 2 * math.pi * 120 / 1000, delta=0.02)
 
     def test_too_short_track(self):
-        self.assertIsNone(server.find_laps(*split(loop_rows(laps=1, radius_m=60))))
+        self.assertIsNone(analysis.find_laps(*split(loop_rows(laps=1, radius_m=60))))
 
 
 NODE_HARNESS = r"""

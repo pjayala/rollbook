@@ -27,7 +27,7 @@ import time
 
 import edits
 import profile as athlete
-import server as srv
+import analysis as srv
 import store
 
 PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")  # newest first

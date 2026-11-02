@@ -48,7 +48,7 @@ REATTACH_KM = 0.05  # and the same distance tolerance
 # bookkeeping keys: an edit with only these is no edit. start / km identify the
 # session if an import replaces it under another id (see _reconcile)
 META = ("updated", "start", "km")
-_KEY = re.compile(r"[0-9]{1,18}")  # activity ids; longer would overflow SQLite's int64
+ID_RE = _KEY = re.compile(r"[0-9]{1,18}")  # activity ids; longer would overflow SQLite's int64
 _VERSIONS = itertools.count(1)  # process-wide, so two stores never share a version
 
 
