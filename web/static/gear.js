@@ -57,6 +57,65 @@ function partOrder(kindKeys, P, T) {
     || P.get(a).name.localeCompare(P.get(b).name));
 }
 
+/** What "speed" means when comparing gear of a sport: best 10 min, or best 20 min
+ * power indoors (simulated speed means nothing). Never kmh_moving: not comparable
+ * across the 2025-08 sample-rate change. */
+function gearMetric(sport) {
+  const virt = /^Virtual/.test(sport || "");
+  return virt ? { key: "pw20m", label: "Best 20 min power", unit: "W", virt, fmt: v => isNum(v) ? Math.round(v).toString() : "–" }
+    : { key: "best10min_kmh", label: "Best 10 min", unit: "km/h", virt, fmt: f2 };
+}
+/** Gear side by side for one sport's sessions (`acts` as the list API gives them).
+ * Speed is best10min_kmh (never kmh_moving: not comparable across sample rates);
+ * virtual rides use best 20 min power, their speed is simulated. Efficiency
+ * (best 10 per heartbeat, ×100) only with at least 3 sessions with HR. */
+function gearCompare(acts, virtual) {
+  const key = gearMetric(virtual ? "Virtual" : "").key, by = new Map();
+  for (const a of acts) {
+    if (!a.gear_id || a.hidden) continue;
+    if (!by.has(a.gear_id)) by.set(a.gear_id, { id: a.gear_id, name: a.gear_name, n: 0, km: 0, first: null, last: null, v: [], eff: [] });
+    const g = by.get(a.gear_id), m = a[key];
+    g.n++; g.km += a.km || 0;
+    if (a.date) { g.first = !g.first || a.date < g.first ? a.date : g.first; g.last = !g.last || a.date > g.last ? a.date : g.last; }
+    if (isNum(m) && m > 0) g.v.push(m);
+    if (!virtual && isNum(a.best10min_kmh) && a.best10min_kmh > 0 && isNum(a.hr_avg) && a.hr_avg > 0) g.eff.push(a.best10min_kmh / a.hr_avg * 100);
+  }
+  return [...by.values()].map(g => ({ id: g.id, name: g.name, n: g.n, km: g.km, first: g.first, last: g.last, nv: g.v.length,
+    med: median(g.v), best: g.v.length ? Math.max(...g.v) : null, nHr: g.eff.length, eff: g.eff.length >= 3 ? median(g.eff) : null }))
+    .sort((a, b) => (b.med ?? -1) - (a.med ?? -1) || b.n - a.n);
+}
+/** A parts timeline: one row per fitting, positions in % of [lo, hi] (hi = today, or
+ * later when a fitting is dated ahead); ticks = services while it was on; years =
+ * axis labels, those too close to either end dropped. */
+function timelineRows(mounts, P, today) {
+  const t = d => +new Date(d + "T12:00:00");
+  if (!mounts.length) return { rows: [], lo: today, hi: today, years: [] };
+  const lo = mounts.reduce((m, x) => x.from < m ? x.from : m, today);
+  const hi = mounts.reduce((m, x) => { const e = x.to || x.from; return e > m ? e : m; }, today);
+  const span = Math.max(1, t(hi) - t(lo)), pc = d => Math.max(0, Math.min(100, (t(d) - t(lo)) / span * 100));
+  const rows = mounts.map(m => {
+    const p = P.get(m.part), w = Math.max(0.6, pc(m.to || hi) - pc(m.from)), left = Math.min(pc(m.from), 100 - w);
+    const until = m.to || "9999-12-31";  // a service logged today on a part still on counts
+    return { part: m.part, i: m.i, name: p.name, kind: p.kind, on: !m.to, left, width: w, from: m.from, to: m.to,
+      ticks: (p.services || []).filter(v => v.date >= m.from && v.date < until).map(v => ({ at: pc(v.date), action: v.action, date: v.date })) };
+  });
+  const years = [];
+  for (let y = +lo.slice(0, 4) + 1; y <= +hi.slice(0, 4); y++) {
+    const at = pc(`${y}-01-01`);
+    if (at > 12 && at < 90) years.push({ y, at });
+  }
+  return { rows, lo, hi, years };
+}
+/** Services of a gear's parts done while they were on it, newest first. */
+function gearServices(g, P) {
+  const out = [];
+  for (const pid of new Set(g.parts.map(m => m.part))) {
+    const on = g.parts.filter(m => m.part === pid);
+    (P.get(pid).services || []).forEach((v, i) => { if (on.some(m => v.date >= m.from && (!m.to || v.date < m.to))) out.push({ pid, i, ...v }); });
+  }
+  return out.sort((a, b) => b.date.localeCompare(a.date));
+}
+
 // ------------------------------------------------------------------ data
 
 /** The store as Maps (ids and sports are keys: never index plain objects with them). */
@@ -78,7 +137,10 @@ async function postGear(body) {
     body: JSON.stringify({ ...body, rev: S.gear ? S.gear.rev : -1 }) });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) {
-    if (r.status === 409 && /reload/.test(j.error || "")) await loadGear(true).catch(() => null);
+    if (r.status === 409) {  // someone else changed gear: never act on this page's (stale) rows again
+      await loadGear(true).catch(() => null);
+      setTimeout(() => { if (!document.querySelector("dialog[open]")) route(); }, 0);
+    }
     throw new Error(j.error || `HTTP ${r.status}`);
   }
   S.gear = gearIndex(j.gear);
@@ -191,13 +253,14 @@ function openPartDialog(id, opts = {}) {
   }
 }
 
-function openGearDialog(id) {
+/** opts (new gear only): sport preselected, since = default-from date. */
+function openGearDialog(id, opts = {}) {
   const g = id ? S.gear.G.get(id) : null;
   const sports = [...new Set([...S.types.map(t => t.type), ...(g ? g.sports : [])])];
-  const on = new Set(g ? g.sports : [S.type]);
+  const on = new Set(g ? g.sports : [opts.sport || S.type]);
   const fields = fld("Name", `<input name="name" maxlength="120" required value="${esc(g ? g.name : "")}">`, "e.g. Powerslide 3×110, Inov-8 ParkClaw")
     + `<fieldset class="pfield"><legend>Sports</legend><div class="chips">${sports.map(s => `<label class="small"><input type="checkbox" name="sport" value="${esc(s)}" ${on.has(s) ? "checked" : ""}> ${esc(s)}</label>`).join("")}</div></fieldset>`
-    + (g ? "" : fld("Default from", `<input name="default_since" type="date" value="">`, "make it the default for these sports from this day (older sessions keep theirs); empty = not the default"))
+    + (g ? "" : fld("Default from", `<input name="default_since" type="date" value="${esc(opts.since || "")}">`, "make it the default for these sports from this day (older sessions keep theirs); empty = not the default"))
     + fld("Notes", `<input name="notes" maxlength="2000" value="${esc(g ? g.notes : "")}">`);
   const extra = g ? danger(`<b>Retire</b> <span class="muted">takes its parts off and ends it as a default; its history stays.</span>
       <b>Delete</b> <span class="muted">only gear no session uses that was never a default.</span>`,
@@ -247,9 +310,9 @@ function openMountDialog(gid, index) {
   const extra = m ? danger(`<b>Delete from history</b> <span class="muted">as if it was never on this gear: its km here stop counting. To take it off, set Removed.</span>`,
     [["Delete from history", "data-mdel", "danger"]]) : `<div class="toolbar gear-w"><button class="linkbtn" type="button" data-pnew>New part…</button></div>`;
   const dlg = gearDialog(m ? `${S.gear.P.get(m.part).name} on ${g.name}` : `Fit a part to ${g.name}`, fields, f => postGear(m
-    ? { op: "mount.set", gear: gid, index, from: val(f, "from"), to: val(f, "to") || null }
+    ? { op: "mount.set", gear: gid, index, part: m.part, from: val(f, "from"), to: val(f, "to") || null }
     : { op: "mount.add", gear: gid, part: val(f, "part"), from: val(f, "from"), to: val(f, "to") || null }), extra);
-  if (m) dlg.querySelector("[data-mdel]").onclick = () => confirm("Delete this fitting from the gear's history?") && dlgRun(dlg, () => postGear({ op: "mount.delete", gear: gid, index }));
+  if (m) dlg.querySelector("[data-mdel]").onclick = () => confirm("Delete this fitting from the gear's history?") && dlgRun(dlg, () => postGear({ op: "mount.delete", gear: gid, index, part: m.part }));
   else dlg.querySelector("[data-pnew]").onclick = () => { dlg.close(); openPartDialog(null, { gear: gid }); };
 }
 
@@ -312,11 +375,12 @@ async function viewGear(seq) {
           <td class="l"><a href="#/gear/${esc(id)}"><b>${esc(g.name)}</b></a>${g.retired ? ` <span class="pill">retired</span>` : ""}${n ? ` <span class="pill pill-neg">${n} part${n > 1 ? "s" : ""} due</span>` : ""}
             <div class="muted small">${esc((g.sports || []).join(", "))}${g.parts.some(m => !m.to) ? " · " + esc(curParts(g)) : ""}</div></td>
           <td>${t.sessions ? fkm(t.km) : "–"}</td><td>${t.sessions ? hours(t.moving_s) : "–"}</td><td>${t.sessions || 0}</td><td>${t.last ? esc(t.last) : "–"}</td></tr>`; }).join("")}</tbody></table></div>`
-      : `<p class="muted">No gear yet.${W(" Add your skates, bike or shoes with <b>New gear</b>, then fit their parts (wheels, frame, boots, tyres…) to count the km on each.")}</p>`}
+      : G.G.size ? `<p class="muted">All gear is retired: tick “show retired” to see it.</p>` : firstRun()}
     </div>
     <div class="panel"><h2>Parts <span class="muted">${parts.length}</span></h2>
       ${parts.length ? `<div class="scroll"><table class="gparts gp-main"><thead><tr><th class="l">part</th><th class="l">fitted to</th><th>km</th><th>sessions</th><th class="l">service</th><th><span class="vh">actions</span></th></tr></thead><tbody>${partRows(parts)}</tbody></table></div>`
         : `<p class="muted">No parts yet.${W(" Add wheels to track rotation, shoes to know when to replace them.")}</p>`}</div>
+    <div class="panel" id="g-cmp" hidden></div>
     <div class="panel"><h2>Default gear per sport</h2><p class="muted small">New sessions of a sport get its default from the day it is set; older sessions keep theirs.${W(" Change one session's gear in its <b>Edit</b>.")}</p>
       ${sports.length ? `<div class="scroll gdefs"><table><thead><tr><th class="l">sport</th><th class="l">default</th><th><span class="vh">actions</span></th></tr></thead><tbody>${sports.map(defRow).join("")}</tbody></table></div>`
         : `<p class="muted small">Set a gear's sports to choose it as a default.</p>`}</div>`;
@@ -325,7 +389,40 @@ async function viewGear(seq) {
   $("#gp-new").onclick = () => openPartDialog(null);
   app.querySelectorAll("tr[data-gid]").forEach(tr => tr.onclick = e => { if (!e.target.closest("a")) location.hash = "#/gear/" + tr.dataset.gid; });
   app.querySelectorAll("[data-dset]").forEach(b => b.onclick = () => openDefaultDialog(b.dataset.dset));
+  app.querySelectorAll("[data-first]").forEach(b => b.onclick = () => {
+    const t = S.types.find(x => x.type === b.dataset.first);
+    openGearDialog(null, { sport: t.type, since: t.first });
+  });
   wirePartButtons(app);
+  if (G.G.size) compareGear($("#g-cmp"), seq).catch(e => { if (seq === routeSeq) $("#g-cmp").hidden = true; console.error(e); });
+}
+
+const NOUN = new Map([["skate", "skates"], ["bike", "bike"], ["run", "shoes"]]);
+/** No gear yet: one line per sport from the user's own sessions, each a one-click start. */
+function firstRun() {
+  const rows = S.types.slice(0, 6).map(t => `<tr><td class="l"><b>${esc(t.type)}</b></td><td>${t.n} sessions</td><td>${fkm(t.km)} km</td>
+    <td class="l muted small">since ${esc(t.first || "–")}</td>
+    <td class="l acts gear-w"><button class="btn small" data-first="${esc(t.type)}">Add ${esc(NOUN.get(S.gear.SG.get(t.type)) || "gear")}</button></td></tr>`).join("");
+  return `<p class="muted">No gear yet.${W(" Add your skates, bike or shoes, then fit their parts (wheels, frame, boots, tyres…) to count the km on each. Made the default from the sport's first session, it covers all of them at once.",
+    " Gear is set up on the computer running Rollbook.")}</p>${rows ? `<div class="scroll gdefs"><table><tbody>${rows}</tbody></table></div>` : ""}`;
+}
+
+/** Gear of the selected sport side by side. */
+async function compareGear(host, seq) {
+  const acts = await loadActs(S.type);
+  if (seq !== routeSeq) return;
+  const M = gearMetric(S.type), rows = gearCompare(acts, M.virt);
+  if (!rows.length) return;
+  const u = M.unit, f = M.fmt, hr = rows.some(r => r.eff != null);
+  host.hidden = false;
+  host.innerHTML = `<h2>${esc(S.type)} by gear <span class="muted">${esc(M.label.toLowerCase())}</span></h2>
+    ${rows.length < 2 ? `<p class="muted small">Only one gear for ${esc(S.type)} so far: a second one gives this table something to compare.</p>` : ""}
+    <div class="scroll"><table><thead><tr><th class="l">gear</th><th class="l">used</th><th>sessions</th><th>km</th><th>median ${u}</th><th>best ${u}</th>${hr ? `<th title="best 10 min ÷ average HR × 100, with at least 3 sessions with heart rate">per heartbeat</th>` : ""}</tr></thead><tbody>
+    ${rows.map(r => `<tr class="click" data-gid="${esc(r.id)}"><td class="l"><a href="#/gear/${esc(r.id)}">${esc(r.name)}</a></td><td class="l muted small">${esc(r.first || "")} – ${esc(r.last || "")}</td>
+      <td>${r.n}</td><td>${fkm(r.km)}</td><td class="${r.nv < 5 ? "muted" : ""}">${f(r.med)}${r.nv < 5 && r.nv ? ` <span class="small">n=${r.nv}</span>` : ""}</td><td>${f(r.best)}</td>
+      ${hr ? `<td>${r.eff != null ? f2(r.eff) + ` <span class="muted small">n=${r.nHr}</span>` : "–"}</td>` : ""}</tr>`).join("")}</tbody></table></div>
+    <p class="note">Each gear was used in its own period, so the numbers also reflect your form and the season then, not only the gear.</p>`;
+  host.querySelectorAll("tr[data-gid]").forEach(tr => tr.onclick = e => { if (!e.target.closest("a")) location.hash = "#/gear/" + tr.dataset.gid; });
 }
 
 async function viewGearOne(id, seq) {
@@ -338,6 +435,7 @@ async function viewGearOne(id, seq) {
   const defs = [...G.D.entries()].filter(([, h]) => h.length && h[h.length - 1].gear === id).map(([s]) => s);
   const today = isoDay();
   const mounts = g.parts.map((m, i) => ({ ...m, i })).sort((a, b) => (!!a.to - !!b.to) || b.from.localeCompare(a.from));
+  const sport = (g.sports || []).find(s => S.types.some(x => x.type === s)) || null, M = gearMetric(sport);
   app.innerHTML = `<div class="head"><div><div class="small"><a class="muted" href="#/gear">Gear</a> <span class="muted">/</span></div><h1>${esc(g.name)}</h1>
         <div class="muted">${esc((g.sports || []).join(", ") || "no sport")}${defs.length ? ` · default for ${esc(defs.join(", "))}` : ""}${g.retired ? ` · retired ${esc(g.retired)}` : ""}</div></div>
       <div class="headnav gear-w"><button class="btn" id="m-add">Fit a part</button><button class="btn" id="g-edit">Edit</button></div></div>
@@ -345,7 +443,7 @@ async function viewGearOne(id, seq) {
       { k: "Last used", v: t.last ? esc(t.last) : "–", s: t.first ? `first ${esc(t.first)}` : "" }])}
     ${g.notes ? `<p class="muted">${esc(g.notes)}</p>` : ""}
     <div class="panel"><h2>Parts</h2>
-      ${mounts.length ? `<div class="scroll"><table class="gparts"><thead><tr><th class="l">part</th><th class="l">installed</th><th class="l">removed</th><th>km total</th><th class="l">service</th><th><span class="vh">actions</span></th></tr></thead><tbody>
+      ${mounts.length ? `<div class="scroll"><table class="gparts gp-one"><thead><tr><th class="l">part</th><th class="l">installed</th><th class="l">removed</th><th>km total</th><th class="l">service</th><th><span class="vh">actions</span></th></tr></thead><tbody>
         ${mounts.map(m => { const p = G.P.get(m.part), pt = G.T.parts.get(m.part) || {}; return `<tr class="${m.to ? "hiddenrow" : ""}">
           <td class="l">${kindName(p)}<button class="linkbtn plink" data-pedit="${esc(m.part)}" aria-label="Edit ${esc(p.name)}">${esc(p.name)}</button><div class="muted small">${esc(specLine(G.kinds, p))}</div></td>
           <td class="l">${esc(m.from)}</td><td class="l">${m.to ? esc(m.to) : `<span class="muted">still on</span>`}</td><td>${fkm(pt.km_total)}</td>
@@ -353,6 +451,12 @@ async function viewGearOne(id, seq) {
           <td class="l acts">${!m.to && m.from < today ? `<button class="linkbtn gear-w" data-off="${m.i}" aria-label="Take ${esc(p.name)} off today">Take off</button> ` : ""}${!m.to && p.service_km ? `<button class="linkbtn gear-w" data-svc="${esc(m.part)}" aria-label="Log service, ${esc(p.name)}">Log service</button> ` : ""}<button class="linkbtn gear-w" data-mdates="${m.i}" aria-label="Edit dates of ${esc(p.name)}">Edit dates</button></td></tr>`; }).join("")}</tbody></table></div>`
         : `<p class="muted">No parts on it yet.${W(" <b>Fit a part</b> to count the km on its wheels, frame, boots…")}</p>`}
     </div>
+    ${mounts.length ? `<div class="panel"><h2>Parts over time</h2>${timelineHtml(timelineRows(mounts, G.P, today))}</div>` : ""}
+    <div class="grid g2 top">
+      <div class="panel"><h2>Distance per month</h2><div id="c-gkm"></div></div>
+      <div class="panel"><h2>${esc(M.label)}${sport ? ` <span class="muted">this gear vs other ${esc(sport)}</span>` : ""}</h2><div id="c-gb10"></div><p class="note" id="gb10-note"></p></div>
+    </div>
+    ${serviceLog(G, g)}
     <div class="panel"><h2>Latest sessions on it <span class="muted">${t.sessions || 0}</span></h2>
       ${recent.length ? `<div class="scroll gsess"><table><thead><tr><th class="l">date</th><th class="l">name</th><th class="l">sport</th><th>km</th><th class="l"></th></tr></thead><tbody>
         ${recent.map(a => `<tr class="click" data-id="${esc(a.id)}"><td class="l">${a.date ? fdate(new Date(a.date + "T12:00:00")) : "–"}</td><td class="l"><a href="#/session/${esc(a.id)}">${esc(a.name)}</a></td><td class="l muted">${esc(a.type)}</td><td>${fkm(a.km)}</td><td class="l muted small">${a.src === "explicit" ? "chosen" : ""}</td></tr>`).join("")}</tbody></table></div>
@@ -370,9 +474,55 @@ async function viewGearOne(id, seq) {
   };
   app.querySelectorAll("tr[data-id]").forEach(tr => tr.onclick = e => { if (!e.target.closest("a")) go(tr.dataset.id); });
   app.querySelectorAll("[data-off]").forEach(b => b.onclick = async () => {
-    try { await postGear({ op: "mount.set", gear: id, index: +b.dataset.off, to: isoDay() }); route(); } catch (e) { alert("Could not save: " + e.message); } });
+    try { await postGear({ op: "mount.set", gear: id, index: +b.dataset.off, part: g.parts[+b.dataset.off].part, to: isoDay() }); route(); } catch (e) { alert("Could not save: " + e.message); } });
   app.querySelectorAll("[data-mdates]").forEach(b => b.onclick = () => openMountDialog(id, +b.dataset.mdates));
+  app.querySelectorAll("[data-sdel]").forEach(b => b.onclick = async () => {
+    const [pid, i] = b.dataset.sdel.split(":"), v = S.gear.P.get(pid).services[+i];
+    if (!v || !confirm("Delete this service entry?")) return;
+    try { await postGear({ op: "part.service", id: pid, delete: +i, date: v.date, action: v.action }); route(); } catch (e) { alert("Could not save: " + e.message); } });
   wirePartButtons(app);
+  gearCharts(g, id, t, sport, seq).catch(e => { if (seq === routeSeq) $("#c-gb10").innerHTML = `<p class="down">${esc(e.message)}</p>`; });
+}
+
+function timelineHtml(tl) {
+  if (!tl.rows.length) return "";
+  return `<div class="gtl" role="list">${tl.rows.map(r => `<div class="gtl-row" role="listitem"><div class="gtl-k"><span class="muted">${esc(kindLabel(r.kind))}</span> ${esc(r.name)}</div>
+      <div class="gtl-track"><span class="gtl-bar${r.on ? " on" : ""}" style="left:${r.left.toFixed(2)}%;width:${r.width.toFixed(2)}%" title="${esc(`${r.name}: ${r.from} – ${r.to || "still on"}`)}"></span>
+      ${r.ticks.map(k => `<span class="gtl-tick gtl-${esc(k.action)}" style="left:${k.at.toFixed(2)}%" title="${esc(`${k.action} ${k.date}`)}"></span>`).join("")}</div></div>`).join("")}
+    <div class="gtl-row gtl-axis"><div class="gtl-k"></div><div class="gtl-track"><span class="muted small" style="left:0">${esc(tl.lo)}</span>
+      ${tl.years.map(y => `<span class="muted small" style="left:${y.at.toFixed(2)}%">${y.y}</span>`).join("")}<span class="muted small gtl-end">${tl.hi === isoDay() ? "today" : esc(tl.hi)}</span></div></div></div>
+    <p class="muted small">Orange: on it now · grey: removed · ticks: service (white), rotation (orange), replacement (red).</p>`;
+}
+
+function serviceLog(G, g) {
+  const rows = gearServices(g, G.P);
+  if (!rows.length) return "";
+  return `<div class="panel"><h2>Service log</h2><div class="scroll gsess"><table><thead><tr><th class="l">date</th><th class="l">part</th><th class="l">what</th><th class="l">note</th><th><span class="vh">actions</span></th></tr></thead><tbody>
+    ${rows.map(v => `<tr><td class="l">${esc(v.date)}</td><td class="l">${esc(G.P.get(v.pid).name)}</td><td class="l">${esc(v.action)}</td><td class="l muted">${esc(v.note)}</td>
+      <td class="l acts"><button class="linkbtn gear-w" data-sdel="${esc(v.pid)}:${v.i}" aria-label="Delete the ${esc(v.action)} of ${esc(v.date)}">Delete</button></td></tr>`).join("")}</tbody></table></div></div>`;
+}
+
+/** km per month from the server, and this gear's best effort against the sport's other gear. */
+async function gearCharts(g, id, t, sport, seq) {
+  const mons = Object.entries(t.months || {}).sort(([a], [b]) => a.localeCompare(b)).map(([k, [km, n]]) => ({ x: +new Date(k + "-15T12:00:00"), km, n }));
+  if (mons.length) chart($("#c-gkm"), { x: { type: "time" }, y: { zero: true, fmt: v => v.toFixed(0), label: "km" }, legend: false,
+    series: [{ name: "km", kind: "bar", color: PAL.hue, data: mons.map(m => ({ x: m.x, y: m.km })) }],
+    tip: x => { const m = mons.find(m => m.x === x); return m ? `<b>${fmon(new Date(m.x))}</b><div class="row"><span>distance</span><span>${fkm(m.km)} km</span></div><div class="row"><span>sessions</span><span>${m.n}</span></div>` : ""; } });
+  else $("#c-gkm").innerHTML = `<p class="muted">No sessions yet.</p>`;
+  const box = $("#c-gb10");
+  if (!sport) { box.innerHTML = `<p class="muted">Give the gear a sport to compare it.</p>`; return; }
+  const acts = await loadActs(sport);
+  if (seq !== routeSeq) return;
+  const M = gearMetric(sport), virt = M.virt, key = M.key;
+  const pts = a => ({ x: a._t, y: a[key], ref: a.id });
+  const has = acts.filter(a => isNum(a[key]) && a[key] > 0), mine = has.filter(a => a.gear_id === id), rest = has.filter(a => a.gear_id !== id);
+  if (!mine.length) { box.innerHTML = `<p class="muted">No ${virt ? "power" : "best 10 min"} on its sessions yet${virt ? "" : " (run <code>rollbook db enrich</code>)"}.</p>`; return; }
+  chart(box, { x: { type: "time" }, y: { fmt: v => v.toFixed(0), label: virt ? "W" : "km/h" }, onClick: go,
+    series: [{ name: `other ${sport}`, kind: "dot", color: PAL.dim, r: 2.5, opacity: .8, data: rest.map(pts) },
+      { name: g.name, kind: "dot", color: PAL.hue, r: 3.5, data: mine.map(pts) },
+      { name: "trend", kind: "line", color: PAL.ink, width: 2, data: rolling(mine.map(pts), 8), gapX: 45 * DAY }],
+    tip: (x, hits, best) => { const a = best && acts.find(a => a.id === best.p.ref); return a ? `<b>${fdate(a._d)}</b> · ${esc(a.gear_name || "no gear")}<div class="row"><span>${esc(M.label.toLowerCase())}</span><span>${M.fmt(a[key])} ${M.unit}</span></div>` : ""; } });
+  $("#gb10-note").textContent = "Its period is also a period of your form and the season; compare like with like.";
 }
 
 // ------------------------------------------------------------------ session page / edit dialog hooks

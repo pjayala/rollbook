@@ -10,7 +10,7 @@ import subprocess
 import unittest
 
 from helpers import ROOT, tmpdir
-from test_frontend_power import _src, extract_const
+from test_frontend_power import _src, extract_const, extract_function
 
 GEAR_JS = os.path.join(ROOT, "web", "static", "gear.js")
 NODE = shutil.which("node")
@@ -30,8 +30,8 @@ class GearJs(unittest.TestCase):
         app = _src()
         with open(GEAR_JS, encoding="utf-8") as f:
             gjs = f.read().replace("\r\n", "\n")
-        pre = "\n".join(extract_const(app, n) for n in ("esc", "isNum", "f2", "fkm"))
-        body = (pre + "\nlet $ = () => null; const ICON = {}; const S = {};\n" + gjs + "\n"
+        pre = "\n".join([*(extract_const(app, n) for n in ("esc", "isNum", "f2", "fkm")), extract_function(app, "median")])
+        body = (pre + "\nlet $ = () => null; const ICON = {}; const S = {types: [{type: " + json.dumps(EVIL) + ", n: 1, km: 2, first: '2026-01-01'}]};\n" + gjs + "\n"
                 + (f"S.gear = gearIndex({json.dumps(view)});\n" if view else "")
                 + f"process.stdout.write(JSON.stringify({expr}));\n")
         path = os.path.join(tmpdir(self), "h.js")
@@ -96,14 +96,64 @@ class GearJs(unittest.TestCase):
                              {"op": "assign", "ids": [7], "gear": None}, "none", None,
                              {"op": "assign", "ids": [8], "gear": "default"}])
 
+    def test_gear_compare(self):
+        A = lambda g, b10, hr=None, km=10, date="2026-01-01", **kw: {"gear_id": g, "gear_name": g.upper() if g else None,  # noqa: E731
+                                                                   "best10min_kmh": b10, "hr_avg": hr, "km": km, "date": date, **kw}
+        acts = [A("a", 20, 140), A("a", 22, 150, date="2026-02-01"), A("a", None, 140), A("a", 21, 150),
+                A("b", 24), A("b", 25, date="2025-12-01"), A(None, 30), A("b", 99, hidden=1),
+                A("v", None, pw20m=200), A("v", None, pw20m=220)]
+        r = self.js(f"gearCompare({json.dumps(acts)}, false)")
+        self.assertEqual([(x["id"], x["n"], x["nv"], x["med"], x["best"]) for x in r][:2], [("b", 2, 2, 24.5, 25), ("a", 4, 3, 21, 22)])
+        a = next(x for x in r if x["id"] == "a")
+        self.assertEqual((a["nHr"], round(a["eff"], 3), a["first"], a["last"], a["km"]), (3, 14.286, "2026-01-01", "2026-02-01", 40))
+        self.assertIsNone(next(x for x in r if x["id"] == "b")["eff"])  # no HR: no efficiency
+        v = self.js(f"gearCompare({json.dumps(acts)}, true)")
+        self.assertEqual(next(x for x in v if x["id"] == "v")["med"], 210)  # virtual: power, never simulated speed
+
+    def test_timeline_rows(self):
+        P = {"w": {"name": "W", "kind": "wheels", "services": [{"date": "2026-01-15", "action": "rotate"}, {"date": "2025-12-01", "action": "service"}]},
+             "f": {"name": "F", "kind": "frame", "services": []}}
+        mounts = [{"part": "w", "from": "2026-01-01", "to": None, "i": 0}, {"part": "f", "from": "2025-12-01", "to": "2026-01-01", "i": 1}]
+        r = self.js(f"timelineRows({json.dumps(mounts)}, new Map(Object.entries({json.dumps(P)})), '2026-02-01')")
+        self.assertEqual((r["lo"], r["hi"]), ("2025-12-01", "2026-02-01"))
+        w, f = r["rows"]
+        self.assertEqual((w["on"], f["on"], f["left"]), (True, False, 0))
+        self.assertAlmostEqual(w["left"] + w["width"], 100, 3)
+        self.assertAlmostEqual(f["left"] + f["width"], w["left"], 3)  # one ends where the next starts
+        self.assertEqual([k["action"] for k in w["ticks"]], ["rotate"])  # only services while it was on
+        self.assertEqual(self.js("timelineRows([], new Map(), '2026-02-01').rows"), [])
+        # a fitting dated ahead stays inside the track; a service logged today on a part still on gets its tick
+        P2 = {"w": {"name": "W", "kind": "wheels", "services": [{"date": "2026-02-01", "action": "service"}]}}
+        r = self.js("timelineRows([{part: 'w', from: '2026-01-01', to: null, i: 0}, {part: 'w', from: '2026-03-01', to: null, i: 1}], "
+                    f"new Map(Object.entries({json.dumps(P2)})), '2026-02-01')")
+        self.assertEqual(r["hi"], "2026-03-01")
+        self.assertTrue(all(x["left"] + x["width"] <= 100.0001 for x in r["rows"]))
+        self.assertEqual(len(r["rows"][0]["ticks"]), 1)
+        r = self.js("timelineRows([{part: 'w', from: '2026-02-01', to: null, i: 0}], "
+                    f"new Map(Object.entries({json.dumps(P2)})), '2026-02-01').rows[0]")
+        self.assertEqual((r["left"], r["width"]), (0, 0.6))  # fitted today, zero span: still a visible bar
+        y = self.js("timelineRows([{part: 'w', from: '2023-12-20', to: null, i: 0}], "
+                    f"new Map(Object.entries({json.dumps(P2)})), '2026-01-05').years.map(x => x.y)")
+        self.assertEqual(y, [2025])  # 2024 (too close to the start) and 2026 (the end) dropped
+
+    def test_metric_and_services_window(self):
+        r = self.js("[gearMetric('Virtual Ride').key, gearMetric('Inline Skate').key, gearMetric(null).key, gearMetric('Run').unit]")
+        self.assertEqual(r, ["pw20m", "best10min_kmh", "best10min_kmh", "km/h"])
+        g = {"parts": [{"part": "w", "from": "2026-01-01", "to": "2026-02-01"}]}
+        P = {"w": {"services": [{"date": "2025-12-01", "action": "service"}, {"date": "2026-01-15", "action": "rotate"},
+                                {"date": "2026-02-01", "action": "replace"}]}}
+        r = self.js(f"gearServices({json.dumps(g)}, new Map(Object.entries({json.dumps(P)}))).map(v => [v.i, v.action])")
+        self.assertEqual(r, [[1, "rotate"]])  # only while it was on this gear
+
     def test_user_text_escaped(self):
         view = {"rev": 1, "kinds": KINDS, "actions": ["service"], "sport_group": {}, "due": ["p1"], "defaults": {},
                 "gear": {"g1": {"name": EVIL, "sports": [EVIL], "parts": [{"part": "p1", "from": "2026-01-01", "to": None}]}},
                 "parts": {"p1": {"kind": "wheels", "name": EVIL, "brand": EVIL, "specs": {"profile": EVIL}, "service_km": 10,
-                                 "services": [], "retired": None}},
+                                 "services": [{"date": "2026-01-10", "action": "service", "note": EVIL}], "retired": None}},
                 "totals": {"gear": {}, "parts": {"p1": {"km_total": 20, "km_since_service": 20, "sessions": 1, "due": True,
                                                         "service_left": -10, "last_service": EVIL}}}}
-        html = self.js("partRows(['p1']) + gearChip({gear_id: 'g1', gear_name: " + json.dumps(EVIL) + ", gear_src: 'default', "
+        html = self.js("partRows(['p1']) + firstRun() + serviceLog(S.gear, S.gear.G.get('g1')) + "
+                       "timelineHtml(timelineRows([{part: 'p1', from: '2026-01-01', to: null, i: 0}], S.gear.P, '2026-02-01')) + gearChip({gear_id: 'g1', gear_name: " + json.dumps(EVIL) + ", gear_src: 'default', "
                        "gear_parts: [{kind: 'wheels', name: " + json.dumps(EVIL) + ", specs: {}}]})", view)
         self.assertNotIn("<img", html)
         self.assertNotIn("\"'", html)

@@ -361,10 +361,10 @@ def totals(data, rows):
     """rows: (id, date, type, km, moving_s, elapsed_s, name) of the visible sessions.
     Per gear and part: sessions, km, moving_s, first, last; per part also
     km_total (with km_offset), km_since_service, last_service, service_left,
-    due; per gear its latest RECENT sessions. Returns (totals, due part ids)."""
+    due; per gear its latest RECENT sessions and km / sessions per month. Returns (totals, due part ids)."""
     res = Resolver(data)
     blank = lambda: {"sessions": 0, "km": 0.0, "moving_s": 0, "first": None, "last": None}  # noqa: E731
-    gt = {k: {**blank(), "recent": []} for k in data["gear"]}
+    gt = {k: {**blank(), "recent": [], "months": {}} for k in data["gear"]}
     pt = {k: {**blank(), "km_since_service": 0.0} for k in data["parts"]}
     last_svc = {k: (p["services"][-1]["date"] if p["services"] else None) for k, p in data["parts"].items()}
 
@@ -382,6 +382,10 @@ def totals(data, rows):
             continue
         km, sec = km or 0.0, mv or el or 0
         add(gt[gid], day, km, sec)
+        if isinstance(day, str):
+            mo = gt[gid]["months"].setdefault(day[:7], [0.0, 0])  # "YYYY-MM": [km, sessions]
+            mo[0] += km
+            mo[1] += 1
         if len(gt[gid]["recent"]) < RECENT:
             gt[gid]["recent"].append({"id": aid, "date": day, "type": typ, "km": km, "name": name, "src": src})
         for p in res.parts(gid, day):
@@ -576,6 +580,9 @@ def op_part_service(d, b, _):
         i = b["delete"]
         if type(i) is not int or not 0 <= i < len(p["services"]):
             raise NotFound(i)
+        v = p["services"][i]
+        if any(k in b and b[k] != v[k] for k in ("date", "action")):  # the page's row is not this entry
+            raise Conflict("the service list changed in another window: reload")
         p["services"].pop(i)
     else:
         p["services"].append({"date": b.get("date"), "action": b.get("action"), "note": b.get("note")})
@@ -635,6 +642,8 @@ def _mount(g, b):
     i = b.get("index")
     if type(i) is not int or not 0 <= i < len(g["parts"]):
         raise NotFound(i)
+    if "part" in b and b["part"] != g["parts"][i]["part"]:  # the page's row is not this fitting
+        raise Conflict("the gear's parts changed in another window: reload")
     return i
 
 

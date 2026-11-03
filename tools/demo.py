@@ -344,7 +344,7 @@ def write_gear(home):
             for t in ("Inline Skate", "Virtual Ride", "Run")}
     db.close()
     sk = days["Inline Skate"]
-    start, mid, late = sk[0], sk[len(sk) // 2], sk[(len(sk) * 3) // 4]
+    start, q1, mid, late = sk[0], sk[len(sk) // 5], sk[len(sk) // 2], sk[(len(sk) * 3) // 4]
     gid = lambda n: f"{n:016x}"  # noqa: E731
     part = lambda kind, name, brand, specs, svc=None, **kw: {  # noqa: E731
         "kind": kind, "name": name, "brand": brand, "specs": specs, "bought": None, "km_offset": kw.get("off", 0),
@@ -362,17 +362,23 @@ def write_gear(home):
         gid(6): part("bike", "Trainer bike", "", {"type": "trainer"}),
         gid(7): part("chain", "11-speed chain", "Shimano", {"speeds": 11}, 3000, off=1200),
         gid(8): part("shoes", "Trail shoes", "Inov-8", {"size_eu": 39, "drop_mm": 4}, 700),
+        gid(9): part("wheels", "Hydrogen 90", "Rollerblade", {"diameter_mm": 90, "hardness_a": 85, "count": 8}, 600,
+                     retired=q1),
+        gid(10): part("frame", "4x90 frame", "Rollerblade", {"length_mm": 300, "material": "aluminium", "setup": "4x90"},
+                      retired=q1),
     }
     on = lambda p, f, t=None: {"part": gid(p), "from": f, "to": t}  # noqa: E731
     gear = {
         gid(101): {"name": "Powerslide 3x110", "sports": ["Inline Skate"], "retired": None, "notes": "",
-                   "parts": [on(1, start), on(2, start), on(3, start, mid), on(4, mid), on(5, start)]},
+                   "parts": [on(1, q1), on(2, q1), on(3, q1, mid), on(4, mid), on(5, q1)]},
+        gid(104): {"name": "Rollerblade 4x90", "sports": ["Inline Skate"], "retired": q1, "notes": "first skates",
+                   "parts": [on(9, start, q1), on(10, start, q1)]},
         gid(102): {"name": "Trainer bike", "sports": ["Virtual Ride"], "retired": None, "notes": "",
                    "parts": [on(6, days["Virtual Ride"][0]), on(7, days["Virtual Ride"][0])]},
         gid(103): {"name": "Inov-8 trail shoes", "sports": ["Run"], "retired": None, "notes": "",
                    "parts": [on(8, days["Run"][0])]},
     }
-    defaults = {"Inline Skate": [{"gear": gid(101), "since": start}],
+    defaults = {"Inline Skate": [{"gear": gid(104), "since": start}, {"gear": gid(101), "since": q1}],
                 "Virtual Ride": [{"gear": gid(102), "since": days["Virtual Ride"][0]}],
                 "Run": [{"gear": gid(103), "since": days["Run"][0]}]}
     sys.path.insert(0, os.path.join(os.path.dirname(TOOL), "..", "web"))
