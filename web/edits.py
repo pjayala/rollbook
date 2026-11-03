@@ -126,7 +126,7 @@ def _km_close(a, b):
 
 def db_signature(db):
     """Cheap fingerprint of main.activities: changes when a build adds / replaces rows."""
-    return db.execute("SELECT count(*), total(id), max(id) FROM main.activities").fetchone()
+    return tuple(db.execute("SELECT count(*), total(id), max(id) FROM main.activities").fetchone())
 
 
 def db_snapshot(db, starts):
@@ -165,7 +165,7 @@ def reattach(sess, info, jstart, needs_km=lambda e: False, skip=lambda e: False)
         ekm = e.get("km") if _finite(e.get("km")) else None
         near = []
         for i, (_, ti, km) in info.items():
-            if i in taken or ti is None or abs(ti - t) * 86400 >= REATTACH_S:
+            if i in taken or ti is None or abs(ti - t) * 86400 >= REATTACH_S or not ID_RE.fullmatch(str(i)):
                 continue
             if ekm is not None and km is not None:
                 if not _km_close(ekm, km):

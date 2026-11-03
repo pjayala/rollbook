@@ -278,7 +278,7 @@ class Importer:
                 try:
                     self.on_remap(remap)
                 except Exception as e:
-                    j.setdefault("log", []).append(f"edits of replaced sessions not moved: {e}")
+                    j.setdefault("log", []).append(f"edits / gear choices of replaced sessions not moved: {e}")
             if self.last is None:
                 return
             if new or remap:

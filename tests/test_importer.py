@@ -428,7 +428,7 @@ class Job(StoreBase):
         t = 2460000.5
         _, st = self.build_with_starts([{2}, {5001}], [{2: t}, {5001: t + 30 / 86400}])
         self.assertEqual(st["state"], "done")
-        self.assertTrue(any("edits of replaced sessions not moved" in x for x in st["log"]))
+        self.assertTrue(any("edits / gear choices of replaced sessions not moved" in x for x in st["log"]))
 
     def test_replacement_window_is_two_minutes(self):
         self.store()
@@ -616,6 +616,38 @@ class GearFollowsReplacement(unittest.TestCase):
         g.remap({})  # what the importer calls afterwards (or the next change) saves the move
         with open(os.path.join(home, "gear.json"), encoding="utf-8") as f:
             self.assertEqual(set(json.load(f)["sessions"]), {"5001"})
+
+
+class ReplacementMovesBoth(unittest.TestCase):
+    """server.start wiring: one importer hand-over moves the edit and the gear choice."""
+
+    def test_both_stores_follow(self):
+        import api
+        import gear
+        import server
+        home = tmpdir(self)
+        path = os.path.join(home, "rollbook.db")
+        rw = sqlite3.connect(path)
+        rw.execute("CREATE TABLE activities (id INTEGER PRIMARY KEY, name TEXT, type TEXT, filename TEXT, "
+                   "datetime TEXT, km REAL, date TEXT)")
+        rw.execute("INSERT INTO activities VALUES (2, 'n', 'Ride', NULL, '2026-05-01T08:00:00+00:00', 10, '2026-05-01')")
+        rw.commit()
+        saved = api.EDITS, api.GEAR
+        self.addCleanup(lambda: (setattr(api, "EDITS", saved[0]), setattr(api, "GEAR", saved[1])))
+        api.EDITS, api.GEAR = edits.Edits(home), gear.Gear(home)
+        db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        self.addCleanup(db.close)
+        api.EDITS.sync(db)
+        api.EDITS.update(db, 2, {"name": "mine"})
+        gid = api.GEAR.apply(db, {"op": "gear.save", "rev": 0, "name": "Bike"})["id"]
+        api.GEAR.apply(db, {"op": "assign", "rev": 1, "ids": [2], "gear": gid})
+        rw.execute("UPDATE activities SET id=5001 WHERE id=2")
+        rw.commit()
+        rw.close()
+        server._remap_all({2: 5001})
+        for name in ("edits.json", "gear.json"):
+            with open(os.path.join(home, name), encoding="utf-8") as f:
+                self.assertEqual(set(json.load(f)["sessions"]), {"5001"}, name)
 
 
 class EditsReattach(unittest.TestCase):

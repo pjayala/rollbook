@@ -420,7 +420,8 @@ changing `derive()`.
   from install plus `km_offset`), due at `>= service_km`, never when retired;
   trainer (Virtual) km don't wear a tyre. Nothing goes into SQLite or the
   metrics cache; `api_activities` / `api_activity` add `gear_id`,
-  `gear_name`, `gear_src` (explicit / default) and `gear_parts` (Strava's own
+  `gear_name`, `gear_src` (explicit / default), `api_activity` also
+  `gear_parts` and `gear_default` (what "Default" gives that day; Strava's own
   `gear` column is untouched). `POST /api/gear {op, rev, ...}` (ops in
   `gear.OPS`): each op runs on a copy, then the whole store is `validate()`d
   — the same check as on load — and written (previous version to
@@ -436,7 +437,10 @@ changing `derive()`.
   sessions), `timelineRows()` (fittings as % bars over [first fitting,
   today]), monthly km from the server (`totals.gear[id].months`), first-run
   rows from `/api/types`; pure helpers are tested under node in
-  `tests/test_frontend_gear.py`.
+  `tests/test_frontend_gear.py`. Compare: `gearDiff()` in compare.js
+  (parts by kind both sessions have, differing part or specs → a
+  "Different wheels: …" note; unrecorded on one side ≠ different); the
+  picker adds "same route, other gear".
 * **Favorites** (star toggle on sessions and segments, "favorites only" filters,
   a Favorites panel on the progress page) live in `data/favorites.json`,
   server-side so the app window and browser tabs share them. Starred
@@ -611,7 +615,7 @@ of the website, which Strava's terms don't allow; it is kept polite.
 `./rollbook mcp` (`web/mcp_server.py`) is MCP over stdio, newline-delimited
 JSON-RPC, stdlib only; protocol versions 2025-06-18 / 2025-03-26 /
 2024-11-05. Tools: `sports`, `schema`, `query`, `activities`, `activity`,
-`compare`, `trend`, `records`; the `initialize` instructions carry the
+`compare`, `trend`, `records`, `gear`; the `initialize` instructions carry the
 "which metric to trust" rules above. Read-only throughout:
 
 * two `mode=ro` connections. Tools use the trusted one; `query` uses the
@@ -623,6 +627,11 @@ JSON-RPC, stdlib only; protocol versions 2025-06-18 / 2025-03-26 /
 * `samples.lat` / `lon` read as NULL in `query` (authorizer `SQLITE_IGNORE`)
   and `trk` / `ll0` / lap gate positions are dropped from tool output,
   unless `--allow-gps`. Tool output goes to a model provider.
+* `gear` tool (and `gear` in `activity`): `gear.json` loaded with the
+  dashboard's own validation, reloaded on mtime, never written (no remap /
+  commit is ever called). Totals use the edited `activities` view. Notes,
+  service notes and purchase dates are left out (tool output goes to a model
+  provider); `query` can't see gear (it isn't in SQLite).
 * dashboard edits (`edits.json`) are applied with the same TEMP overlay as
   `rollbook web`, reloaded when the file's mtime changes.
 * `web_metrics.json` is read, never written: a missing/stale entry is

@@ -322,6 +322,7 @@ Protocol tools (stdio, stdlib only; protocol versions 2025-06-18,
 | `compare` | 2–10 sessions side by side |
 | `trend` | per week / month / year: volume and form |
 | `records` | personal bests: best 5–60 min speed, wind-neutral speed, distance, ascent, power |
+| `gear` | gear and the parts on it now: km, hours, service state, defaults (no notes or purchase dates) |
 
 On connect, the assistant also gets the rules for which metric to trust
 (e.g. compare form with `best10min_kmh`, never compare Virtual Ride speeds

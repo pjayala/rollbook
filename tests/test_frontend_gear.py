@@ -145,6 +145,36 @@ class GearJs(unittest.TestCase):
         r = self.js(f"gearServices({json.dumps(g)}, new Map(Object.entries({json.dumps(P)}))).map(v => [v.i, v.action])")
         self.assertEqual(r, [[1, "rotate"]])  # only while it was on this gear
 
+    def test_gear_diff_in_compare(self):
+        with open(os.path.join(ROOT, "web", "static", "compare.js"), encoding="utf-8") as f:
+            fn = extract_function(f.read().replace("\r\n", "\n"), "gearDiff")
+        K = json.dumps(KINDS)
+        w90 = {"id": "w1", "kind": "wheels", "name": "Hydrogen", "specs": {"diameter_mm": 90, "hardness_a": 85}}
+        w110 = {"id": "w2", "kind": "wheels", "name": "Matter", "specs": {"diameter_mm": 110, "hardness_a": 86}}
+        boots = {"id": "b", "kind": "boots", "name": "Next", "specs": {}}
+        A = {"gear_id": "g1", "gear_name": "New", "gear_parts": [w110, boots]}
+        B = {"gear_id": "g2", "gear_name": "Old", "gear_parts": [w90, boots]}
+        r = self.js(f"(() => {{ {fn}; return [gearDiff({json.dumps(A)}, {json.dumps(B)}, {K}),"
+                    f" gearDiff({json.dumps(A)}, {json.dumps(A)}, {K}), gearDiff({{}}, {{}}, {K}),"
+                    f" gearDiff({json.dumps(A)}, {{gear_id: null}}, {K})]; }})()")
+        self.assertEqual(r[0], {"same": False, "a": "New", "b": "Old",
+                                "parts": [{"kind": "wheels", "a": "Matter 110 mm · 86A", "b": "Hydrogen 90 mm · 85A"}]})
+        self.assertEqual((r[1]["same"], r[1]["parts"]), (True, []))
+        self.assertEqual(r[2]["parts"], [])
+        self.assertEqual(r[3]["parts"], [])  # nothing recorded on one side: unknown, not "different"
+        same = {"id": "w9", "kind": "wheels", "name": "Matter", "specs": {"hardness_a": 86, "diameter_mm": 110}}  # keys reversed
+        other_brand = {**w110, "id": "w8", "brand": "Undercover"}
+        C = {"gear_id": "g3", "gear_name": "C", "gear_parts": [same]}
+        D = {"gear_id": "g4", "gear_name": "D", "gear_parts": [other_brand]}
+        r = self.js(f"(() => {{ {fn}; return [gearDiff({json.dumps(A)}, {json.dumps(C)}, {K}).parts, gearDiff({json.dumps(A)}, {json.dumps(D)}, {K}).parts.length,"
+                    f" gearDiff({json.dumps(B)}, {json.dumps(A)}, {K}).parts.map(p => p.kind), gearDiff({json.dumps(A)}, {json.dumps(B)}, null).parts[0].a]; }})()")
+        self.assertEqual(r, [[], 1, ["wheels"], "Matter 110 · 86"])
+
+    def test_no_gear_store_does_not_throw(self):
+        r = self.js("[gearChip({gear_id: 'g', gear_name: 'G', gear_parts: [{kind: 'wheels', name: 'W'}]}), editGearField({})()]")
+        self.assertIn(">G</a>", r[0])
+        self.assertIsNone(r[1])
+
     def test_user_text_escaped(self):
         view = {"rev": 1, "kinds": KINDS, "actions": ["service"], "sport_group": {}, "due": ["p1"], "defaults": {},
                 "gear": {"g1": {"name": EVIL, "sports": [EVIL], "parts": [{"part": "p1", "from": "2026-01-01", "to": None}]}},
