@@ -120,8 +120,10 @@ there is no basemap. Normally you see OpenStreetMap underneath.</sub></p>
 
 ## Requirements
 
-- **Python 3.9 or newer.** Rollbook itself uses only the standard library, so
-  nothing else is needed for `rollbook web`.
+- **Python 3.15** (3.14 works too; older versions are refused). Rollbook
+  itself uses only the standard library, so nothing else is needed for
+  `rollbook web`. macOS's built-in `python3` is too old: install one from
+  python.org, Homebrew or [uv](https://docs.astral.sh/uv/).
 - **Optional, for a native app window:**
   [pywebview](https://pywebview.flowrl.com/). If it isn't installed,
   `rollbook app` opens Chrome, Edge, Chromium or Brave in app mode instead.
@@ -136,9 +138,9 @@ there is no basemap. Normally you see OpenStreetMap underneath.</sub></p>
 ```sh
 git clone https://github.com/pjayala/rollbook.git
 cd rollbook
-python3 --version                       # 3.9+; if missing: brew install python
+python3.15 --version                    # if missing: brew install python@3.15
 # optional native window:
-python3 -m venv .venv && .venv/bin/pip install pywebview
+python3.15 -m venv .venv && .venv/bin/pip install pywebview
 ./rollbook app
 ```
 
@@ -147,9 +149,9 @@ python3 -m venv .venv && .venv/bin/pip install pywebview
 ```sh
 git clone https://github.com/pjayala/rollbook.git
 cd rollbook
-python3 --version                       # 3.9+ (Debian/Ubuntu: sudo apt install python3 python3-venv)
+python3.15 --version                    # if missing: uv python install 3.15 (or your distro / deadsnakes)
 # optional native window, needs Qt or GTK bindings:
-python3 -m venv .venv && .venv/bin/pip install "pywebview[qt]"
+python3.15 -m venv .venv && .venv/bin/pip install "pywebview[qt]"
 ./rollbook app
 ```
 
@@ -158,14 +160,14 @@ or Brave. If none is found it opens a normal browser tab.
 
 ### Windows
 
-Install Python 3 from [python.org](https://www.python.org/downloads/) or the
+Install Python 3.15 from [python.org](https://www.python.org/downloads/) or the
 Microsoft Store, then in PowerShell or cmd:
 
 ```bat
 git clone https://github.com/pjayala/rollbook.git
 cd rollbook
 rem optional native window (uses Edge WebView2, built into Windows 10/11):
-python -m venv .venv
+py -3.15 -m venv .venv
 .venv\Scripts\pip install pywebview
 rollbook.cmd app
 ```
@@ -399,7 +401,7 @@ importer (uploads, duplicate detection, background build), Strava sync
 launcher, FTP choice and power zones (run under Node when it's installed), and
 an end-to-end build plus the dashboard API and its CSRF checks. GitHub Actions
 runs them on every push and pull request on Linux, macOS and Windows with
-Python 3.9 and 3.13.
+Python 3.14 and 3.15.
 
 Screenshots are regenerated from a synthetic athlete, never from real data:
 

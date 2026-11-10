@@ -799,10 +799,12 @@ swim, two 30-second-sampling skates) — find them via `km_diff_pct`.
 
 ## Code standards
 
-* Python stdlib only (pywebview optional behind an import guard). Must run on
-  **3.9**: no `match`, no `X | Y` in evaluated annotations, no `zip(strict=)`,
-  `itertools.pairwise`, `datetime.UTC`, `tomllib`; `fromisoformat` takes no
-  `Z` before 3.11.
+* Python stdlib only (pywebview optional behind an import guard). Supported:
+  **3.15** (default) and **3.14** (`MIN_PYTHON` in `bin/rollbook` refuses
+  older; the wrappers prefer `.venv`, then 3.15, then 3.14). Anything in 3.14
+  is fine (`match`, `X | Y`, `datetime.UTC`, `tomllib`, …); nothing 3.15-only
+  until 3.14 is dropped. Raise both, CI and the docs together, once a year
+  as versions leave upstream support.
 * Cross-platform: `os.path`, `encoding="utf-8"` on text opens, `newline=""`
   for CSV, no POSIX-only calls without a Windows path.
 * Comments say *why* (the data quirk, the measured number), not what.
@@ -869,7 +871,7 @@ upstreams (Strava, Open-Meteo, Nominatim, OSM tiles), tampered files in
 network; `tests/helpers.py` points `ROLLBOOK_HOME` at a temp dir and sets
 `ROLLBOOK_OFFLINE=1`; import it first). CI:
 `.github/workflows/tests.yml` on every push / PR, ubuntu/macos/windows ×
-Python 3.9 and 3.13, plus `node --check` on the JS. `tests/helpers.py` also
+Python 3.14 and 3.15, plus `node --check` on the JS. `tests/helpers.py` also
 writes synthetic FIT files (either endianness, optional sport/session
 messages), so add a test there when a new device quirk turns up.
 
@@ -894,7 +896,7 @@ messages), so add a test there when a new device quirk turns up.
 Before a PR:
 
 - [ ] tests pass; new code paths had a failing test first; `node --check web/static/*.js`
-- [ ] Python 3.9-safe, Windows-safe paths / encodings; stdlib only; SPDX headers
+- [ ] runs on Python 3.14 and 3.15; Windows-safe paths / encodings; stdlib only; SPDX headers
 - [ ] `METRICS_VERSION` bumped if `derive()` changed; `MIGRATIONS` + `has_col` for new columns
 - [ ] network behind `--offline` / `ROLLBOOK_OFFLINE`, capped, cached, never blocking a request
 - [ ] every retry / pending state ends; non-zero exit when nothing was done
