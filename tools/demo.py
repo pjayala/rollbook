@@ -302,13 +302,11 @@ def main(home):
         write_fit(os.path.join(exp, fn), recs, session)
         rows.append([aid, t0.strftime("%b %-d, %Y, %-I:%M:%S %p") if os.name != "nt" else t0.isoformat(),
                      name, typ, desc, "", fn])
-        if recs[0][1] is not None:  # outdoor: weather for the start cell, this UTC day
-            cell = f"{round(ORIGIN[0], 1):.1f},{round(ORIGIN[1], 1):.1f}"
-            day = weather.setdefault(cell, {})
+        if recs[0][1] is not None:  # outdoor: weather for this UTC day (same draws as ever: the demo stays the same)
             hours = [[round(12 + 8 * math.sin((h - 9) / 24 * 2 * math.pi) + rnd.gauss(0, 0.5), 1),
                       round(wind[0] * (0.8 + 0.4 * rnd.random()), 1), round(wind[1] % 360),
                       round(wind[0] * 1.7, 1)] for h in range(24)]
-            day[utc.date().isoformat()] = hours
+            weather[utc.date()] = hours
 
     with open(os.path.join(exp, "activities.csv"), "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -318,14 +316,15 @@ def main(home):
     with open(os.path.join(exp, "profile.csv"), "w", newline="", encoding="utf-8") as f:
         csv.writer(f).writerows([["First Name", "Last Name", "Sex", "Weight"], ["Demo", "Athlete", "Female", "64"]])
 
-    env = dict(os.environ, ROLLBOOK_HOME=home)
-    for args in (["db", "build", exp], ["db", "enrich"]):
-        subprocess.run([sys.executable, TOOL, *args], env=env, check=True, stdout=subprocess.DEVNULL)
-
     cache = os.path.join(home, "cache")
     os.makedirs(cache, exist_ok=True)
     with open(os.path.join(cache, "weather.json"), "w") as f:
-        json.dump(weather, f)
+        json.dump(weather_cache(weather), f)
+    # ROLLBOOK_OFFLINE: `db build` fills the weather table from that cache, no network
+    env = dict(os.environ, ROLLBOOK_HOME=home, ROLLBOOK_OFFLINE="1")
+    for args in (["db", "build", exp], ["db", "enrich"]):
+        subprocess.run([sys.executable, TOOL, *args], env=env, check=True, stdout=subprocess.DEVNULL)
+
     with open(os.path.join(cache, "geonames.json"), "w") as f:
         json.dump(place_names(), f)
     with open(os.path.join(home, "profile.json"), "w") as f:
@@ -333,6 +332,29 @@ def main(home):
                    "weight_kg": 64, "hr_rest": 52, "hr_max": 192}, f)
     write_gear(home)
     print(f"demo: {len(rows)} sessions in {home}")
+
+
+def weather_cache(days):
+    """web/weather.py's cache (v2) for every 0.1 deg cell the routes touch: the
+    demo's temperature / wind per hour, the rest made up from them."""
+    wx, aq = {}, {}
+    for d, hours in sorted(days.items()):
+        wrows, arows = [], []
+        for h, (temp, ws, wd, gust) in enumerate(hours):
+            wet = (d.toordinal() % 7 == 0) and 6 <= h <= 14
+            cloud = 90 if wet else round(40 + 35 * math.sin(d.toordinal() / 3.0))
+            wrows.append([temp, round(temp - 0.12 * ws, 1), 85 if wet else 65, round(temp - 6, 1),
+                          0.6 if wet else 0.0, 0.6 if wet else 0.0, 0.0, 61 if wet else (3 if cloud > 70 else 2 if cloud > 30 else 1),
+                          cloud, 1014.0, 1013.0, ws, wd, gust])
+            pm = round(6 + 4 * math.sin((d.toordinal() + h) / 5.0), 1)
+            arows.append([pm, round(pm * 1.6, 1), round(50 + 2 * temp), round(15 + 2 * pm)])
+        at = (d + timedelta(days=30)).isoformat()  # final: fetched long after the day
+        for la in (51.9, 52.0, 52.1):
+            for lo in (4.9, 5.0, 5.1, 5.2, 5.3):
+                cell = f"{la:.1f},{lo:.1f}"
+                wx.setdefault(cell, {})[d.isoformat()] = {"at": at, "h": wrows}
+                aq.setdefault(cell, {})[d.isoformat()] = {"at": at, "h": arows}
+    return {"v": 2, "wx": wx, "aq": aq}
 
 
 def write_gear(home):

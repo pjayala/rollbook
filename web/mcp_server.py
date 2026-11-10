@@ -20,6 +20,7 @@ a local server. Everything is read-only:
 """
 
 import json
+import math
 import os
 import sqlite3
 import sys
@@ -30,11 +31,13 @@ import gear as gearmod
 import profile as athlete
 import analysis as srv
 import store
+import weather
 
 PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")  # newest first
 MAX_ROWS = 5000
 QUERY_TIMEOUT_S = 30
-GPS_COLS = {("samples", "lat"), ("samples", "lon")}
+# surface vs sea-level pressure gives the area's altitude: a step towards where home is
+GPS_COLS = {("samples", "lat"), ("samples", "lon"), ("weather", "psurf")}
 READ_PRAGMAS = {"table_info", "table_xinfo", "index_list", "index_info", "index_xinfo",
                 "foreign_key_list"}
 DERIVED_DROP = {"trk", "ll0", "hr_hist", "pw_hist", "n"}  # coordinates, bulky histograms
@@ -80,6 +83,11 @@ Gear (`gear` tool, and `gear` in `activity`): compare gear only with
 best10min_kmh (best 20 min power indoors), never kmh_moving; each gear was
 used in its own period, so form and season differ too.
 
+Weather (`weather` in `activity`; tables `weather` = one row per session and
+UTC hour, `v_weather` = per-session averages): Open-Meteo model values at the
+session's position (reanalysis, ~10-25 km grid), not measured on the spot;
+air quality (pm25, pm10, o3, aqi) from 2013. final = 0: recent, provisional.
+
 Start with `sports` or `schema`, then `activities` / `trend` / `records`;
 `query` takes any SELECT (activities = edited view, main.activities = raw,
 samples is per second and large: always filter by activity_id).
@@ -89,7 +97,7 @@ samples is per second and large: always filter by activity_id).
 def _r(v):
     """Round floats for compact output; recurse into containers."""
     if isinstance(v, float):
-        return round(v, 3)
+        return round(v, 3) if math.isfinite(v) else None  # JSON has no NaN / Infinity
     if isinstance(v, dict):
         return {k: _r(x) for k, x in v.items() if x is not None}
     if isinstance(v, (list, tuple)):
@@ -214,11 +222,26 @@ class Rollbook:
         return m
 
     def hrmax(self):
-        hr = athlete.validate(store.load_object(os.path.join(self.home, "profile.json"), athlete.MAX_FILE)).get("hr_max")
-        if hr:
-            return hr
-        return self.db.execute("SELECT MAX(hr_max) FROM activities "
-                               "WHERE date >= date('now','-365 days') AND hr_max < 230").fetchone()[0]
+        """Same choice as the dashboard: profile > held peak of the last months > recorded peak."""
+        p = athlete.validate(store.load_object(os.path.join(self.home, "profile.json"), athlete.MAX_FILE))
+        if p.get("hr_max"):
+            return p["hr_max"]
+        rows = [dict(r) for r in self.db.execute(
+            "SELECT id, date, type, hr_max, samples FROM activities WHERE hr_max > 0 AND parse_error IS NULL")]
+        ms = self.derived(rows, compute=False)  # cached histograms only: no derive() of every session
+        for r in rows:
+            r["hist"] = (ms.get(r["id"]) or {}).get("hr_hist")
+        return athlete.hrmax_choice(p, athlete.hrmax_estimate(rows, p.get("hr_months") or athlete.HR_MONTHS))[0]
+
+    def hrmax_on(self, date):
+        """Max HR for a session's zones as of its date (same rule as the dashboard)."""
+        p = athlete.validate(store.load_object(os.path.join(self.home, "profile.json"), athlete.MAX_FILE))
+        rows = [dict(r) for r in self.db.execute(
+            "SELECT id, date, type, hr_max, samples FROM activities WHERE hr_max > 0 AND parse_error IS NULL")]
+        ms = self.derived(rows, compute=False)
+        for r in rows:
+            r["hist"] = (ms.get(r["id"]) or {}).get("hr_hist")
+        return athlete.HrmaxAt(p, rows).at(date)
 
     @staticmethod
     def sport_filter(args, where, params):
@@ -249,7 +272,7 @@ class Rollbook:
                             "left out); unqualified `activities` resolves to it. activities_all "
                             "keeps hidden rows plus hidden/deleted/orig_name/orig_type."})
         if not self.allow_gps:
-            out.append({"note": "samples.lat / samples.lon read as NULL (privacy)"})
+            out.append({"note": "samples.lat / samples.lon and weather.psurf read as NULL (privacy)"})
         return out
 
     def t_query(self, args):
@@ -332,14 +355,15 @@ class Rollbook:
         if e:
             out["edit"] = e
         out["derived"] = _r(self.clean_derived(m))
-        hist, hrmax = m.get("hr_hist"), self.hrmax()
+        hist = m.get("hr_hist")
+        hrmax, hsrc = self.hrmax_on(a.get("date")) if hist else (None, None)
         if hist and hrmax:
             z = [0.0] * (len(HR_ZONES) + 1)
             for bpm, s in hist.items():
                 z[sum(int(bpm) >= f * hrmax for f in HR_ZONES)] += s
             tot = sum(z) or 1
             names = [f"Z{i + 1}" for i in range(len(z))]
-            out["hr_zones"] = {"hrmax": hrmax,
+            out["hr_zones"] = {"hrmax": hrmax, "hrmax_source": hsrc,
                                "seconds": {k: round(s) for k, s in zip(names, z)},
                                "pct": {k: round(s / tot * 100, 1) for k, s in zip(names, z)}}
         res = self._gear.resolver(self.db) if self._gear and not self._gear.error else None
@@ -348,6 +372,14 @@ class Rollbook:
             out["gear"] = {"id": gid, "name": res.name(gid), "source": src,
                            "parts": [{k: p[k] for k in ("kind", "name", "brand", "specs") if p.get(k)}
                                      for p in res.part_info(gid, a.get("date"))]}
+        hours = weather.load(self.db, [a["id"]]).get(a["id"])
+        if hours and weather.eligible(a.get("type")):
+            t0 = weather.start_ts(a.get("datetime"))
+            w = weather.summary(hours, t0, m.get("dur_s") or a.get("elapsed_s") or 0) if t0 is not None else None
+            if w:
+                drop = set() if self.allow_gps else {"psurf"}
+                out["weather"] = {"session": _r({k: x for k, x in w.items() if k not in drop}),
+                                  "hours": [_r({k: x for k, x in v.items() if k not in drop}) for _, v in hours]}
         if args.get("splits", True):
             out["splits"] = [_r(dict(r)) for r in self.db.execute(
                 "SELECT km, moving_s, elapsed_s, pause_s, kmh, hr FROM splits WHERE activity_id=? ORDER BY km",
@@ -525,8 +557,11 @@ class Server:
 
     def handle(self, msg):
         """One JSON-RPC message in, the response dict out (None for notifications)."""
+        rid = msg.get("id") if isinstance(msg, dict) else None
+        if rid is not None and (isinstance(rid, bool) or not isinstance(rid, (str, int))):
+            return self._error(None, -32600, "invalid request")  # e.g. a NaN id: it couldn't be sent back
         if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0" or not isinstance(msg.get("method"), str):
-            return self._error(msg.get("id") if isinstance(msg, dict) else None, -32600, "invalid request")
+            return self._error(rid, -32600, "invalid request")
         mid, method, params = msg.get("id"), msg["method"], msg.get("params") or {}
         if "id" not in msg:  # notification: initialized, cancelled, ...
             return None
@@ -566,7 +601,7 @@ class Server:
             return self._tool_text(f"bad arguments: {e}", True)
         except sqlite3.Error as e:
             return self._tool_text(f"database: {e}", True)
-        return self._tool_text(json.dumps(res, ensure_ascii=False, separators=(",", ":")), False)
+        return self._tool_text(json.dumps(res, ensure_ascii=False, separators=(",", ":"), allow_nan=False), False)
 
     @staticmethod
     def _tool_text(text, err):
@@ -594,7 +629,11 @@ class Server:
                 else:
                     resp = self.handle(msg)
             if resp is not None:
-                out.write(json.dumps(resp, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n")
+                try:
+                    body = json.dumps(resp, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+                except ValueError:  # never die on a reply that can't be JSON
+                    body = json.dumps(self._error(None, -32603, "unserializable response"))
+                out.write(body.encode("utf-8") + b"\n")
                 out.flush()
 
 

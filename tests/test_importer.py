@@ -278,7 +278,7 @@ class Job(StoreBase):
         calls, st = self.build([{1}, {1, 2}])
         self.assertEqual((st["state"], st["phase"], st["added"]), ("done", "done", 1))
         self.assertIn("finished", st)
-        self.assertEqual(calls, [["db", "build", self.imports], ["db", "enrich", "--missing"]])
+        self.assertEqual(calls, [["db", "build", self.imports, "--no-weather"], ["db", "enrich", "--missing"]])
         self.imp.M.warm.assert_called_once_with()
         self.assertEqual(self.imp.pending, [])
         self.assertEqual(self.imp.run()[0], 400)
@@ -286,7 +286,7 @@ class Job(StoreBase):
     def test_nothing_new_skips_enrich(self):
         calls, st = self.build([{1, 2}, {1, 2}])
         self.assertEqual((st["state"], st["added"]), ("done", 0))
-        self.assertEqual(calls, [["db", "build", self.imports]])
+        self.assertEqual(calls, [["db", "build", self.imports, "--no-weather"]])
         self.imp.M.warm.assert_not_called()
 
     def test_replacement_still_enriched(self):
@@ -324,6 +324,18 @@ class Job(StoreBase):
         self.assertEqual(kw["env"]["ROLLBOOK_HOME"], self.home)
         j = self.imp.job
         self.assertEqual((j["phase"], j["done"], j["total"], len(j["log"])), ("extracting export", 2, 3, 3))
+
+    def test_weather_starts_after_the_import_is_done(self):
+        seen = []
+        self.imp.after_import = lambda: seen.append(self.imp.job["state"])
+        calls, st = self.build([{1}, {1, 2}])
+        self.assertEqual(seen, ["done"])  # the import never waits on Open-Meteo
+        self.assertNotIn(["db", "weather", "--missing"], calls)
+
+    def test_weather_hook_failure_keeps_the_import_done(self):
+        self.imp.after_import = mock.Mock(side_effect=RuntimeError("x"))
+        calls, st = self.build([{1}, {1, 2}])
+        self.assertEqual(st["state"], "done")
 
     def test_status_log_trimmed(self):
         self.imp.job = {"state": "running", "log": [str(i) for i in range(100)]}

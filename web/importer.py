@@ -61,9 +61,10 @@ class Importer:
         self.pending = []  # paths to build: export zips, and/or the imports dir
         self.job: dict = {"state": "idle"}
         self.on_store = None  # called with "activities/<name>" for each newly stored file
-        self.offline = False  # `web --offline`: no Strava sync
+        self.offline = False  # `web --offline`: no Strava sync, no weather fetch
         self.last = None  # lastimport.LastImport: what the last import added (new-records summary)
         self.on_remap = None  # called with {old id: new id} when an import replaced sessions
+        self.after_import = None  # called once an import is done: fetches the weather
 
     # ---------------------------------------------------------------- upload
 
@@ -335,7 +336,8 @@ class Importer:
                 todo = [self.imports]
             for path in todo:
                 label = os.path.basename(path)
-                if self._cmd(["db", "build", path], f"importing {label}"):
+                # weather afterwards (after_import), so new sessions show without waiting on Open-Meteo
+                if self._cmd(["db", "build", path, "--no-weather"], f"importing {label}"):
                     raise RuntimeError(next((x for x in reversed(j["log"]) if x.startswith("error")),
                                             f"db build failed for {label}"))
             after = self._ids()
@@ -349,6 +351,11 @@ class Importer:
                 self.M.warm()  # new activities only; cached ones are kept
             self._record(before, starts0, after)
             j.update(state="done", phase="done", finished=time.time())
+            if self.after_import:  # `db weather --missing` in the background (weather.OnDemand)
+                try:
+                    self.after_import()
+                except Exception as e:  # noqa: BLE001  the import itself is done
+                    j["log"].append(f"weather not started: {e}")
         except Exception as e:
             after = self._ids()
             # rows an earlier step committed are in the DB: list them, but without

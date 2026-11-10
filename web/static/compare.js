@@ -402,7 +402,7 @@ function renderCompare(A, B, peers, seq) {
   const stop = () => { R.playing = false; if (R.raf) cancelAnimationFrame(R.raf); R.raf = 0; const b = $("#rp-play"); if (b) { b.innerHTML = ICON.play; b.setAttribute("aria-label", "Play"); } };
   const onVis = () => { if (document.hidden) stop(); };
   document.addEventListener("visibilitychange", onVis);
-  onLeave(() => { stop(); document.removeEventListener("visibilitychange", onVis); if (R.map) R.map.destroy(); });
+  onLeave(() => { stop(); document.removeEventListener("visibilitychange", onVis); if (R.ro) R.ro.disconnect(); if (R.map) R.map.destroy(); });
 
   function draw() {
     [TA, TB] = tracks();
@@ -535,6 +535,15 @@ function renderCompare(A, B, peers, seq) {
       const all = [...R.la, ...R.lb];
       // fitted once to both tracks; the replay never pans or zooms, so it loads no new tiles
       if (all.length) R.map.fit([Math.min(...all.map(p => p[0])), Math.min(...all.map(p => p[1])), Math.max(...all.map(p => p[0])), Math.max(...all.map(p => p[1]))]);
+      // enlarge / close / window resize: fit both tracks to the new size (the only time it zooms)
+      R.ro = new ResizeObserver(() => requestAnimationFrame(() => {
+        const w = host.clientWidth, h = host.clientHeight;
+        if (!R.map || !R.map.home || !w || !h || (w === R.fw && h === R.fh)) return;
+        const first = R.fw == null;
+        R.fw = w; R.fh = h;
+        if (!first) R.map.fit(R.map.home);
+      }));
+      R.ro.observe(host);
       pos.oninput = () => { stop(); R.T = +pos.value; R.hoverKm = null; paintDots(true); };
       pos.onkeydown = e => {
         if (e.key === "ArrowLeft" || e.key === "ArrowRight") { e.preventDefault(); stop(); R.T = Math.max(0, Math.min(R.end, R.T + (e.key === "ArrowRight" ? 10 : -10))); R.hoverKm = null; paintDots(true); }

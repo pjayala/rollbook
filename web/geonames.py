@@ -21,6 +21,8 @@ import time
 import urllib.parse
 import urllib.request
 
+import store
+
 URL = "https://nominatim.openstreetmap.org/reverse"
 UA = "Rollbook/1.0 (personal training dashboard; reverse geocoding cached)"
 GAP_S = 1.1
@@ -57,16 +59,25 @@ def sample(pts):
     return out
 
 
+CACHE_MAX = 32 << 20
+MAX_ANSWER = 1 << 20
+
+
+def _place(v):
+    """A cached place {road, area, city}: each text or null; None for anything else."""
+    if not isinstance(v, dict) or set(v) != {"road", "area", "city"}:
+        return None
+    out = {k: v.get(k) for k in ("road", "area", "city")}
+    return out if all(x is None or (isinstance(x, str) and len(x) <= 200) for x in out.values()) else None
+
+
 class Geonames:
     def __init__(self, path, offline=False):
         self.path, self.offline = path, offline
         self.lock = threading.Lock()
         self.q, self.queued = queue.Queue(), set()
-        try:
-            with open(path) as f:
-                self.cache = json.load(f)
-        except (OSError, ValueError):
-            self.cache = {}
+        self.cache = {k: v for k, v in (store.load_object(path, CACHE_MAX) or {}).items()
+                      if isinstance(k, str) and _place(v) is not None}
         self.failures = 0
         if not offline:
             threading.Thread(target=self._worker, daemon=True).start()
@@ -88,12 +99,19 @@ class Geonames:
     def _worker(self):
         while True:
             k, lat, lon = self.q.get()
-            place = self._fetch(lat, lon)
+            try:
+                place = self._fetch(lat, lon)
+            except Exception:  # noqa: BLE001  one odd answer must not end segment naming
+                place = None
+                self.failures += 1
             with self.lock:
                 self.queued.discard(k)
                 if place is not None:
                     self.cache[k] = place
-                    self._save()
+                    try:
+                        self._save()
+                    except OSError:
+                        pass
             time.sleep(GAP_S if self.failures < 3 else 30)
 
     def _fetch(self, lat, lon):
@@ -102,12 +120,17 @@ class Geonames:
         try:
             req = urllib.request.Request(f"{URL}?{qs}", headers={"User-Agent": UA})
             with urllib.request.urlopen(req, timeout=15) as r:
-                d = json.load(r)
-        except (OSError, ValueError):
+                raw = r.read(MAX_ANSWER + 1)
+            d = store.loads(raw) if len(raw) <= MAX_ANSWER else None
+        except (OSError, ValueError, RecursionError):
+            d = None
+        if not isinstance(d, dict):
             self.failures += 1
             return None
         self.failures = 0
-        a = d.get("address") or {}
+        a = d.get("address") if isinstance(d.get("address"), dict) else {}
+        a = {x: v[:120] for x, v in a.items() if isinstance(v, str)}
+        d = {x: (v[:120] if isinstance(v, str) else None) for x, v in d.items() if x in ("category", "type", "name")}
         road = next((a[x] for x in ROAD_KEYS if a.get(x)), None)
         if not road and (d.get("category") == "highway" or d.get("type") in ("path", "footway", "cycleway")):
             road = d.get("name") or None
@@ -116,11 +139,8 @@ class Geonames:
                 "city": a.get("city") or a.get("town") or a.get("village") or a.get("municipality")}
 
     def _save(self):  # caller holds the lock
-        tmp = self.path + ".tmp"
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        with open(tmp, "w") as f:
-            json.dump(self.cache, f)
-        os.replace(tmp, self.path)
+        store.write_json(self.path, self.cache, indent=None)  # 0600: the keys are where you skate
 
 
 def describe(geo, seg):

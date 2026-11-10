@@ -17,6 +17,7 @@ import gear as gearmod
 import geonames
 import profile as athlete
 import strava_web
+import weather
 from analysis import has_col
 
 # columns added later — by `db build` migrations, or by `db enrich` (best<N>min_kmh,
@@ -36,6 +37,7 @@ IMPORTER = None  # importer.Importer, set in server.start()
 LAST = None  # lastimport.LastImport, set in server.start()
 FAVS = None  # Favorites, set in server.start()
 GEO = None  # geonames.Geonames, set in server.start()
+WX_JOB = None  # weather.OnDemand, set in server.start()
 PROFILE = None  # athlete.Profile, set in server.start()
 EDITS = edits.Edits(None)  # in-memory until start() points it at $ROLLBOOK_HOME/edits.json
 GEAR = gearmod.Gear(None)  # likewise, $ROLLBOOK_HOME/gear.json
@@ -70,6 +72,8 @@ def api_activities(db, q, M):
     sql += " ORDER BY datetime"
     rows = [dict(r) for r in db.execute(sql, args).fetchall()]
     ms = M.get_many(db, [(r["id"], r["samples"]) for r in rows])
+    ids = [r["id"] for r in rows]
+    wx = weather.load(db, ids if len(ids) <= 500 else None)
     for r in rows:
         m = ms.get(r["id"], {})
         for k in ("b30", "b45", "b60", "route", "crow_km", "bearing_out", "asym_pct",
@@ -93,21 +97,25 @@ def api_activities(db, q, M):
             r[k] = p.get(str(w))
         r["pw_hist"] = m.get("pw_hist")
         r["np"] = m.get("np")
-        r["cond"] = cond.conditions(r, m)
+        r["cond"] = cond.conditions(r, m, wx.get(r["id"]))
     # refit the wind coefficient on this sport's data, then recompute with it
     if typ:
         k = cond.fit_wind(typ, [r for r in rows if not r["hidden"]], ms)
         if k is not None and abs(k - cond.FITS.get(typ, -1)) > 1e-6:
             cond.FITS[typ] = k
             for r in rows:
-                r["cond"] = cond.conditions(r, ms.get(r["id"], {}))
+                r["cond"] = cond.conditions(r, ms.get(r["id"], {}), wx.get(r["id"]))
     for r in rows:
         c = r["cond"] or {}
         r["temp"], r["wind"] = c.get("temp"), c.get("ws")
+        r["rain"], r["aqi"] = c.get("precip_sum"), c.get("aqi")
         r["adj_neutral"] = c.get("adjusted")
     prof = PROFILE.get()
     res = GEAR.resolver(db)
+    hx = hrmax_at(db, M, prof) if any(r["hr_hist"] for r in rows) else None
     for r in rows:
+        if r["hr_hist"] and hx:
+            r["hrmax"], r["hrmax_src"] = hx.at(r["date"])
         k = athlete.calories(r, prof) or {}
         r["kcal"], r["kcal_src"] = k.get("kcal"), k.get("source")
         r["gear_id"], r["gear_src"] = res.of(r["id"], r["type"], r["date"])
@@ -186,8 +194,15 @@ def api_activity(db, q, M, aid):
     act["metrics"] = m
     if act.get("type") and act["type"] not in cond.FITS:
         api_activities(db, {"type": act["type"]}, M)  # fits this sport's wind coefficient
-    act["cond"] = cond.conditions(act, m)
+    hours = weather.load(db, [aid]).get(aid)
+    act["cond"] = cond.conditions(act, m, hours)
+    act["weather_hours"] = [v for _, v in hours] if act["cond"] and hours else []  # the details view
+    # an outdoor session without weather rows: the page asks POST /api/weather to fetch them
+    act["weather_missing"] = (not hours and bool(act.get("has_gps")) and weather.eligible(act.get("type"))
+                              and m.get("route") not in ("indoor", "virtual"))
     act["cal"] = athlete.calories(act, PROFILE.get())
+    if m.get("hr_hist"):  # zones against the max HR that applied on the session's date
+        act["hrmax"], act["hrmax_src"] = hrmax_at(db, M, PROFILE.get()).at(act.get("date"))
     act["splits"] = splits
     act["series_cols"] = ["t", "km", "kmh", "hr", "ele", "lat", "lon", "watts", "mv"]
     act["series"] = series
@@ -219,7 +234,7 @@ def api_segments(db, q, M):
 
 
 def api_status(db, q, M):
-    return dict(M.progress, cached=len(M.data), weather_pending=cond.WX.pending() if cond.WX else 0)
+    return dict(M.progress, cached=len(M.data))
 
 
 def api_last_import(db, store):
@@ -242,14 +257,35 @@ def api_last_import(db, store):
     return d
 
 
+def hr_sessions(db, M):
+    """Sessions with heart rate, with their HR histogram (metrics cache)."""
+    rows = [dict(r) for r in db.execute(
+        "SELECT id, date, type, hr_max, samples FROM activities WHERE hr_max > 0 AND parse_error IS NULL")]
+    # cached only: this runs on every list / session / hrmax request, warm() fills the rest
+    ms = M.get_many(db, [(r["id"], r["samples"]) for r in rows], compute=False) if rows else {}
+    for r in rows:
+        r["hist"] = (ms.get(r["id"]) or {}).get("hr_hist")
+    return rows
+
+
+def hrmax_at(db, M, prof):
+    return athlete.HrmaxAt(prof, hr_sessions(db, M))
+
+
 def api_hrmax(db, q, M):
+    """Max HR for zones, and the suggestion from the last N months (profile hr_months,
+    or ?months= to preview another window)."""
     p = PROFILE.get() if PROFILE else {}
-    if p.get("hr_max"):
-        return {"hrmax": p["hr_max"], "source": "profile"}
-    r = db.execute(
-        "SELECT MAX(hr_max) FROM activities WHERE date >= date('now','-365 days') AND hr_max < 230"
-    ).fetchone()[0]
-    return {"hrmax": r}
+    months = p.get("hr_months") or athlete.HR_MONTHS
+    if q.get("months"):
+        try:
+            months = athlete._field("hr_months", q["months"])
+        except ValueError:
+            return {"error": "months must be 1-36"}
+    est = athlete.hrmax_estimate(hr_sessions(db, M), months)
+    bpm, src = athlete.hrmax_choice(p, est)
+    return {"hrmax": bpm, "source": src, "estimate": est, "age": athlete.age_hrmax(p), "months": months,
+            "history": p.get("hr_max_history") or []}
 
 
 def clean(o):
@@ -261,6 +297,20 @@ def clean(o):
     if isinstance(o, (list, tuple)):
         return [clean(v) for v in o]
     return o
+
+
+def _weather_id(v):
+    if not ACTIVITY_ID.fullmatch(str(v)):
+        raise ValueError("bad id")
+    return int(v)
+
+
+def api_weather_status(q):
+    try:
+        aid = _weather_id(q.get("id"))
+    except ValueError:
+        return {"error": "id required"}
+    return WX_JOB.status(aid) if WX_JOB else {"state": "offline"}
 
 
 def api_strava(db, q, M):  # never the cookie itself
@@ -278,6 +328,7 @@ GET = {
     "last_import": lambda db, q, M: api_last_import(db, LAST),
     "strava": api_strava,
     "gear": lambda db, q, M: GEAR.view(db),
+    "weather": lambda db, q, M: api_weather_status(q),
 }
 ACTIVITY_ID = re.compile(r"[0-9]{1,15}")
 
@@ -372,6 +423,20 @@ def post_gear(r):
     return 200, {**out, "gear": GEAR.view(r.db())}
 
 
+def post_weather(r):
+    """Fetch the weather of one session that has none (see weather.OnDemand)."""
+    aid = _weather_id(r.body.get("id"))
+    db = r.db()
+    row = db.execute("SELECT type, has_gps FROM activities_all WHERE id=?", (aid,)).fetchone()
+    if not row:
+        return 404, {"error": "no such activity"}
+    if not row["has_gps"] or not weather.eligible(row["type"]):
+        return 200, {"state": "none"}  # indoor: no weather to fetch, no process spawned
+    if weather.load(db, [aid]).get(aid):
+        return 200, {"state": "done"}
+    return 200, WX_JOB.request(aid) if WX_JOB else {"state": "offline"}
+
+
 JSON_LIMIT = 65536
 
 
@@ -392,4 +457,5 @@ POST = {
     "/api/import/run": Post(post_import_run, None),
     "/api/strava/sync": Post(post_strava_sync, None),
     "/api/gear": Post(post_gear, what="gear"),
+    "/api/weather": Post(post_weather, 4096, what="weather"),
 }

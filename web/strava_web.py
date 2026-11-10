@@ -33,12 +33,13 @@ import json
 import os
 import re
 import sqlite3
-import stat
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+
+import store
 
 BASE = "https://www.strava.com"
 # tests point this at a local fake; never anywhere else, the cookie goes there
@@ -93,15 +94,15 @@ def parse_cookie(text):
 
 def save_cookie(home, value):
     os.makedirs(home, exist_ok=True)
-    p = cookie_path(home)
-    fd = os.open(p + ".part", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(value + "\n")
-    os.replace(p + ".part", p)
+    store.write_bytes(cookie_path(home), (value + "\n").encode("ascii"))  # 0600, no fixed temp name
+
+
+def has_cookie(home):
+    """Is a cookie stored? Without reading it: the dashboard process never holds the value."""
     try:
-        os.chmod(p, stat.S_IRUSR | stat.S_IWUSR)
+        return os.path.getsize(cookie_path(home)) > 0
     except OSError:
-        pass
+        return False
 
 
 def load_cookie(home):
@@ -121,27 +122,27 @@ def forget_cookie(home):
         return False
 
 
+STATE_MAX = 4 << 20
+
+
 def load_state(home):
-    try:
-        with open(state_path(home)) as f:
-            s = json.load(f)
-        return s if isinstance(s, dict) else {}
-    except (FileNotFoundError, ValueError):
-        return {}
+    """data/strava_sync.json, untrusted: anything but an object (or unreadable) = {}."""
+    return store.load_object(state_path(home), STATE_MAX) or {}
 
 
 def save_state(home, s):
-    p = state_path(home)
-    with open(p + ".part", "w") as f:
-        json.dump(s, f, indent=1)
-    os.replace(p + ".part", p)
+    store.write_json(state_path(home), s)
 
 
 def status(home):
-    """For the dashboard: never includes the cookie."""
+    """For the dashboard: never the cookie, and never read it (has_cookie only stats it)."""
     s = load_state(home)
-    return {"configured": load_cookie(home) is not None, "last_sync": s.get("last_sync"),
-            "last_result": s.get("last_result"), "auth_expired": bool(s.get("auth_expired"))}
+    last = s.get("last_sync")
+    res = s.get("last_result")
+    res = {k: v for k, v in res.items() if isinstance(k, str) and isinstance(v, (int, float, str, bool)) and
+           not (isinstance(v, str) and len(v) > 200)} if isinstance(res, dict) else None
+    return {"configured": has_cookie(home), "last_sync": last if isinstance(last, str) and len(last) <= 40 else None,
+            "last_result": res, "auth_expired": s.get("auth_expired") is True}
 
 
 # ------------------------------------------------------------------ HTTP

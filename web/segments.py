@@ -30,6 +30,7 @@ import os
 import threading
 
 import analysis as srv
+import store
 import api
 
 SEG_VERSION = 4
@@ -42,6 +43,7 @@ SEG_TARGET_M = 2500.0
 SEG_FULL_MAX_M = 16000.0
 CHAIN_R = 60.0  # piece end -> next piece start, for chaining into a full leg
 MAX_SEGS = 40
+CACHE_MAX = 128 << 20  # web_segments.json
 COVER_R = 35.0
 GATE_R = 30.0
 FOLLOW_R = 40.0
@@ -399,13 +401,12 @@ class SegmentStore:
         self.db_path, self.M, self.path = db_path, metrics, path
         self.lock = threading.Lock()
         self.data, self.jobs = {}, {}
-        try:
-            with open(path) as f:
-                blob = json.load(f)
-            if blob.get("version") == SEG_VERSION:
-                self.data = blob["types"]
-        except (OSError, ValueError, KeyError):
-            pass
+        blob = store.load_object(path, CACHE_MAX)
+        types = blob.get("types") if blob and blob.get("version") == SEG_VERSION else None
+        if isinstance(types, dict):  # entries of the wrong shape are recomputed
+            self.data = {t: v for t, v in types.items() if isinstance(t, str) and isinstance(v, dict)
+                         and isinstance(v.get("key"), str) and isinstance(v.get("segments"), list)
+                         and all(isinstance(g, dict) and isinstance(g.get("pts"), list) for g in v["segments"])}
 
     def _key(self, db, typ):
         ids = [tuple(r) for r in db.execute(

@@ -21,6 +21,8 @@ WEB = os.path.join(ROOT, "web")
 # never touch the developer's real data
 _HOME = tempfile.mkdtemp(prefix="rollbook-test-home-")
 os.environ["ROLLBOOK_HOME"] = _HOME
+# `db build` ends with `db weather`: cache only, never Open-Meteo from a test
+os.environ["ROLLBOOK_OFFLINE"] = "1"
 if WEB not in sys.path:
     sys.path.insert(0, WEB)
 

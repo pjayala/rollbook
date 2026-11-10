@@ -23,7 +23,9 @@ from the Strava export's profile.csv (name, sex, weight).
 """
 
 import bisect
+import calendar
 import csv
+import re
 import glob
 import os
 import threading
@@ -50,7 +52,157 @@ FIELDS = {  # name: (type, min, max)
     "height_cm": (float, 100, 250), "weight_kg": (float, 25, 300),
     "hr_rest": (int, 25, 120), "hr_max": (int, 100, 240),
     "ftp": (int, 50, 600),  # W, threshold power; overrides ROUVY's and the estimate
+    "hr_months": (int, 1, 36),  # months of sessions the max-HR suggestion looks at
 }
+
+# ------------------------------------------------------------------ max HR from your sessions
+#
+# A recorded hr_max is often one optical-sensor spike (seen: 173 bpm on a skate
+# whose HR never stayed above 157 for 10 s). The suggestion is instead the
+# highest heart rate *held* for HR_HOLD_S seconds in any one session of the last
+# N months (time at or above that bpm, from the session's HR histogram). It can
+# only be as high as your hardest recent effort: without an all-out effort in
+# the window it underestimates, so the age formula is shown next to it.
+HR_MONTHS = 12
+HR_HOLD_S = 30
+HR_SPIKE = 230  # above this a reading is a glitch
+
+
+def hr_peak(hist, hold=HR_HOLD_S):
+    """Highest bpm the session spent `hold` seconds at or above; None without HR.
+    The histogram comes from the metrics cache: odd entries are skipped."""
+    if not isinstance(hist, dict):
+        return None
+    pts = []
+    for k, v in hist.items():  # str keys from the cache file, int ones from a fresh derive()
+        if isinstance(k, int) and not isinstance(k, bool):
+            k = str(k)
+        if isinstance(k, str) and k.isascii() and k.isdigit() and HR_SPIKE > int(k) > 0 \
+                and isinstance(v, (int, float)) and not isinstance(v, bool) and 0 < v < 1e7:
+            pts.append((int(k), v))
+    acc = 0
+    for bpm, s in sorted(pts, reverse=True):
+        acc += s
+        if acc >= hold:
+            return bpm
+    return None
+
+
+def hrmax_estimate(sessions, months=HR_MONTHS):
+    """sessions: [{id, date, type, hr_max, hist}] with heart rate. The window is the
+    `months` before the newest of them (old data still gives an answer).
+    {bpm, months, from, to, n, recorded, top: [{id, date, type, held, max}]} or None."""
+    rows = [s for s in sessions if s.get("date") and s.get("hr_max")]
+    if not rows:
+        return None
+    to = max(s["date"] for s in rows)
+    frm = _months_before(to, months)
+    win = [s for s in rows if s["date"] >= frm]
+    peaks = [{"id": s["id"], "date": s["date"], "type": s.get("type"), "held": hr_peak(s.get("hist")),
+              "max": s["hr_max"]} for s in win]
+    peaks = [p for p in peaks if p["held"]]
+    rec = max((s["hr_max"] for s in win if s["hr_max"] < HR_SPIKE), default=None)
+    if not peaks:
+        return {"bpm": None, "months": months, "from": frm, "to": to, "n": len(win), "recorded": rec, "top": []}
+    peaks.sort(key=lambda p: (-p["held"], p["date"]))
+    return {"bpm": peaks[0]["held"], "months": months, "from": frm, "to": to, "n": len(win),
+            "recorded": rec, "top": peaks[:3]}
+
+
+BEGIN = "0000-01-01"  # a max HR saved before the history existed: it applies to every session
+HISTORY_MAX = 500
+
+
+def clean_history(h):
+    """profile.hr_max_history from the (untrusted) file: [{from: YYYY-MM-DD, bpm: int | None}], sorted."""
+    out = {}
+    for e in h if isinstance(h, list) else []:
+        if not isinstance(e, dict) or not isinstance(e.get("from"), str) or not _ISO.fullmatch(e["from"]):
+            continue
+        try:
+            if e["from"] != BEGIN:
+                time.strptime(e["from"], "%Y-%m-%d")
+            bpm = None if e.get("bpm") is None else _field("hr_max", e["bpm"])
+        except ValueError:
+            continue
+        out[e["from"]] = bpm
+    rows = []
+    for d in sorted(out):  # a change back to the value already in effect is no change
+        if not rows or rows[-1]["bpm"] != out[d]:
+            rows.append({"from": d, "bpm": out[d]})
+    return rows if len(rows) <= HISTORY_MAX else rows[:1] + rows[-(HISTORY_MAX - 1):]  # keep the oldest
+
+
+def profile_hrmax_on(profile, date):
+    """The profile's max HR in effect on `date` (YYYY-MM-DD): the last history
+    entry from on or before it. (None, False) when none applied then (or it had
+    been cleared); a profile without history applies its hr_max everywhere."""
+    hist = profile.get("hr_max_history")
+    if not hist:
+        return (profile.get("hr_max"), True) if profile.get("hr_max") else (None, False)
+    cur = None
+    for e in hist:
+        if e["from"] <= (date or "9999"):
+            cur = e
+    return (cur["bpm"], True) if cur and cur["bpm"] else (None, False)
+
+
+_ISO = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+
+
+def _months_before(date, months):
+    """YYYY-MM-DD `months` earlier, the day clamped to that month (31 Aug - 6 = 28/29 Feb)."""
+    y, m = int(date[:4]), int(date[5:7]) - months
+    while m < 1:
+        y, m = y - 1, m + 12
+    return f"{y:04d}-{m:02d}-{min(int(date[8:10]), calendar.monthrange(y, m)[1]):02d}"
+
+
+class HrmaxAt:
+    """Max HR for one session's zones, as of the session's date:
+       1. the profile's max HR in effect that day (hr_max_history),
+       2. else the held 30 s peak over the `hr_months` before that day (the
+          session itself included: going over your max proves it was higher),
+       3. else the highest recorded in that window."""
+
+    def __init__(self, profile, sessions):
+        self.p = profile
+        self.months = profile.get("hr_months") or HR_MONTHS
+        self.rows = sorted(((s["date"], hr_peak(s.get("hist")), s.get("hr_max"))
+                            for s in sessions if s.get("date") and s.get("hr_max")), key=lambda r: r[0])
+        self.memo = {}
+
+    def at(self, date):
+        """(bpm, source): source profile | estimate | recorded | None."""
+        bpm, ok = profile_hrmax_on(self.p, date)
+        if ok:
+            return bpm, "profile"
+        if not date:
+            return None, None
+        if date not in self.memo:
+            frm = _months_before(date, self.months)
+            win = [r for r in self.rows if frm <= r[0] <= date]
+            held = max((h for _, h, _ in win if h), default=None)
+            rec = max((m for _, _, m in win if m and m < HR_SPIKE), default=None)
+            self.memo[date] = (held, "estimate") if held else (rec, "recorded") if rec else (None, None)
+        return self.memo[date]
+
+
+def hrmax_choice(profile, est):
+    """(bpm, source) for zones: the profile's > the held estimate > the recorded peak."""
+    if profile.get("hr_max"):
+        return profile["hr_max"], "profile"
+    if est and est.get("bpm"):
+        return est["bpm"], "estimate"
+    if est and est.get("recorded"):
+        return est["recorded"], "recorded"
+    return None, None
+
+
+def age_hrmax(profile):
+    """Tanaka 2001: 208 - 0.7 x age; a population average, +-10 bpm per person."""
+    age = profile_age(profile)
+    return round(208 - 0.7 * age) if age else None
 
 
 def _interp(tab, x):
@@ -175,6 +327,9 @@ def validate(d):
                 out[k] = _field(k, d[k])
             except ValueError:
                 pass
+    h = clean_history(d.get("hr_max_history")) if isinstance(d, dict) else []
+    if h:
+        out["hr_max_history"] = h
     return out
 
 
@@ -217,7 +372,9 @@ class Profile:
             p["bmi"] = p["weight_kg"] / (p["height_cm"] / 100) ** 2
         return p
 
-    def set(self, body):
+    def set(self, body, today=None):
+        """Save the form. A changed max HR is dated (hr_max_history): sessions on
+        or after today use the new one, earlier sessions keep what applied then."""
         clean = {}
         for k in FIELDS:
             v = body.get(k)
@@ -225,6 +382,17 @@ class Profile:
                 continue
             clean[k] = _field(k, v)
         with self.lock:
+            old = self.data
+            hist = list(old.get("hr_max_history") or [])
+            if not hist and old.get("hr_max"):
+                hist = [{"from": BEGIN, "bpm": old["hr_max"]}]  # the value before history: it had applied to all
+            if body.get("hr_max_all") is True:  # the form's "for all past sessions too"
+                hist = [{"from": BEGIN, "bpm": clean.get("hr_max")}]
+            elif clean.get("hr_max") != old.get("hr_max"):
+                day = today or time.strftime("%Y-%m-%d")
+                hist = [e for e in hist if e["from"] != day] + [{"from": day, "bpm": clean.get("hr_max")}]
+            if hist:
+                clean["hr_max_history"] = clean_history(hist)
             store.write_json(self.path, clean)
             self.data = clean
         return self.get()

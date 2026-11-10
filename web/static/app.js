@@ -47,6 +47,8 @@ const cmpWhen = (a, b) => whenOf(a) - whenOf(b) || (+a.id) - (+b.id);
 const DAY = 86400000;
 const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const fdate = d => `${d.getDate()} ${MON[d.getMonth()]} ${d.getFullYear()}`;
+/** "YYYY-MM-DD" as a local date (new Date() would read it as UTC: a day early west of Greenwich) */
+const dayOf = s => { const [y, m, d] = String(s).split("-").map(Number); return new Date(y, m - 1, d); };
 const fmon = d => `${MON[d.getMonth()]} ${String(d.getFullYear()).slice(2)}`;
 function median(xs) { xs = xs.filter(isNum).sort((a, b) => a - b); if (!xs.length) return null; const m = xs.length >> 1; return xs.length % 2 ? xs[m] : (xs[m - 1] + xs[m]) / 2; }
 function quantile(xs, q) { xs = xs.filter(isNum).sort((a, b) => a - b); if (!xs.length) return null; const i = (xs.length - 1) * q, lo = Math.floor(i); return xs[lo] + (xs[Math.min(lo + 1, xs.length - 1)] - xs[lo]) * (i - lo); }
@@ -71,6 +73,8 @@ function zoneSecs(hist, hrmax) {
   }
   return z;
 }
+const zonePct = i => { const lo = Math.round(ZONES[i].lo * 100), hi = i + 1 < ZONES.length ? Math.round(ZONES[i + 1].lo * 100) : null;
+  return i === 0 ? `${ZONES[i].n} <${hi}%` : hi ? `${ZONES[i].n} ${lo}–${hi}%` : `${ZONES[i].n} ${lo}%+`; };
 const zoneLabel = (i, hrmax) => {
   const lo = Math.round(ZONES[i].lo * hrmax), hi = i + 1 < ZONES.length ? Math.round(ZONES[i + 1].lo * hrmax) - 1 : null;
   return i === 0 ? `${ZONES[i].n} <${hi + 1}` : hi ? `${ZONES[i].n} ${lo}–${hi}` : `${ZONES[i].n} ${lo}+`;
@@ -124,13 +128,15 @@ function timeTicks(lo, hi) {
 
 /**
  * chart(host, opt)
- *  opt.x     {type:'time'|'linear', fmt, label, min, max}
+ *  opt.x     {type:'time'|'linear', fmt, label, min, max, ticks: [values] | plotWidth => [values] (else automatic)}
  *  opt.y     {fmt, label, min, max, zero}     opt.y2 same, optional
  *  opt.series[] {name, color, kind:'line'|'dot'|'bar'|'area', data:[{x,y,ref}], axis:'y'|'y2', stack, width, r, opacity, legend:false}
  *  opt.tip(x, hits) -> html   opt.onClick(ref)   opt.onHover(x|null)
  *  opt.marks[] {x, y, label}   events: a 1px leader from a label row above the plot to (x, y)
  *  opt.sides {hi, lo}          captions inside the plot, top-left and bottom-left (a signed axis)
  *  series.base                 area fill to this y instead of the series minimum
+ *  opt.hlines[] {y, label, labelY}  dashed reference lines; the label sits at labelY (default y), left
+ *  opt.padRight                keep the right margin without a y2 axis (charts stacked on one x)
  */
 function chart(host, opt, heightOverride) {
   host.innerHTML = "";
@@ -217,7 +223,9 @@ function chart(host, opt, heightOverride) {
     el("text", { x: m.l - 6, y: Y.y.f(v) + 4, "text-anchor": "end" }, ax).textContent = l;
   });
   if (Y.y2) labels(Y.y2.ticks, opt.y2.fmt).forEach((l, i) => { el("text", { x: m.l + iw + 6, y: Y.y2.f(Y.y2.ticks[i]) + 4 }, ax).textContent = l; });
-  const xt = opt.x.type === "time" ? timeTicks(xlo, xhi) : niceTicks(xlo, xhi, Math.max(3, Math.floor(iw / 80))).ticks.filter(v => v >= xlo && v <= xhi).map(v => ({ v, l: (opt.x.fmt || String)(v) }));
+  const xtk = typeof opt.x.ticks === "function" ? opt.x.ticks(iw) : opt.x.ticks;
+  const xt = xtk ? xtk.filter(v => v >= xlo && v <= xhi).map(v => ({ v, l: (opt.x.fmt || String)(v) }))
+    : opt.x.type === "time" ? timeTicks(xlo, xhi) : niceTicks(xlo, xhi, Math.max(3, Math.floor(iw / 80))).ticks.filter(v => v >= xlo && v <= xhi).map(v => ({ v, l: (opt.x.fmt || String)(v) }));
   for (const t of xt) {
     el("text", { x: X(t.v), y: H - 6, "text-anchor": "middle" }, ax).textContent = t.l;
   }
@@ -227,6 +235,13 @@ function chart(host, opt, heightOverride) {
   if (opt.sides && Y.y) {
     if (opt.sides.hi) el("text", { x: m.l + 8, y: m.t + 14, class: "side" }, ax).textContent = opt.sides.hi;
     if (opt.sides.lo) el("text", { x: m.l + 8, y: m.t + ih - 8, class: "side" }, ax).textContent = opt.sides.lo;
+  }
+
+  // labelled reference lines (opt.hlines [{y, label}]), e.g. air-quality bands
+  if (Y.y) for (const r of opt.hlines || []) {
+    const y = Y.y.f(r.y);
+    el("line", { x1: m.l, x2: m.l + iw, y1: y, y2: y, stroke: "#4a4a4a", "stroke-dasharray": "3 3" }, svg);
+    if (r.label) el("text", { x: m.l + 6, y: Y.y.f(r.labelY ?? r.y) + 4, class: "side" }, ax).textContent = r.label;
   }
 
   // selection band, behind the series
@@ -511,7 +526,7 @@ function cards(items) {
   const n = items.length, fit = max => Math.max(1, Math.ceil(n / Math.ceil(n / max)));
   // span of cell i in 60ths with c columns: the last, shorter row widens its cells (60 = lcm 1..6)
   const span = (i, c) => { const r = n % c, last = n - r; return 60 / (r && i >= last ? r : c); };
-  return `<div class="cards">` + items.map((c, i) => `<div class="card ${c.hl ? "hl" : ""}" style="--s:${span(i, fit(6))};--st:${span(i, fit(4))};--sp:${span(i, 2)}"><div class="k">${esc(c.k)}</div><div class="v">${c.v}</div>${c.s ? `<div class="s">${c.s}</div>` : ""}</div>`).join("") + `</div>`;
+  return `<div class="cards">` + items.map((c, i) => `<div class="card ${c.hl ? "hl" : ""} ${c.cls || ""}"${c.id ? ` id="${esc(c.id)}"` : ""}${c.button ? ` role="button" tabindex="0" aria-haspopup="dialog"` : ""}${c.title ? ` title="${esc(c.title)}"` : ""} style="--s:${span(i, fit(6))};--st:${span(i, fit(4))};--sp:${span(i, 2)}"><div class="k">${esc(c.k)}</div><div class="v">${c.v}</div>${c.s ? `<div class="s">${c.s}</div>` : ""}</div>`).join("") + `</div>`;
 }
 const go = id => { location.hash = "#/session/" + id; };
 const routePill = r => r ? `<span class="pill ${r === "out-back" ? "ob" : r === "loop" ? "loop" : r === "one-way" ? "ow" : ""}">${esc(r)}</span>` : "";
@@ -565,7 +580,7 @@ async function viewProgress() {
         <div class="note">Positive = out leg faster. Dots use the hourly wind at each leg and the leg's grade; the rest is pacing, fatigue and gusts.</div></div>
       <div class="panel"><h2>Heat: speed vs temperature <span class="muted">best 10-min (adjusted where available)</span></h2><div id="c-heat"></div>
         <div class="note" id="heat-note"></div></div>
-      <div class="panel"><h2>Time in HR zones per month <span class="muted">HRmax ${S.hrmax ?? "?"} bpm</span></h2><div id="c-zones"></div></div>
+      <div class="panel"><h2>Time in HR zones per month <span class="muted">% of each session's max HR on its date · <a href="#/profile">change</a></span></h2><div id="c-zones"></div></div>
       <div class="panel" id="p-pred"></div>
     </div>
     <div class="panel" id="p-favs" hidden></div>
@@ -605,7 +620,7 @@ async function viewProgress() {
     m.wn = median(m.a.map(a => a.wind_neutral)); m.kmh = m.mv ? m.km / (m.mv / 3600) : null;
     m.hr = median(m.a.map(a => a.hr_avg)); m.zones = ZONES.map(() => 0);
     m.kcal = m.a.reduce((t, a) => t + (a.kcal || 0), 0);
-    for (const a of m.a) zoneSecs(a.hr_hist, S.hrmax).forEach((s, i) => m.zones[i] += s);
+    for (const a of m.a) zoneSecs(a.hr_hist, a.hrmax || S.hrmax).forEach((s, i) => m.zones[i] += s);  // each against its own day's max
   }
   chart($("#c-vol"), {
     x: { type: "time" }, y: { zero: true, fmt: v => v.toFixed(0), label: "km" }, y2: { zero: true, fmt: v => v.toFixed(0), label: "sessions" },
@@ -692,8 +707,8 @@ async function viewProgress() {
   const zm = mons.filter(m => m.zones.some(z => z > 0));
   chart($("#c-zones"), {
     x: { type: "time" }, y: { zero: true, fmt: v => v.toFixed(0), label: "h" },
-    series: ZONES.map((z, i) => ({ name: zoneLabel(i, S.hrmax || 0), kind: "bar", stack: "z", color: z.c, data: zm.map(m => ({ x: m.x, y: m.zones[i] / 3600 })) })),
-    tip: x => { const m = zm.find(m => m.x === x); if (!m) return ""; const tot = m.zones.reduce((a, b) => a + b, 0); return `<b>${fmon(new Date(m.x))}</b>` + m.zones.map((s, i) => `<div class="row"><span>${zoneLabel(i, S.hrmax)}</span><span>${dur(s, true)} · ${(s / tot * 100).toFixed(0)}%</span></div>`).join(""); }
+    series: ZONES.map((z, i) => ({ name: zonePct(i), kind: "bar", stack: "z", color: z.c, data: zm.map(m => ({ x: m.x, y: m.zones[i] / 3600 })) })),
+    tip: x => { const m = zm.find(m => m.x === x); if (!m) return ""; const tot = m.zones.reduce((a, b) => a + b, 0); return `<b>${fmon(new Date(m.x))}</b>` + m.zones.map((s, i) => `<div class="row"><span>${zonePct(i)}</span><span>${dur(s, true)} · ${(s / tot * 100).toFixed(0)}%</span></div>`).join(""); }
   });
   if (!zm.length) $("#c-zones").innerHTML = `<p class="muted">No heart-rate data in this range.</p>`;
 
@@ -1195,9 +1210,127 @@ async function viewMap() {
 // ------------------------------------------------------------------ weather
 const fdeg = d => isNum(d) ? COMPASS[Math.round(((d % 360) + 360) % 360 / 45) % 8] : "";
 /** "from W" arrow pointing where the wind blows to */
-const windArrow = wd => isNum(wd) ? `<span class="warrow" style="transform:rotate(${(wd + 180) % 360}deg)">↑</span>` : "";
-const fwind = c => c && isNum(c.ws) ? `${f0(c.ws)} km/h ${windArrow(c.wd)} from ${fdeg(c.wd)}` : "–";
+const windArrow = wd => isNum(wd) ? `<span class="warrow" aria-hidden="true" style="transform:rotate(${(wd + 180) % 360}deg)">↑</span>` : "";
+const fwind = c => c && isNum(c.ws) ? `${f0(c.ws)} km/h from ${fdeg(c.wd)} ${windArrow(c.wd)}` : "–";
 const fsigned = (v, u = "%") => isNum(v) ? (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(1) + u : "–";
+/** WMO weather code -> short text (Open-Meteo's table) */
+const WMO = { 0: "Clear", 1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast", 45: "Fog", 48: "Rime fog",
+  51: "Light drizzle", 53: "Drizzle", 55: "Dense drizzle", 56: "Freezing drizzle", 57: "Freezing drizzle",
+  61: "Light rain", 63: "Rain", 65: "Heavy rain", 66: "Freezing rain", 67: "Freezing rain",
+  71: "Light snow", 73: "Snow", 75: "Heavy snow", 77: "Snow grains", 80: "Rain showers", 81: "Rain showers",
+  82: "Violent showers", 85: "Snow showers", 86: "Snow showers", 95: "Thunderstorm", 96: "Thunderstorm, hail", 99: "Thunderstorm, hail" };
+const fsky = code => isNum(code) ? (WMO[code] || `code ${code}`) : "";
+/** European AQI bands */
+const faqi = v => !isNum(v) ? "" : v <= 20 ? "good" : v <= 40 ? "fair" : v <= 60 ? "moderate" : v <= 80 ? "poor" : v <= 100 ? "very poor" : "extremely poor";
+/** The session page's one weather card (cond = conditions() on the server); click opens weatherDetails(). */
+function weatherCards(c, missing) {
+  const nw = t => `<span class="nw">${t}</span>`;
+  if (missing) return [{ k: "Weather", v: S.readonly ? "–" : "…", id: "wx-wait",
+    s: `<span id="wx-note" aria-live="polite">${S.readonly ? "not loaded yet" : "fetching from Open-Meteo"}</span>` }];
+  if (!c || !isNum(c.temp)) return [];
+  const parts = [isNum(c.ws) && nw(fwind(c)),
+    c.precip_sum > 0 && nw(`${c.precip_sum.toFixed(1)} mm`), isNum(c.aqi) && nw(`AQI ${f0(c.aqi)}`)].filter(Boolean);
+  return [{ k: "Weather ›", v: `${f0(c.temp)}°C <span class="wx-sky">${esc(fsky(c.code))}</span>`, cls: "click wx-card",
+    id: "wx-card", button: true, title: "Hour-by-hour weather", s: parts.join(" · ") }];
+}
+
+/** Hour-by-hour weather of a session in an enlarged panel: summary, charts, table. */
+function weatherDetails(a) {
+  const H = a.weather_hours || [], c = a.cond || {};
+  if (!H.length) return;
+  const t0 = +new Date(a.datetime), t1 = t0 + (a.elapsed_s || 0) * 1000, hx = ms => ms / 3600e3;
+  const clock = ms => { const d = new Date(ms); return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; };
+  const rows = H.map(h => ({ ...h, x: hx(+new Date(h.t)) }));
+  const has = k => rows.some(r => isNum(r[k]));
+  const pts = k => rows.filter(r => isNum(r[k])).map(r => ({ x: r.x, y: r[k] }));
+  const vals = k => rows.map(r => r[k]).filter(isNum), spread = k => { const v = vals(k); return v.length ? Math.max(...v) - Math.min(...v) : 0; };
+  const num = (v, d = 0) => isNum(v) ? v.toFixed(d) : "–";
+  const wet = rows.some(r => r.precip > 0);
+  const flatAir = spread("rh") < 5 && spread("pmsl") < 2;  // humidity and pressure barely move: no chart
+  const steady = k => spread(k) < (k === "rh" ? 5 : 2) ? "steady" : `${f0(Math.min(...vals(k)))}–${f0(Math.max(...vals(k)))}`;
+  const range = isNum(c.temp_min) && isNum(c.temp_max) && c.temp_max - c.temp_min >= 1 ? `${f0(c.temp_min)}–${f0(c.temp_max)}°C` : "";
+  const stats = [
+    { k: "Temperature", v: `${f0(c.temp)}°C`, s: [isNum(c.feels) && `feels ${f0(c.feels)}°C`, range].filter(Boolean).join(" · ") },
+    { k: "Sky", v: esc(fsky(c.code)) || "–", s: isNum(c.cloud) ? `cloud ${f0(c.cloud)}%` : "" },
+    { k: "Wind", v: isNum(c.ws) ? `${f0(c.ws)} km/h` : "–", s: `${isNum(c.wd) ? `from ${fdeg(c.wd)} ${windArrow(c.wd)}` : ""}${isNum(c.gust_max) ? ` · gusts ${f0(c.gust_max)}` : ""}` },
+    { k: "Rain", v: c.precip_sum > 0 ? `${c.precip_sum.toFixed(1)} mm` : isNum(c.precip_sum) ? "dry" : "–", s: "during the session" },
+    { k: "Humidity", v: isNum(c.rh) ? `${f0(c.rh)}%` : "–", s: [has("rh") && (spread("rh") < 5 ? "steady" : `${steady("rh")}%`), isNum(c.dew) && `dew point ${f0(c.dew)}°C`].filter(Boolean).join(" · ") },
+    { k: "Pressure", v: isNum(c.pmsl) ? `${f0(c.pmsl)} hPa` : "–", s: has("pmsl") ? `sea level · ${steady("pmsl")}` : "sea level" },
+    ...(isNum(c.aqi) || isNum(c.pm25) ? [{ k: "Air quality", v: isNum(c.aqi) ? `AQI ${f0(c.aqi)}` : "–", s: [faqi(c.aqi), isNum(c.pm25) && `PM2.5 ${f0(c.pm25)} µg/m³`].filter(Boolean).join(" · ") }] : []),
+  ];
+  const charts = [["wx-temp", "Temperature", "°C"], ["wx-wind", "Wind", "km/h"],
+    ...(wet ? [["wx-rain", "Rain", "mm per hour"]] : spread("cloud") >= 5 ? [["wx-cloud", "Cloud cover", "%"]] : []),
+    ...(flatAir ? [] : [["wx-air", "Humidity &amp; pressure", ""]]), ...(has("aqi") ? [["wx-aq", "Air quality", "European AQI"]] : [])];
+  const sec = ' class="wx-2"';  // left out on a phone
+  const panel = document.createElement("div");
+  panel.className = "panel wx-panel";
+  panel.innerHTML = `<h2 id="wx-title">Weather <span class="muted">${fdate(new Date(t0))} · ${clock(t0)}–${clock(t1)} · hour by hour at your position</span></h2>
+    <div class="wx-stats">${cards(stats)}</div>
+    <div class="grid g2 wx-charts">${charts.map(([id, t, u]) => `<div class="wx-chart"><h3>${t}${u ? ` <span class="muted">${u}</span>` : ""}</h3><div id="${id}"></div>${id === "wx-wind" ? `<div class="wx-row" id="wx-dirs"></div>` : id === "wx-rain" ? `<div class="wx-row" id="wx-clouds"><b class="wx-row-k">cloud</b></div>` : ""}</div>`).join("")}</div>
+    <div class="scroll" tabindex="0" role="region" aria-label="Hourly weather"><table class="wx-table"><thead><tr><th class="l">hour</th><th class="l wx-2">sky</th><th>°C</th><th${sec}>feels °C</th><th>wind km/h</th><th class="wx-2 wx-3">gusts km/h</th><th>rain mm</th><th${sec}>cloud %</th><th${sec}>humidity %</th><th${sec}>hPa</th>${has("aqi") ? `<th>AQI</th><th${sec}>PM2.5</th><th class="wx-2 wx-3">PM10</th><th class="wx-2 wx-3">O₃</th>` : ""}</tr></thead><tbody>
+      ${rows.map(r => { const ms = r.x * 3600e3, inS = ms >= t0 - 1800e3 && ms <= t1 + 1800e3;
+        return `<tr class="${inS ? "" : "muted"}"><td class="l num">${clock(ms)}</td><td class="l wx-2">${esc(fsky(r.code))}</td><td>${num(r.temp, 1)}</td><td${sec}>${num(r.feels, 1)}</td>
+          <td>${isNum(r.ws) ? `${f0(r.ws)} ${fdeg(r.wd)} ${windArrow(r.wd)}` : "–"}</td><td class="wx-2 wx-3">${num(r.gust)}</td><td>${r.precip > 0 ? r.precip.toFixed(1) : isNum(r.precip) ? "0" : "–"}</td><td${sec}>${num(r.cloud)}</td><td${sec}>${num(r.rh)}</td><td${sec}>${num(r.pmsl)}</td>
+          ${has("aqi") ? `<td>${num(r.aqi)}</td><td${sec}>${num(r.pm25, 1)}</td><td class="wx-2 wx-3">${num(r.pm10, 1)}</td><td class="wx-2 wx-3">${num(r.o3)}</td>` : ""}</tr>`; }).join("")}
+    </tbody></table></div>
+    <div class="note">Open-Meteo model values (ERA5 / ECMWF IFS reanalysis, CAMS air quality) for the ~10 km area you were in each hour, not a measurement on the spot. Rain is the total of the hour before. The shaded band is the session; grey table rows are outside it. Times in your time zone.${c.final ? "" : " Recent: provisional, refreshed by the next import."}</div>`;
+  $("#app").appendChild(panel);
+  ensureExpander(panel.querySelector("h2"));  // the close button
+  panel._onCollapse = () => panel.remove();
+  expandPanel(panel);
+  const xs = rows.map(r => r.x), x = { type: "linear", fmt: v => clock(v * 3600e3), min: Math.min(...xs), max: Math.max(...xs) };
+  // ticks on whole quarter / half / hours, as many as fit the plot (a label is ~48 px)
+  x.ticks = iw => {
+    const fit = Math.max(2, Math.floor(iw / 48)), st = [0.25, 0.5, 1, 2, 3, 6, 12].find(q => (x.max - x.min) / q <= fit) || 24, out = [];
+    for (let v = Math.ceil(x.min / st - 1e-9) * st; v <= x.max + 1e-9; v += st) out.push(v);
+    return out;
+  };
+  // one tooltip row per legend entry, in legend order
+  const tip = units => (hx_, hits) => `<b>${clock(hx_ * 3600e3)}</b>` + hits.filter(({ s }) => s.legend !== false)
+    .filter(({ s }, i, arr) => arr.findIndex(h => h.s.name === s.name) === i)
+    .map(({ s, p }) => `<div class="row"><span>${esc(s.name)}</span><span>${num(p.y, s.dp ?? 1)} ${units[s.name] || ""}</span></div>`).join("");
+  // every chart keeps a right axis margin, so the hours line up from chart to chart
+  const draw = (id, opt) => { const el_ = $("#" + id); if (!el_) return; chart(el_, { height: 190, x, padRight: true, ...opt }).setBand(hx(t0), hx(t1)); };
+  // text under a chart, one item per hour, on the chart's x positions (46 px margins each side)
+  const span = x.max - x.min;  // 0 for a single hour: chart() centres it
+  const under = (id, f) => { const e = $("#" + id); if (e) e.innerHTML += rows.map(r => { const t = f(r); return t ? `<span style="left:calc(46px + (100% - 92px) * ${(span ? (r.x - x.min) / span : 0.5).toFixed(4)})">${t}</span>` : ""; }).join(""); };
+  draw("wx-temp", { y: { fmt: v => `${v < 0 ? "−" : ""}${Math.abs(v)}°`, ticks: 3 }, tip: tip({ temperature: "°C", "feels like": "°C", "dew point": "°C" }), series: [
+    { name: "temperature", kind: "line", color: PAL.hue, width: 2.5, data: pts("temp") },
+    { name: "feels like", kind: "line", color: PAL.grey, dash: "4 3", data: pts("feels") },
+    { name: "dew point", kind: "line", color: PAL.dim, width: 1.5, data: pts("dew") }] });
+  draw("wx-wind", { y: { zero: true, ticks: 4 }, tip: tip({ wind: "km/h", gusts: "km/h" }), series: [
+    { name: "gusts", kind: "area", color: PAL.grey, opacity: .14, base: 0, legend: false, data: pts("gust") },
+    { name: "wind", kind: "line", color: PAL.hue, width: 2.5, dp: 0, data: pts("ws") },
+    { name: "gusts", kind: "line", color: PAL.grey, dash: "4 3", dp: 0, data: pts("gust") }] });
+  under("wx-dirs", r => isNum(r.wd) ? `${windArrow(r.wd)}<small>${fdeg(r.wd)}</small>` : "");
+  if (wet) {
+    // rain is a total over the hour before each time: a step, not a slope
+    const step = [];
+    rows.forEach((r, i) => { if (!i && rows.length > 1) return; const v = r.precip || 0; if (i) step.push({ x: rows[i - 1].x, y: v }); step.push({ x: r.x, y: v }); });
+    const rmax = Math.max(...step.map(p => p.y));
+    draw("wx-rain", { y: { min: 0, max: rmax > 1 ? Math.ceil(rmax) : 1, ticks: 4 }, series: [
+      { name: "rain", kind: "area", color: PAL.hue, opacity: .18, base: 0, legend: false, data: step },
+      { name: "rain", kind: "line", color: PAL.hue, width: 2, data: step }], legend: false,
+      tip: hx_ => { const r = rows.find(q => q.x === hx_); return `<b>${clock((hx_ - 1) * 3600e3)}–${clock(hx_ * 3600e3)}</b><div class="row"><span>rain</span><span>${r && isNum(r.precip) ? r.precip.toFixed(1) : "–"} mm</span></div>`; } });
+    under("wx-clouds", r => isNum(r.cloud) ? `${f0(r.cloud)}%` : "");
+  } else draw("wx-cloud", { y: { min: 0, max: 100, ticks: 4 }, tip: tip({ cloud: "%" }), series: [
+    { name: "cloud", kind: "area", color: PAL.grey, opacity: .16, base: 0, legend: false, data: pts("cloud") },
+    { name: "cloud", kind: "line", color: PAL.grey, width: 2, dp: 0, data: pts("cloud") }], legend: false });
+  if (!flatAir) {
+    const pv = vals("pmsl"), pmid = pv.length ? (Math.min(...pv) + Math.max(...pv)) / 2 : 1013, half = Math.max(5, spread("pmsl") / 2 + 1);
+    draw("wx-air", { y: { min: 0, max: 100, label: "%", ticks: 4 }, y2: { min: Math.floor(pmid - half), max: Math.ceil(pmid + half), label: "hPa", fmt: v => v.toFixed(0), ticks: 4 },
+      tip: tip({ humidity: "%", pressure: "hPa" }), series: [
+        { name: "humidity", kind: "line", color: PAL.hue, width: 2.5, dp: 0, data: pts("rh") },
+        { name: "pressure", kind: "line", axis: "y2", color: PAL.grey, dp: 0, data: pts("pmsl") }] });
+  }
+  if (has("aqi")) {
+    const amax = Math.max(60, Math.ceil((Math.max(...vals("aqi")) + 5) / 20) * 20);
+    draw("wx-aq", { y: { min: 0, max: amax, ticks: 4 }, legend: false, tip: tip({ AQI: "" }),
+      // each label in the middle of its band (good is 0–20, fair 20–40 …), on the left
+      hlines: [[20, "good"], [40, "fair"], [60, "moderate"], [80, "poor"], [100, "very poor"]].filter(([v]) => v <= amax).map(([y, label]) => ({ y, label, labelY: y - 10 })),
+      series: [{ name: "AQI", kind: "line", color: PAL.hue, width: 2.5, dp: 0, data: pts("aqi") }] });
+  }
+}
 
 // ------------------------------------------------------------------ profile
 
@@ -1219,7 +1352,12 @@ async function viewProfile() {
           ${field("weight_kg", "Weight (kg)", `type="number" min="25" max="300" step="0.1"`, "<b>needed for calories</b>")}
           ${field("hr_rest", "Resting HR (bpm)", `type="number" min="25" max="120" step="1"`, "optional")}
           ${field("ftp", "FTP (W)", `type="number" min="50" max="600" step="1"`, "optional threshold power for power zones and intensity; otherwise the one your training app used (ROUVY), or 95% of your best 20 min")}
-          ${field("hr_max", "Max HR (bpm)", `type="number" min="100" max="240" step="1"`, `optional, otherwise the highest recorded in the last 12 months (${S.hrmax ?? "?"} bpm) is used for zones`)}
+          ${field("hr_max", "Max HR (bpm)", `type="number" min="100" max="240" step="1"`, "optional; empty = the suggestion below")}
+          <label class="pfield"><span></span><span class="small"><input type="checkbox" id="pf-hr_all"> use this max HR for all past sessions too</span>
+            <small class="muted">otherwise a change applies from today, and earlier sessions keep the one they had</small></label>
+          <label class="pfield"><span>Suggest from</span><select id="pf-hr_months">${[3, 6, 12, 24, 36].map(n => `<option value="${n}">last ${n} months</option>`).join("")}</select>
+            <small class="muted">of sessions with heart rate</small></label>
+          <div class="hrsug" id="hr-sug" aria-live="polite"></div>
           <div class="toolbar"><button class="btn primary" type="submit" id="psave">Save</button><span id="pmsg" class="small"></span></div>
         </form>
         ${p.from_export ? `<div class="note">Prefilled from your Strava export's profile. Check it and save.</div>` : ""}
@@ -1237,10 +1375,35 @@ async function viewProfile() {
       </div>
     </div>`;
   $("#pf-sex").value = p.sex || "";
+  $("#pf-hr_months").value = String(p.hr_months || 12);
+  // max-HR suggestion for the chosen window (previewed before saving)
+  // one request per window; typing in Max HR only redraws (cur changes)
+  let last = null, ask = 0;
+  const sug = async (refetch = true) => {
+    if (refetch || !last) { const n = ++ask, r = await api("hrmax?months=" + $("#pf-hr_months").value); if (n !== ask) return; last = r; }
+    const r = last, e = r.estimate, box = $("#hr-sug");
+    if (!e || !e.bpm) { box.innerHTML = `<span class="muted">No sessions with heart rate in that window.</span>`; return; }
+    const top = e.top[0], cur = +$("#pf-hr_max").value || null;
+    const spike = isNum(e.recorded) && e.recorded - e.bpm >= 4;
+    box.innerHTML = `<div><b class="num">${e.bpm} bpm</b> suggested max HR <span class="muted">· the highest you held for 30 s in one session, ${fdate(dayOf(e.from))} → ${fdate(dayOf(e.to))} (${e.n} sessions)</span></div>
+      <div class="muted small">On <a href="#/session/${top.id}">${fdate(dayOf(top.date))}</a> (${esc(top.type || "")})${e.top.slice(1).map(t => ` · next ${t.held} on <a href="#/session/${t.id}">${fdate(dayOf(t.date))}</a>`).join("")}.
+        ${spike ? `The recorded peak, ${f0(e.recorded)} bpm, lasted under 30 s: most likely a sensor spike.` : ""}
+        ${isNum(r.age) ? `Age formula (Tanaka): ${r.age} bpm, ±10 for any one person.` : ""}
+        It is only as high as your hardest effort in the window; a race or an all-out interval gives the truest value.</div>
+      ${cur && cur < e.bpm ? `<div class="small down">Your max HR (${cur}) is below what you held (${e.bpm}): zones read too high.</div>` : ""}
+      ${S.readonly || cur === e.bpm ? "" : `<button class="btn small" type="button" id="hr-use">Use ${e.bpm} bpm</button>`}`;
+    const b = $("#hr-use"); if (b) b.onclick = () => { $("#pf-hr_max").value = e.bpm; sug(false); $("#psave").focus(); };
+  };
+  $("#pf-hr_months").onchange = () => sug().catch(() => {});
+  $("#pf-hr_max").oninput = () => { clearTimeout(sug.t); sug.t = setTimeout(() => sug(false).catch(() => {}), 150); };
+  sug().catch(() => {});
   const derived = q => {
     const rows = [["Age", q.age ? `${q.age}` : "–"], ["BMI", isNum(q.bmi) ? q.bmi.toFixed(1) : "–"],
       ["Resting energy (BMR)", isNum(q.bmr) ? `${f0(q.bmr)} kcal/day <span class="muted">(Mifflin–St Jeor)</span>` : `<span class="muted">needs sex, birth year, height and weight</span>`],
-      ["Max HR for zones", q.hr_max ? `${q.hr_max} bpm (profile)` : `${S.hrmax ?? "?"} bpm (recorded)`]];
+      ["Max HR for zones", `${S.hrmax ?? "?"} bpm <span class="muted">(${hrSrc()})</span>`],
+      ...(((S.hrmaxInfo || {}).history || []).length ? [["Max HR history", S.hrmaxInfo.history.slice().reverse().map(e =>
+        `${e.from === "0000-01-01" ? "before" : `from ${fdate(dayOf(e.from))}`}: ${e.bpm ? `${e.bpm} bpm` : `<span class="muted">none (suggestion)</span>`}`).join("<br>")
+        + `<div class="muted small">each session's zones use the value from its date</div>`]] : [])];
     $("#pderived").innerHTML = `<table><tbody>${rows.map(([k, v]) => `<tr><td class="l">${k}</td><td class="l">${v}</td></tr>`).join("")}</tbody></table>`;
   };
   derived(p);
@@ -1248,7 +1411,8 @@ async function viewProfile() {
     e.preventDefault();
     if (S.readonly) return;
     const body = {};
-    for (const k of ["name", "sex", "birth_year", "height_cm", "weight_kg", "hr_rest", "hr_max", "ftp"]) body[k] = $("#pf-" + k).value.trim();
+    for (const k of ["name", "sex", "birth_year", "height_cm", "weight_kg", "hr_rest", "hr_max", "ftp", "hr_months"]) body[k] = $("#pf-" + k).value.trim();
+    if ($("#pf-hr_all").checked) body.hr_max_all = true;
     const msg = $("#pmsg"); msg.className = "small muted"; msg.textContent = "saving…";
     try {
       const r = await fetch("/api/profile", { method: "POST", headers: { "X-Rollbook": "1", "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -1257,11 +1421,23 @@ async function viewProfile() {
       msg.className = "small up"; msg.textContent = "Saved. Calories and zones updated.";
       S.profile = j;
       S.acts = {};  // recompute calories in every view
-      ({ hrmax: S.hrmax } = await api("hrmax"));
-      derived(j); setProfileBtn(j);
+      await loadHrmax();
+      $("#pf-hr_all").checked = false;
+      derived(j); setProfileBtn(j); sug().catch(() => {});
     } catch (err) { msg.className = "small down"; msg.textContent = "Could not save: " + err.message; }
   };
 }
+/** Max HR for zones from the server: the profile's, else the held peak of the last months. */
+async function loadHrmax() {
+  const r = await api("hrmax").catch(() => ({}));
+  S.hrmaxInfo = r;
+  S.hrmax = r.hrmax || 185;
+}
+/** Where a max HR came from; src given = a session's (as of its date), else today's. */
+const hrSrc = src => { const r = S.hrmaxInfo || {}, x = src === undefined ? r.source : src, mo = r.months || 12;
+  return x === "profile" ? (src === undefined ? "from your profile" : "your profile's on that date")
+    : x === "estimate" ? (src === undefined ? `held 30 s, last ${mo} months` : `held 30 s in the ${mo} months before`)
+    : x === "recorded" ? "highest recorded" : "default"; };
 function setProfileBtn(p) {
   S.profile = p || null;  // weight for W/kg
   const b = $("#profile-btn"); if (!b) return;
@@ -1610,6 +1786,8 @@ async function viewSessions() {
     ["wind_neutral", "wind-neutral", a => f2(a.wind_neutral)], ["asym_pct", "out vs back", a => pct(a.asym_pct)],
     ["laps_n", "laps", a => a.laps_n ? `${a.laps_n} × ${f2(a.lap_km)}` : ""], ["best_lap_s", "best lap", a => a.best_lap_s ? dur(a.best_lap_s) : ""],
     ["temp", "°C", a => f0(a.temp)], ["wind", "wind", a => a.cond && isNum(a.cond.ws) ? `${f0(a.cond.ws)} ${windArrow(a.cond.wd)}` : ""],
+    ...(acts.some(a => a.rain > 0) ? [["rain", "rain mm", a => isNum(a.rain) && a.rain > 0 ? a.rain.toFixed(1) : ""]] : []),
+    ...(acts.some(a => isNum(a.aqi)) ? [["aqi", "AQI", a => f0(a.aqi)]] : []),
     ["adj_neutral", "adjusted", a => f2(a.adj_neutral)], ["kcal", "kcal", a => f0(a.kcal)],
     ["hr_avg", "HR", a => f0(a.hr_avg)], ["ascent_m", "ascent", a => f0(a.ascent_m)], ["route", "route", a => routePill(a.route), "l"],
   ];
@@ -1715,6 +1893,37 @@ function lapWidgets(L, map, hasHr) {
   $("#t-laps").querySelectorAll("tr[data-n]").forEach(tr => tr.onclick = () => select(+tr.dataset.n));
 }
 
+/** A session opened without weather: have the server fetch and store it
+ * (POST /api/weather), poll, and draw the page again once it's there. Once per
+ * session per page load, so one with no data never loops. */
+const WX_TRIED = new Map();  // id -> what the last try said
+async function fetchWeather(a, seq) {
+  // a final note: the value stops reading "…" (still loading)
+  const note = (t, done = true) => { const el = $("#wx-note"); if (el) el.textContent = t; const v = $("#wx-wait .v"); if (v && done) v.textContent = "–"; };
+  if (S.readonly) return;
+  if (WX_TRIED.has(a.id) && WX_TRIED.get(a.id) !== "later") { note(WX_TRIED.get(a.id)); return; }
+  WX_TRIED.set(a.id, "not available");
+  const say = { offline: "not loaded (offline)", busy: "after the import", error: "not available, try later", none: "not available" };
+  try {
+    const r = await fetch("/api/weather", { method: "POST", headers: { "X-Rollbook": "1", "Content-Type": "application/json" }, body: JSON.stringify({ id: a.id }) });
+    let st = (await r.json()).state;
+    for (let i = 0; i < 160 && (st === "queued" || st === "running"); i++) {  // the server gives a run 300 s
+      await new Promise(res => setTimeout(res, 2000));
+      if (seq !== routeSeq) { WX_TRIED.set(a.id, "later"); return; }  // left: may poll again on return
+      st = (await api("weather?id=" + a.id)).state;
+      if (i === 15) note("still fetching…", false);
+    }
+    if (seq !== routeSeq) { WX_TRIED.set(a.id, "later"); return; }
+    if (st === "done") {
+      for (const k of Object.keys(S.acts)) if (k.split("\u0000")[0] === a.type) delete S.acts[k];  // lists carry temp / wind too
+      const y = scrollY;
+      await route();
+      scrollTo(0, y);
+    } else if (st === "queued" || st === "running") { WX_TRIED.set(a.id, "later"); note("still fetching, open it again later"); }  // may try again
+    else { WX_TRIED.set(a.id, say[st] || "not available"); note(WX_TRIED.get(a.id)); }
+  } catch { WX_TRIED.set(a.id, "later"); note("not available, try later"); }  // a network blip: may retry
+}
+
 async function viewSession(id) {
   const app = $("#app");
   app.innerHTML = `<p class="muted">Loading session…</p>`;
@@ -1763,7 +1972,7 @@ async function viewSession(id) {
       ...(isNum(cad) ? [{ k: "Cadence", v: f0(cad), s: `rpm avg${isNum(a.cad_max) ? ` · max ${f0(a.cad_max)}` : ""}` }] : []),
       ...(isNum(W) && a.hr_avg ? [{ k: "Power / HR", v: (W / a.hr_avg).toFixed(2), s: "W per bpm" }] : []),
       { k: "Ascent", v: f0(a.ascent_m) + " m" },
-      ...(a.cond && isNum(a.cond.temp) ? [{ k: "Weather", v: `${f0(a.cond.temp)}°C`, s: `wind ${fwind(a.cond)}${isNum(a.cond.gust) ? ` · gusts ${f0(a.cond.gust)}` : ""}` }] : a.cond && a.cond.pending ? [{ k: "Weather", v: "…", s: "loading" }] : []),
+      ...weatherCards(a.cond, a.weather_missing),
       ...(a.cond && isNum(a.cond.adjusted) ? [{ k: "Conditions-adjusted 10 min", v: f2(a.cond.adjusted), s: "wind and slope removed per leg", hl: 1 }] : []),
       ...(a.cal ? [{ k: "Calories", v: `${f0(a.cal.kcal)} kcal`, s: `${esc(a.cal.source)}${isNum(a.cal.hr_kcal) ? ` · HR ${f0(a.cal.hr_kcal)}` : ""}${a.s_calories ? ` · Strava ${f0(a.s_calories)}` : ""}` }]
         : a.s_calories ? [{ k: "Calories", v: f0(a.s_calories), s: `Strava · <a href="#/profile">add your weight</a>` }] : []),
@@ -1790,7 +1999,7 @@ async function viewSession(id) {
       ${m.route === "out-back" ? `<div class="panel"><h2>Out / back legs</h2><div id="t-legs"></div>
         <div class="note">Wind-neutral averages the two legs' best 10 min. Adjusted first removes each leg's estimated wind and slope effect.</div></div>` : ""}
       ${m.pw ? `<div class="panel"><h2>Power <span class="muted">zones as % of FTP ${f0(ftp)} W (${esc(FT ? FT.note : "none")})</span></h2><div id="p-power"></div></div>` : ""}
-      ${hasHr ? `<div class="panel"><h2>Heart-rate zones <span class="muted">HRmax ${S.hrmax} bpm</span></h2><div id="t-zones"></div></div>` : ""}
+      ${hasHr ? `<div class="panel"><h2>Heart-rate zones <span class="muted">HRmax ${f0(a.hrmax || S.hrmax)} bpm · ${a.hrmax ? hrSrc(a.hrmax_src) : `today's, ${hrSrc()}`} · <a href="#/profile">change</a></span></h2><div id="t-zones"></div></div>` : ""}
       <div class="panel" id="p-segs" hidden></div>
       <div class="panel"><h2>Same route, other sessions</h2><div class="scroll" id="t-same"></div></div>
     </div>`;
@@ -1805,6 +2014,9 @@ async function viewSession(id) {
 
   let selKm = null, selectKm = () => {};
   const map = hasGps ? sessionMap($("#map"), ser, { turnKm: m.route === "out-back" ? m.turn_km : null, gate: L ? L.gate : null, wind: a.cond }) : null;  // indoor: no route panel, the charts take the width
+  if (a.weather_missing) fetchWeather(a, routeSeq);
+  const wxc = $("#wx-card");
+  if (wxc) { wxc.onclick = () => weatherDetails(a); wxc.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); weatherDetails(a); } }; }  // not awaited: the page is usable meanwhile
   if (map) onLeave(() => map.destroy());
   // One selected stretch for the whole page. Everything that highlights the map
   // (km splits, out/back legs, laps, segment rows, brushing the speed chart)
@@ -2070,8 +2282,8 @@ async function viewSession(id) {
       <div class="note">Intensity = weighted power ÷ FTP; load = hours × intensity² × 100 (Coggan's NP, IF and TSS, trademarks of TrainingPeaks). Set your FTP in the <a href="#/profile">profile</a> to override ${FT && FT.src === "app" ? "the one from your training app" : "the estimate"}.</div>`;
   }
   if (hasHr) {
-    const z = zoneSecs(m.hr_hist, S.hrmax), tot = z.reduce((x, y) => x + y, 0) || 1;
-    $("#t-zones").innerHTML = `<table><tbody>` + z.map((s, k) => `<tr><td class="l">${zoneLabel(k, S.hrmax)}</td><td>${dur(s, true)}</td><td>${(s / tot * 100).toFixed(0)}%</td>
+    const hm = a.hrmax || S.hrmax, z = zoneSecs(m.hr_hist, hm), tot = z.reduce((x, y) => x + y, 0) || 1;
+    $("#t-zones").innerHTML = `<table><tbody>` + z.map((s, k) => `<tr><td class="l">${zoneLabel(k, hm)}</td><td>${dur(s, true)}</td><td>${(s / tot * 100).toFixed(0)}%</td>
       <td class="l"><span class="bar" style="width:${(s / tot * 240).toFixed(0)}px;background:${ZONES[k].c}"></span></td></tr>`).join("") + `</tbody></table>`;
   }
   const same = sameRoute(a, m, peers);
@@ -2173,31 +2385,64 @@ function redrawCharts(panel, grow, natural) {
   const f = Math.max(1, Math.min(3.5, (innerHeight - 60 - other) / base));
   hosts.forEach(h => h._redraw(Math.round((h._chartOpt.height || 260) * f)));
 }
+let dlgSeq = 0;
+const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea, [tabindex]:not([tabindex="-1"])';
+/** Tab / Shift+Tab stay inside the enlarged panel (it is a modal dialog). */
+function trapTab(e) {
+  if (e.key !== "Tab" || !expanded) return;
+  const f = [...expanded.panel.querySelectorAll(FOCUSABLE)].filter(x => x.offsetParent !== null);
+  if (!f.length) return;
+  const first = f[0], last = f[f.length - 1];
+  if (e.shiftKey && (document.activeElement === first || !expanded.panel.contains(document.activeElement))) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && (document.activeElement === last || !expanded.panel.contains(document.activeElement))) { e.preventDefault(); first.focus(); }
+}
 function expandPanel(panel) {
   collapsePanel();
+  const ret = document.activeElement;
   const natural = panel.offsetHeight;
   const bd = document.createElement("div"); bd.className = "expand-backdrop"; bd.onclick = collapsePanel;
   document.body.appendChild(bd);
   panel.classList.add("expanded"); document.body.classList.add("has-expanded");
-  { const x = panel.querySelector(":scope > .expand-btn"); x.innerHTML = ICON.close; x.title = "Close"; x.setAttribute("aria-label", "Close"); }
-  expanded = { panel, bd };
+  const h = panel.querySelector("h2");
+  if (h && !h.id) h.id = "dlg-title-" + ++dlgSeq;
+  panel.setAttribute("role", "dialog"); panel.setAttribute("aria-modal", "true");
+  if (h) panel.setAttribute("aria-labelledby", h.id);
+  const x = panel.querySelector(":scope > .expand-btn");
+  x.innerHTML = ICON.close; x.title = "Close"; x.setAttribute("aria-label", "Close");
+  expanded = { panel, bd, ret, natural };
+  document.addEventListener("keydown", trapTab);
   hideTip(); redrawCharts(panel, true, natural);
+  x.focus();
 }
 function collapsePanel() {
   if (!expanded) return;
-  const { panel, bd } = expanded; expanded = null;
+  const { panel, bd, ret } = expanded; expanded = null;
+  document.removeEventListener("keydown", trapTab);
   bd.remove(); panel.classList.remove("expanded"); document.body.classList.remove("has-expanded");
+  for (const k of ["role", "aria-modal", "aria-labelledby"]) panel.removeAttribute(k);
+  if (ret && ret.isConnected && ret.focus) ret.focus();  // back where the user was
   const b = panel.querySelector(":scope > .expand-btn"); if (b) { b.innerHTML = ICON.expand; b.title = "Enlarge"; b.setAttribute("aria-label", "Enlarge"); }
-  hideTip(); redrawCharts(panel, false);
+  hideTip();
+  if (panel._onCollapse) { panel._onCollapse(); return; }  // a details view made just for the modal
+  redrawCharts(panel, false);
 }
 addEventListener("keydown", e => { if (e.key === "Escape" && expanded) { e.preventDefault(); collapsePanel(); } });
-addEventListener("hashchange", () => { if (expanded) { expanded.bd.remove(); document.body.classList.remove("has-expanded"); expanded = null; } });
+/** The page under an enlarged panel is being replaced (navigation, re-render): drop the modal state. */
+function dropExpanded() {
+  if (!expanded) return;
+  document.removeEventListener("keydown", trapTab);
+  expanded.bd.remove(); document.body.classList.remove("has-expanded");
+  if (expanded.panel._onCollapse) expanded.panel._onCollapse();
+  expanded = null;
+}
+addEventListener("hashchange", dropExpanded);
 
 // cleanup for the page being left (maps, replay loops), run before every render
 const Leave = [];
 const onLeave = fn => Leave.push(fn);
 let routeSeq = 0;  // a view checks it after each await: a newer route() means it was left
 async function route() {
+  dropExpanded();  // a re-render (e.g. after weather arrived) must not leave a backdrop behind
   while (Leave.length) { try { Leave.pop()(); } catch (e) { console.error(e); } }
   const seq = ++routeSeq;
   const h = location.hash.replace(/^#\/?/, "");
@@ -2369,8 +2614,7 @@ async function runStravaSync() {
  * With `dest`, navigate there instead of redrawing the current page. */
 async function refreshData(dest) {
   S.acts = {}; S.tracks = {}; S.segs = {}; S.segsP = {}; S.lastImport = null; S.mapView = {};
-  [S.types, { hrmax: S.hrmax }, S.favs] = await Promise.all([api("types"), api("hrmax"), api("favorites"), loadGear(true).catch(() => null)]);
-  S.hrmax = S.hrmax || 185;
+  [S.types, , S.favs] = await Promise.all([api("types"), loadHrmax(), api("favorites"), loadGear(true).catch(() => null)]);
   const sel = $("#type"), cur = S.type;
   sel.innerHTML = S.types.map(t => `<option value="${esc(t.type)}">${esc(t.type)} (${t.n})</option>`).join("");
   sel.value = S.types.some(t => t.type === cur) ? cur : S.types[0]?.type;
@@ -2451,13 +2695,12 @@ if (new URLSearchParams(location.search).has("app"))
 
 async function boot() {
   let st;
-  [S.types, { hrmax: S.hrmax }, S.favs, st] = await Promise.all([api("types"), api("hrmax"), api("favorites"), api("status").catch(() => ({})),
+  [S.types, , S.favs, st] = await Promise.all([api("types"), loadHrmax(), api("favorites"), api("status").catch(() => ({})),
     loadGear().catch(() => null)]);
   // opened from a phone via `rollbook web --lan` (without --lan-write): the
   // server refuses every change, so don't offer any
   S.readonly = !!st.readonly;
   document.body.classList.toggle("readonly", S.readonly);
-  S.hrmax = S.hrmax || 185;
   if (!S.types.some(t => t.type === S.type)) S.type = S.types[0]?.type;
   const sel = $("#type");
   sel.innerHTML = S.types.map(t => `<option value="${esc(t.type)}">${esc(t.type)} (${t.n})</option>`).join("");
@@ -2470,7 +2713,8 @@ async function boot() {
   addEventListener("hashchange", route);
   // compare keeps its replay state: redraw its charts at the new width instead of re-rendering
   let rt; addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(() => {
-    if (/^#\/compare\//.test(location.hash)) redrawCharts($("#app"));
+    if (expanded) redrawCharts(expanded.panel, true, expanded.natural);  // keep the enlarged panel open
+    else if (/^#\/compare\//.test(location.hash)) redrawCharts($("#app"));
     else if (!/^#\/(map|segment)/.test(location.hash)) route();
   }, 200); });
   if (!S.readonly) initImport();

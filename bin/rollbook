@@ -24,7 +24,7 @@ Commands
   rollbook login | whoami              OAuth setup / check           (API only)
 """
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 import argparse
 import hashlib
@@ -1390,6 +1390,7 @@ def cmd_db_build(a):
         os.remove(DB)
     db = sqlite3.connect(DB)
     db.executescript(SCHEMA)
+    db.executescript(_web_mod("weather").DDL)
     added = migrate(db)
     if added and db.execute("SELECT COUNT(*) FROM activities").fetchone()[0]:
         print(f"added {', '.join(added)}; activities imported before stay empty there "
@@ -1460,7 +1461,8 @@ def cmd_db_build(a):
                 (aid, row["datetime"], c["km"], c["km"], c["km"])).fetchone()
             if dup:
                 if row.get("s_distance_m") is not None and not dup[2]:
-                    for tbl, col in (("samples", "activity_id"), ("splits", "activity_id"), ("activities", "id")):
+                    for tbl, col in (("samples", "activity_id"), ("splits", "activity_id"),
+                                     ("weather", "activity_id"), ("activities", "id")):
                         db.execute(f"DELETE FROM {tbl} WHERE {col}=?", (dup[0],))
                     print(f"  {rel}: replaces {dup[1]} (same session, now with export metadata)", file=sys.stderr)
                 else:
@@ -1488,6 +1490,7 @@ def cmd_db_build(a):
                 f"VALUES ({','.join('?' * len(row))})",
                 list(row.values()),
             )
+            db.execute("DELETE FROM weather WHERE activity_id=?", (aid,))  # new track: look it up again
             db.execute("DELETE FROM splits WHERE activity_id=?", (aid,))
             db.executemany(
                 "INSERT INTO splits VALUES (?,?,?,?,?,?,?)",
@@ -1548,7 +1551,13 @@ def cmd_db_build(a):
     if (a.fresh and os.path.exists(os.path.join(imports, "activities.csv"))
             and os.path.abspath(root) != os.path.abspath(imports)):
         print(f"\nre-importing single files from {imports}")
-        cmd_db_build(argparse.Namespace(**{**vars(a), "archive": imports, "fresh": False, "limit": None}))
+        cmd_db_build(argparse.Namespace(**{**vars(a), "archive": imports, "fresh": False, "limit": None,
+                                           "weather": False}))
+    if getattr(a, "weather", True):
+        try:
+            cmd_db_weather(argparse.Namespace(missing=True, offline=False, ids=None))
+        except Exception as e:  # weather is extra: the build itself succeeded
+            print(f"weather: failed ({e}); run `rollbook db weather` later", file=sys.stderr)
 
 
 def cmd_db_query(a):
@@ -1663,6 +1672,55 @@ def cmd_db_enrich(a):
     db.commit()
     db.close()
     print(f"done, {n} activities updated")
+
+
+def _web_mod(name):
+    webdir = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "web")
+    if os.path.abspath(webdir) not in sys.path:
+        sys.path.insert(0, os.path.abspath(webdir))
+    import importlib
+
+    return importlib.import_module(name)
+
+
+def cmd_db_weather(a):
+    """Store Open-Meteo weather + air quality per session hour (web/weather.py).
+    Network unless --offline or ROLLBOOK_OFFLINE=1; then only the cache."""
+    import sqlite3
+
+    if not os.path.exists(DB):
+        die("no database yet. run: rollbook db build <archive.zip>")
+    wx = _web_mod("weather")
+    offline = a.offline or os.environ.get("ROLLBOOK_OFFLINE") == "1"
+    log = lambda s: print(s, flush=True)  # noqa: E731
+    cache = wx.Cache(os.path.join(CACHE, "weather.json"))
+    ids = getattr(a, "ids", None) or None
+    db = sqlite3.connect(DB, timeout=60)  # the dashboard's on-demand fetch and an import may overlap
+    try:
+        # the dashboard's edits (sport changes, hidden / deleted sessions), so both agree on
+        # what is outdoor. If they can't be read, no bulk run: it would send deleted sessions' places
+        ok = True
+        try:
+            E = _web_mod("edits").Edits(HOME)
+            if E.error:
+                raise ValueError("edits.json is unreadable")
+            E.sync(db)
+        except Exception as e:  # noqa: BLE001
+            ok = False
+            print(f"weather: edits not applied ({e})", file=sys.stderr)
+        if not ok and not ids:
+            print("weather: skipped (fix or move edits.json); `db weather --id N` still works", file=sys.stderr)
+            return 3
+        # --id is the dashboard waiting on one session: short waits on a busy Open-Meteo
+        # stop in time to store what it has, before the dashboard gives up on the run
+        fetcher = None if offline else wx.Fetcher(cache, log=log, max_wait=60 if ids else 600,
+                                                  deadline=time.monotonic() + 240 if ids else None)
+        r = wx.fill(db, cache, fetcher, missing=a.missing, log=log, ids=ids)
+    finally:
+        db.close()
+    if ids:  # what the page asked for is what counts
+        return 2 if set(ids) - r["stored"] else 0  # 2: no weather (none to be had, or not fetched)
+    return 3 if r["aborted"] else 0
 
 
 def cmd_web(a):
@@ -1837,7 +1895,9 @@ def main():
     bld.add_argument("--limit", type=int, help="only first N files (smoke test)")
     bld.add_argument("--no-samples", dest="samples", action="store_false",
                      help="skip the per-second samples table")
-    bld.set_defaults(samples=True, fn=cmd_db_build)
+    bld.add_argument("--no-weather", dest="weather", action="store_false",
+                     help="don't run `db weather --missing` afterwards (no network)")
+    bld.set_defaults(samples=True, weather=True, fn=cmd_db_build)
     qq = dsub.add_parser("query")
     qq.add_argument("sql", nargs="+")
     qq.add_argument("--csv", action="store_true")
@@ -1848,6 +1908,13 @@ def main():
     en.add_argument("--missing", action="store_true",
                     help="only activities without best-effort values yet (after an incremental build)")
     en.set_defaults(fn=cmd_db_enrich)
+    wx = dsub.add_parser("weather", help="hourly weather + air quality per outdoor session, from Open-Meteo")
+    wx.add_argument("--missing", action="store_true",
+                    help="only sessions without weather yet, or with provisional (recent) values")
+    wx.add_argument("--offline", action="store_true", help="no network: fill from the cache only")
+    wx.add_argument("--id", dest="ids", type=int, action="append",
+                    help="only this session (repeatable); what the dashboard runs when you open one")
+    wx.set_defaults(fn=lambda a: sys.exit(cmd_db_weather(a) or 0))
 
     w = sub.add_parser("web", help="localhost dashboard on 127.0.0.1")
     w.add_argument("--port", type=int, default=8765)

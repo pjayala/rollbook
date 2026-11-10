@@ -173,6 +173,43 @@ class Parsing(unittest.TestCase):
         self.assertTrue(sw.forget_cookie(home))
         self.assertFalse(sw.forget_cookie(home))
 
+    def test_status_never_opens_the_cookie(self):
+        home = tmpdir(self)
+        sw.save_cookie(home, GOOD)
+        real = open
+
+        def guarded(path, *a, **k):
+            if os.path.abspath(str(path)) == os.path.abspath(sw.cookie_path(home)):
+                raise AssertionError("the dashboard read the cookie")
+            return real(path, *a, **k)
+        with mock.patch("builtins.open", guarded), mock.patch.object(sw, "load_cookie", side_effect=AssertionError):
+            self.assertTrue(sw.status(home)["configured"])
+        open(sw.cookie_path(home), "w").close()
+        self.assertFalse(sw.status(home)["configured"])  # empty file: none
+
+    @unittest.skipUnless(hasattr(os, "symlink") and os.name == "posix", "symlinks")
+    def test_cookie_write_never_follows_a_planted_symlink(self):
+        home = tmpdir(self)
+        target = os.path.join(tmpdir(self), "stolen")
+        for name in ("strava_cookie.part", "strava_cookie.tmp"):
+            os.symlink(target, os.path.join(home, name))
+        sw.save_cookie(home, GOOD)
+        self.assertFalse(os.path.exists(target))
+        self.assertEqual(sw.load_cookie(home), GOOD)
+
+    def test_bad_state_file(self):
+        home = tmpdir(self)
+        for raw in ("[]", "{bad", '{"last_sync": 5, "last_result": [1], "auth_expired": "yes"}',
+                    '{"last_result": {"x": {"deep": 1}, "n": NaN}}'):
+            with open(sw.state_path(home), "w") as f:
+                f.write(raw)
+            st = sw.status(home)
+            self.assertEqual((st["last_sync"], st["auth_expired"]), (None, False), raw)
+            self.assertNotIn("x", st["last_result"] or {})
+        os.remove(sw.state_path(home))
+        os.mkdir(sw.state_path(home))  # not even a file
+        self.assertEqual(sw.status(home)["last_sync"], None)
+
     def test_base_override_only_loopback(self):
         code = ("import sys; sys.path.insert(0, %r); import strava_web; print(strava_web.BASE)"
                 % os.path.dirname(sw.__file__))
@@ -407,7 +444,7 @@ class ImporterJob(unittest.TestCase):
 
     def test_downloads_then_builds(self):
         calls, st = self.go(0, ["  1/1  x", "downloaded 1, no file 0"], [{1}, {1, 2}])
-        self.assertEqual(calls, [["strava", "sync", "--no-build"], ["db", "build", self.imp.imports],
+        self.assertEqual(calls, [["strava", "sync", "--no-build"], ["db", "build", self.imp.imports, "--no-weather"],
                                  ["db", "enrich", "--missing"]])
         self.assertEqual((st["state"], st["fetched"], st["added"], st["source"]), ("done", 1, 1, "strava"))
 

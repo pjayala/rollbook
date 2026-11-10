@@ -48,7 +48,12 @@ def load_object(path, max_bytes=None):
 
 def write_json(path, data, indent=1):
     """Replace `path` with `data` as JSON; raises OSError if both attempts fail."""
-    body = json.dumps(data, indent=indent, allow_nan=False).encode("ascii")
+    write_bytes(path, json.dumps(data, indent=indent, allow_nan=False).encode("ascii"))
+
+
+def write_bytes(path, body):
+    """Replace `path` with `body` atomically: a unique O_EXCL|O_NOFOLLOW temp file
+    (0600, so a planted symlink or a reader never sees it), fsync, replace."""
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
     err = OSError(f"could not write {path}")
     for attempt in (0, 1):
