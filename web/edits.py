@@ -238,7 +238,10 @@ class Edits:
         self.home = home
         self.path = os.path.join(home, "edits.json") if home else None
         self.lock = threading.Lock()
-        self.data = (store.load_object(self.path, MAX_FILE) if self.path else None) or {}
+        loaded = store.load_object(self.path, MAX_FILE) if self.path else None
+        # a file that is there but can't be read: callers that must not guess (db weather) check this
+        self.error = loaded is None and bool(self.path) and os.path.exists(self.path)
+        self.data = loaded or {}
         self.data["sessions"] = _clean_sessions(self.data.get("sessions"))
         self.version = next(_VERSIONS)
         self.follow = Follower(self.lock, lambda: self.data["sessions"], self._put_moved,

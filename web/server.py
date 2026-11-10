@@ -8,7 +8,7 @@ database read-only. Static files live in web/static, JSON under /api.
 This module wires things together and routes requests; the pieces live in
   analysis.py    per-activity metrics (derive) and their cache (Metrics)
   api.py         the JSON API: GET views, POST actions, the stores
-  conditions.py  weather and the wind / slope split
+  conditions.py  weather (from the DB's weather table) and the wind / slope split
   favorites.py   starred sessions and segments
   http_base.py   responses, body reader, Host / origin / --lan token checks
   lanaccess.py   the --lan listener: token, addresses, TLS, banner
@@ -28,7 +28,6 @@ from http.server import ThreadingHTTPServer
 
 import analysis
 import api
-import conditions
 import edits
 import gear
 import geonames
@@ -225,8 +224,10 @@ def start(db_path, cache_path, port=8765, offline=False, lan=None):
     api.FAVS = Favorites(os.path.join(home, "favorites.json"))
     threading.Thread(target=M.warm, daemon=True).start()
     tiles = TileCache(os.path.join(cache, "tiles"), offline)
-    conditions.WX = weather.Weather(os.path.join(cache, "weather.json"), offline)
     api.GEO = geonames.Geonames(os.path.join(cache, "geonames.json"), offline)
+    api.WX_JOB = weather.OnDemand(home, importer.TOOL, offline,
+                                  busy=lambda: imp.job.get("state") == "running")
+    imp.after_import = api.WX_JOB.backfill
     httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(db_path, M, tiles))
     httpd.daemon_threads = True
     httpd.on_bye = None  # set by the app launcher: called with the window token when a page closes

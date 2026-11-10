@@ -246,6 +246,22 @@ class Api(Build):
         self.assertTrue(a["kcal_src"].startswith("MET"))
         self.assertGreater(self.get("/api/activity/1001")["cal"]["kcal"], 300)
 
+    def test_hrmax_suggestion(self):
+        self.M.warm()  # the suggestion reads cached HR histograms only
+        r = self.get("/api/hrmax")
+        e = r["estimate"]
+        self.assertEqual((e["n"], e["months"]), (2, 12))  # the two sample rides have HR
+        self.assertTrue(100 < e["bpm"] <= e["recorded"])
+        if not self.get("/api/profile").get("hr_max"):
+            self.assertEqual((r["hrmax"], r["source"]), (e["bpm"], "estimate"))
+        self.assertEqual(self.get("/api/hrmax?months=3")["months"], 3)
+        self.assertIn("error", self.get("/api/hrmax?months=99"))
+        s = self.get("/api/activity/1001")
+        self.assertEqual(s["hrmax_src"], "estimate" if not self.get("/api/profile").get("hr_max") else "profile")
+        self.assertTrue(100 < s["hrmax"] < 230)
+        lst = {x["id"]: x for x in self.get("/api/activities?type=Inline%20Skate")}
+        self.assertEqual(lst[1001]["hrmax"], s["hrmax"])
+
     def test_favorites(self):
         h = {"X-Rollbook": "1", "Content-Type": "application/json"}
         code, _ = self.post("/api/favorites", json.dumps({"kind": "sessions", "id": "1001", "on": True}).encode(), h)
@@ -398,6 +414,54 @@ class Api(Build):
                 self.assertEqual(fav(good), 200)  # re-starring an existing one is fine
         finally:
             fav(None, on=False)
+
+
+class CorruptCaches(unittest.TestCase):
+    """A bad cache file must never stop the dashboard from starting: it is ignored and rebuilt."""
+
+    def test_server_starts_and_answers(self):
+        import geonames
+        import segments
+        home = tmpdir(self)
+        make_export(os.path.join(home, "export"))
+        r = run(home, "db", "build", "--no-weather", os.path.join(home, "export"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        cache = os.path.join(home, "cache")
+        os.makedirs(cache, exist_ok=True)
+        bad = ["[]", '"x"', "{nope", '{"version": %d, "items": [1, 2]}' % analysis.METRICS_VERSION,
+               '{"version": %d, "items": {"1001": "x", "abc": {}, "1002": {"n": "?"}}}' % analysis.METRICS_VERSION]
+        for raw in bad:
+            for name in ("web_metrics.json", "web_segments.json", "geonames.json"):
+                with open(os.path.join(cache, name), "w") as f:
+                    f.write(raw.replace('"items"', '"types"') if name == "web_segments.json" else raw)
+            M = analysis.Metrics(os.path.join(home, "rollbook.db"), os.path.join(cache, "web_metrics.json"))
+            self.assertTrue(all(isinstance(v, dict) for v in M.data.values()), raw)
+            self.assertFalse(set(M.data) - {"1002"}, raw)
+            segments.SegmentStore(os.path.join(home, "rollbook.db"), M, os.path.join(cache, "web_segments.json"))
+            g = geonames.Geonames(os.path.join(cache, "geonames.json"), offline=True)
+            self.assertEqual(g.cache, {}, raw)
+            httpd, M2, url = server.start(os.path.join(home, "rollbook.db"), os.path.join(cache, "web_metrics.json"), 0, offline=True)
+            threading.Thread(target=httpd.serve_forever, daemon=True).start()
+            try:
+                with urllib.request.urlopen(url + "api/activity/1001", timeout=60) as resp:
+                    self.assertEqual(resp.status, 200, raw)
+                with urllib.request.urlopen(url + "api/segments?type=Inline%20Skate", timeout=60) as resp:
+                    self.assertEqual(resp.status, 200, raw)
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+
+    def test_geonames_bad_answers_keep_the_worker_alive(self):
+        import geonames
+        import io
+        g = geonames.Geonames(os.path.join(tmpdir(self), "g.json"), offline=True)
+        for body in (b"[1]", b'{"address": "x"}', b'{"address": {"road": 5, "city": "' + b"a" * 500 + b'"}}',
+                     b"[" * 100000, b'{"n": NaN}'):
+            with mock.patch("urllib.request.urlopen", lambda *a, **k: io.BytesIO(body)):
+                p = g._fetch(10.0, 20.0)
+            self.assertTrue(p is None or all(v is None or len(v) <= 120 for v in p.values()), body[:30])
+        with mock.patch("urllib.request.urlopen", lambda *a, **k: io.BytesIO(b'{"address": {"road": "Calle", "town": "T"}}')):
+            self.assertEqual(g._fetch(10.0, 20.0), {"road": "Calle", "area": "T", "city": "T"})
 
 
 class Stores(unittest.TestCase):

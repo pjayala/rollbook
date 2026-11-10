@@ -62,7 +62,7 @@ web/favorites.py        starred sessions / segments (data/favorites.json)
 web/gear.py             gear, parts, defaults, per-session choices (data/gear.json) + totals
 web/segments.py         auto-generated segments + effort matching
 web/profile.py          athlete profile (data/profile.json) + per-sport calorie models
-web/weather.py          historical weather per outdoor session (Open-Meteo, cached)
+web/weather.py          `db weather`: Open-Meteo weather + air quality per session hour (cache, fetcher, weather table, reading)
 web/geonames.py         segment place names (Nominatim reverse geocoding, cached)
 web/importer.py         Import dialog backend: uploads + background db build / enrich
 web/edits.py            session edits (data/edits.json) as a TEMP view overlay on the read-only DB
@@ -86,6 +86,7 @@ NOTES.md                analysis findings so far
 | command | what it does |
 |---|---|
 | `db build <archive.zip\|dir>` | import an export; incremental by filename, `--fresh` to rebuild, `--no-samples` to skip per-second rows |
+| `db weather [--missing] [--offline]` | hourly weather + air quality per outdoor session into the `weather` table (network, cached); `db build` runs `--missing` unless `--no-weather` |
 | `db enrich [--windows 5,10,20] [--missing]` | compute `best<N>min_kmh` from the samples table. **Run after every build**; `--missing` only does activities that lack them |
 | `web [--port 8765] [--no-open] [--offline]` | localhost dashboard: progress, calendar, circuits, session list, map + heatmap, segments + leaderboards, per-session map/splits/laps/segments/HR zones, race predictor |
 | `web --lan [--lan-write] [--lan-port 8766] [--lan-http] [--new-token] [--new-cert] [--qr auto\|always\|never]` | also serve it to a phone on the network: HTTPS (self-signed), token link / QR, read-only unless `--lan-write` |
@@ -175,12 +176,15 @@ you pay a 310 MB re-extract.
 * Columns added later (`MIGRATIONS` in `bin/rollbook`) are `ALTER TABLE`d into
   an older DB by `db build`; rows imported before stay NULL until
   `db build --fresh`. Code reading them must cope with the column missing
-  (`server.has_col`).
+  (`analysis.has_col`).
 
 `splits` — per kilometre: `moving_s`, `pause_s`, `kmh`, `hr`.
 
 `samples` — per second: `lat`, `lon`, `ele`, `hr`, `cad`, `dist_m`, `watts`
 (NULL = not recorded, 0 = a real 0 W). 4.1M rows, indexed on `(activity_id, t)`.
+
+`weather` — per outdoor session and UTC hour, Open-Meteo model values
+(see Weather / conditions); `v_weather` averages them per session.
 
 `v_activities` — convenience view with pre-formatted km / moving / kmh /
 `kmh_per_bpm`.
@@ -295,11 +299,69 @@ changing `derive()`.
   weight, resting/max HR; first prefilled from the export's `profile.csv`.
   A profile max HR overrides the recorded one for zones. BMR is
   Mifflin–St Jeor.
-* **Weather / conditions** (`web/weather.py`, `web/conditions.py`):
-  Open-Meteo hourly temperature, 10 m wind and gusts per 0.1° cell and UTC
-  day (archive API, forecast API `past_days` for the last week), cached in
-  `data/cache/weather.json`; never for indoor/Virtual sessions. For
-  out-and-backs each leg gets its tailwind component (wind at the leg's
+* **Weather / conditions** (`web/weather.py`, `web/conditions.py`): stored in
+  the DB by `db weather` (the last step of a CLI `db build` / `strava sync`
+  unless `--no-weather`; the dashboard Import builds with `--no-weather` and
+  then runs `db weather --missing` in the background via `OnDemand.backfill`,
+  so new sessions never wait on Open-Meteo). `web --offline` or
+  `ROLLBOOK_OFFLINE=1` = cache only (tests set the latter). `db weather`
+  installs the edits overlay, so edited sports / hidden sessions count like on
+  the dashboard; exit 2 when a `--id` got no rows, 3 when the run was cut
+  short. Table `weather`:
+  one row per outdoor session (has GPS, not Virtual / `NO_WEATHER`) and UTC
+  hour from the hour at/before the start to the one at/after the end (≤ 48),
+  each at the GPS fix nearest that hour (0.1° cell): temp, feels, rh, dew,
+  precip / rain / snow (preceding hour), WMO code, cloud, pmsl, psurf, ws,
+  wd (from), gust, and air quality pm25, pm10, o3, European aqi (CAMS, from
+  2013, else NULL). No coordinates. `v_weather` = per-session averages.
+  Sources per cell and UTC day: archive API (ERA5 / IFS reanalysis; hours it
+  lacks in the last 7 days from the forecast API's `past_days`) and the
+  air-quality API. Raw days are cached in `data/cache/weather.json`
+  (`{"v": 2, "wx"|"aq": {cell: {date: {"at", "h"}}}}`; any other content,
+  e.g. the old v1, is dropped), so `db build --fresh` refetches nothing. A
+  day fetched within 7 days of itself is provisional: refetched once a day
+  until it settles; its rows carry `final = 0` (also when an hour is
+  missing) and `--missing` redoes them. A day Open-Meteo had nothing for (or
+  answered 4xx / 5xx / garbage) is cached empty: asked again daily while
+  recent, else weekly, and given up on 60 days after the day (so a session
+  whose gaps are for good becomes `final`); values outside a plausible
+  range per column (`BOUNDS`) are stored as NULL; if `edits.json` can't be
+  read, bulk runs are skipped (exit 3) so deleted sessions never leak. A
+  failed or partial answer never blanks a cached day
+  (hours merge, a failure only sets `tried`). `--id` runs stop at a 240 s
+  budget and store what they have; deleted sessions are only looked up by
+  `--id` (their own page), never in bulk; the dashboard's queued `--id`
+  runs go before a backfill. Requests: needed days merged into ranges (≤ 7-day
+  gaps, ≤ 62 days), newest first, 1 s apart; 429 / 5xx wait (Retry-After,
+  ≥ 30 s, ≤ 60 s for `--id`) and retry 3×; a 5xx range is then skipped; 3
+  network errors in a row, a persistent 429 or 5 failed ranges in a row end
+  the run (cache saved, the next run continues). Answers > 8 MiB or not
+  plain JSON are skipped; cache entries of the wrong shape are dropped on
+  load. A first backfill of ~1900 sessions is
+  ~530 requests, server latency 0.5–30 s each. `db build` deletes a
+  re-imported session's rows. The dashboard (`weather.load` → `summary` /
+  `at`: linear between hours, wind direction as a vector, precipitation from
+  the covering hour) and MCP (`weather` in `activity`) only read the table.
+  Session page: one Weather card; clicking it opens `weatherDetails()` (an
+  enlarged panel built for the modal, removed on close via `_onCollapse`)
+  from `weather_hours` in `api_activity`: stats, charts on an hour axis with
+  the session as the selection band, wind arrows per hour, hourly table.
+  Opening a session with no rows (`weather_missing` in `api_activity`: has
+  GPS, outdoor) makes the page `POST /api/weather {id}`: `weather.OnDemand`
+  runs `rollbook db weather --id <id>…` in a subprocess (the server's DB is
+  read-only), one run at a time with later ids batched, each id at most once
+  per 10 min; refused with `--offline` and while an import runs (it fills
+  them anyway); never from a read-only `--lan` phone. The POST answers
+  `none` without a process for indoor / no-GPS sessions and `done` when rows
+  exist. The enlarged view is a modal dialog (`role=dialog`, focus on close,
+  Tab trapped, focus returns to what opened it). MCP reads `weather.psurf`
+  as NULL and drops it from `activity` unless `--allow-gps` (surface vs
+  sea-level pressure gives the area's altitude). The page polls
+  `GET /api/weather?id=` and redraws once on `done` (once per page load).
+  `fill()` commits before fetching (no write lock held during the network
+  part), `db weather` waits up to 60 s for the lock, and `Cache.save()`
+  merges with the file on disk, so an import and an on-demand run can overlap.
+  For out-and-backs each leg gets its tailwind component (wind at the leg's
   mid-time along its heading) and its grade (height gain to the turnaround
   as `((turn−start) − (end−turn))/2`, which cancels barometric drift). Slope
   effect is physics at constant power (skate 75 kg, Crr 0.008, CdA 0.35;
@@ -325,7 +387,26 @@ changing `derive()`.
   affects.
 * HR is held for 30 s between readings: GT 6 Pro FIT files put HR on its own
   sparse records, so most samples have none.
-* HR zones are % of HRmax (max `hr_max` over the last 365 days): 75/84/90/95%.
+* HR zones are % of HRmax: 75/84/90/95%, **per session as of its date**
+  (`profile.HrmaxAt`, `hrmax` / `hrmax_src` in `api_activities` /
+  `api_activity`, MCP `hr_zones`): the profile's max HR in effect that day
+  (`hr_max_history`: `Profile.set` dates every change, from that day on; a
+  value saved before the history existed applies to every earlier date,
+  `from: 0000-01-01`; a profile with no history applies `hr_max` everywhere),
+  else the **held peak**: the highest bpm a session spent ≥ 30 s at or above
+  (its `hr_hist`), best over the `hr_months` (default 12) up to that date,
+  the session itself included; else the recorded peak in that window. The
+  monthly zone chart labels zones in % since each session has its own max.
+  "For all past sessions too" (`hr_max_all`) replaces the history with one
+  `from: 0000-01-01` entry. Histograms come from the metrics cache only
+  (`get_many(compute=False)`), so these never derive() per request; a cold
+  cache falls back to the recorded peak until `warm()` is done.
+  `/api/hrmax` is today's value (profile, else the held peak of the
+  `hr_months` before the newest HR session) plus the suggestion. The raw
+  `hr_max` is often a sensor spike (173 recorded vs 157 held for 10 s on one
+  skate). The Profile page suggests it with the sessions behind it, the
+  Tanaka age formula as a reference and a "Use" button; MCP uses the same
+  choice (cached histograms only).
 * `Virtual Ride` is tagged `virtual` and never gets wind metrics or a map track.
 * **Maps** (`web/static/map.js`) are a small canvas slippy map, no library.
   Tiles are OSM raster, fetched by the server through `/tiles/osm/z/x/y.png`
@@ -399,8 +480,8 @@ changing `derive()`.
   the headline gap. Starts > 150 m apart: auto-aligned at the first shared
   segment's start (`alignAt`); circuits offer the lap gate. Different virtual
   routes get no gap or splits (simulated speed), best power instead. The
-  replay map is fitted once to both tracks and never pans or zooms (no new
-  tiles); its rAF loop stops on leaving, on a hidden tab and on navigation.
+  replay map is fitted to both tracks and never pans or zooms by itself; it
+  re-fits only when its size changes (enlarge / close / window resize); its rAF loop stops on leaving, on a hidden tab and on navigation.
   GET only, so it works read-only over `--lan`. Pure helpers are tested under
   node in `tests/test_frontend_compare.py`.
 * **Page cleanup**: `route()` runs every `onLeave()` callback first (maps,
@@ -606,7 +687,9 @@ of the website, which Strava's terms don't allow; it is kept polite.
   server process never reads the cookie, then the normal import build; the
   page polls `GET /api/import` (`source: "strava"`, `fetched`, `auth`).
   `GET /api/strava` = configured / last sync / auth_expired, never the
-  cookie. The MCP server has no sync tool.
+  cookie: `has_cookie` only stats the file, the server never opens it.
+  `save_cookie` writes via `store.write_bytes` (unique O_EXCL|O_NOFOLLOW
+  temp, 0600). The MCP server has no sync tool.
 * Endpoints are undocumented: all response parsing is `parse_list()` /
   `sniff_ext()`, tested against a local fake in `tests/test_strava.py`.
 
@@ -661,14 +744,164 @@ Accuracy achieved: recomputed distance is within 1% of Strava's own figure for
 **96%** of activities. The residual outliers are 3 genuinely bad tracks (a pool
 swim, two 30-second-sampling skates) — find them via `km_diff_pct`.
 
+## Adding a feature
+
+* **Where it goes.** Parsing, import, CLI subcommands: `bin/rollbook`. What the
+  dashboard or MCP reads: a module in `web/`, one concern per file
+  (`weather.py`, `gear.py`). Routing only in `server.py`; JSON views in
+  `api.GET`, actions as `Post(fn, limit, what)` in `api.POST`. UI in
+  `web/static/` (vanilla JS, no CDN, no inline script). SPDX header on new
+  files.
+* **One predicate, one place.** A rule like "does session X get Y" (outdoor,
+  visible, eligible) is one function in the owning module, called by the CLI,
+  `api.py` and `mcp_server.py` alike; never re-spelt as SQL in one place and
+  Python in another.
+* **CLI and dashboard agree.** CLI work on sessions installs the edits overlay
+  first (`edits.Edits(HOME).sync(db)`), so edited sports and hidden / deleted
+  sessions count the same. An unreadable store (`Edits.error`) = refuse the
+  bulk run, not "no edits".
+* **Schema.** New columns go into `MIGRATIONS`; readers cope with the column
+  missing (`analysis.has_col`) and NULL on older rows. New tables: `CREATE
+  TABLE IF NOT EXISTS` where they are written; readers catch
+  `sqlite3.OperationalError` on an older DB.
+* **Derived metrics.** Changing `derive()` or what it calls: bump
+  `METRICS_VERSION`. Request handlers read the metrics cache
+  (`get_many(compute=False)` when many sessions are involved); never
+  `derive()` or scan `samples` for many sessions per request.
+* **Caches** (`data/cache/`) are versioned (`{"v": N, ...}`, other versions
+  dropped) and shape-checked on load. A failed or partial fetch never
+  overwrites good cached data (merge, note `tried`). `save()` merges with the
+  file on disk when two processes may write.
+* **Stores** (`data/*.json`, user state): `store.write_json` /
+  `store.load_object` only; memory changes after the write succeeds; a file
+  that fails validation is never overwritten.
+* **Long work never blocks a user flow.** Network or bulk work runs in a
+  subprocess / thread and the page polls; the server's DB stays read-only.
+  An import is done before its weather starts.
+* **State machines terminate.** Every retry / provisional / pending state has
+  an end (attempt cap, back-off, give-up date, wall-clock budget). Write down
+  what turns "provisional" into "final" when the data never arrives.
+* **Exit codes.** A command exits non-zero when it didn't do what it was asked
+  (nothing stored, cut short, refused); document each code.
+* **Dates.** Stored instants are UTC ISO with offset; naive = UTC. Day math
+  with `datetime` / `calendar`, never string surgery (no 31 Feb); catch
+  `OverflowError` on odd inputs. "Today" is an injectable parameter. In JS,
+  `YYYY-MM-DD` is parsed as a local date (`dayOf`), not `new Date(s)` (UTC).
+* **Frontend.** Pure logic (math, formatting, HTML builders) as top-level
+  functions testable under node. A modal, overlay or rAF loop registers its
+  cleanup (`onLeave`, `_onCollapse`, `dropExpanded`): a re-render, resize or
+  route change leaves no stale DOM, listener or focus trap. An awaited view
+  checks `routeSeq` before drawing. Enlarged panels are dialogs (focus in,
+  Tab trapped, focus back). Write controls hidden when `readonly`.
+* **Look.** Colour on data only (`PAL`); main series orange, context grey,
+  rose only for HR. Check new views at 1440, 900 and 390 px on the demo.
+* **Docs.** User-visible behaviour: an AGENTS.md note + a `CHANGELOG.md` entry.
+
+## Code standards
+
+* Python stdlib only (pywebview optional behind an import guard). Must run on
+  **3.9**: no `match`, no `X | Y` in evaluated annotations, no `zip(strict=)`,
+  `itertools.pairwise`, `datetime.UTC`, `tomllib`; `fromisoformat` takes no
+  `Z` before 3.11.
+* Cross-platform: `os.path`, `encoding="utf-8"` on text opens, `newline=""`
+  for CSV, no POSIX-only calls without a Windows path.
+* Comments say *why* (the data quirk, the measured number), not what.
+* Untrusted input (exports, uploads, upstream answers, JSON files) is
+  size-capped and type-checked; bad entries are dropped, never a crash.
+
+## Security rules for new code
+
+Threat model: one local user, sensitive data (GPS tracks show home; tool
+output goes to a model provider). Attackers: other web pages (CSRF, DNS
+rebinding to 127.0.0.1), LAN devices (`--lan`), hostile or compromised
+upstreams (Strava, Open-Meteo, Nominatim, OSM tiles), tampered files in
+`data/`. Fail closed; never crash on bad input.
+
+* **Endpoints** only via `api.GET` / `api.POST`, never a branch in `do_GET` /
+  `do_POST`: routing applies Host, `_lan_gate`, same origin, `X-Rollbook: 1`.
+  JSON bodies through `_read_json` with the smallest limit that works (64 KiB,
+  small actions 4 KiB). Writes, process spawns and store changes are POST
+  only. Read-only is the `--lan` default: new write controls hide under
+  `body.readonly` and the server refuses them anyway. Client ids:
+  `ACTIVITY_ID` / `edits.ID_RE` `fullmatch`, `int()`, looked up before use;
+  names in paths only through `safe_name`. Errors name what failed, not paths
+  or tracebacks.
+* **Frontend**: every string from the API, DB, `localStorage` or upstream
+  goes through `esc()`, attributes included; numbers through `isNum` / `f0` /
+  `f1` / `f2`, never raw `${v}`. No inline scripts, `on*=` attributes, `eval`
+  or third-party URLs; the CSP (`http_base.CSP`) stays as it is.
+* **Files in `data/`**: `store.write_json` (atomic, 0600, O_EXCL|O_NOFOLLOW)
+  and `store.load_object(path, MAX)` with a size cap. Every loaded file,
+  caches included, is untrusted: check each field's type, drop bad entries,
+  fall back to empty; a bad file never crashes startup, a worker or a request.
+* **Network**: only the hosts above. Every fetch honours `--offline` /
+  `ROLLBOOK_OFFLINE`, has a timeout and the identifying User-Agent, caps the
+  read (`r.read(MAX + 1)`), parses with `store.loads` and checks the shape, is
+  rate-limited and cached. Coordinates rounded to the coarsest grid that
+  works; never deleted / hidden sessions in bulk; if the edits overlay can't
+  load, skip the bulk run.
+* **Subprocesses**: `[sys.executable, TOOL, ...]` argv lists, never
+  `shell=True`; arguments validated ints or constants; one run per kind,
+  later requests batched and rate-limited; a `timeout`; a dead run leaves a
+  clean state. Never with `--offline`, during an import doing the same work,
+  or from a read-only LAN client.
+* **SQL**: `?` placeholders for every value; identifiers only from constants
+  or `sqlite_master`. Server and MCP open the DB `mode=ro`; writes only in
+  `bin/rollbook` (sub)processes. Sessions read through the `activities`
+  overlay (`activities_all` only where hidden rows are meant to show).
+* **MCP**: no coordinates and nothing a place can be derived from: add
+  location columns to `GPS_COLS` (e.g. `weather.psurf`) and derived fields to
+  `DERIVED_DROP`. A new tool / table / field gets a privacy review ("what
+  could a model provider work out from it?"). `query` stays under the
+  authorizer. Output via `_r` / `clean` and `json.dumps(allow_nan=False)`;
+  request ids that can't be echoed are rejected. MCP never writes files.
+* **Secrets**: the Strava cookie lives in `data/strava_cookie` (0600) and the
+  `strava` subprocess only: never in the server, logs, job logs, API answers,
+  fixtures or chats. LAN token and TLS key 0600, compared with
+  `hmac.compare_digest`.
+* **Numbers** from a client, file or upstream: finite and within per-field
+  bounds (`weather.BOUNDS`, `profile.FIELDS`) before arithmetic, `datetime`,
+  `range` or allocation. Reject NaN, ±inf, 1e999, bools-as-ints, huge ints.
+
 ## Tests
 
-`python3 -m unittest discover -s tests -t tests` (stdlib only, ~10 s, no
-network; `tests/helpers.py` points `ROLLBOOK_HOME` at a temp dir). CI:
+`python3 -m unittest discover -s tests -t tests` (stdlib only, ~40 s, no
+network; `tests/helpers.py` points `ROLLBOOK_HOME` at a temp dir and sets
+`ROLLBOOK_OFFLINE=1`; import it first). CI:
 `.github/workflows/tests.yml` on every push / PR, ubuntu/macos/windows ×
 Python 3.9 and 3.13, plus `node --check` on the JS. `tests/helpers.py` also
 writes synthetic FIT files (either endianness, optional sport/session
 messages), so add a test there when a new device quirk turns up.
+
+* Never touch `./data` or the network: network code takes injectable
+  `urlopen` / `sleep` / `today` / clock, and tests also make
+  `socket.connect` fail (`test_weather.Base`). Temp dirs via
+  `helpers.tmpdir(self)`; fixed dates, no `now()` in asserts, no real sleeps.
+* End to end: run `bin/rollbook` against a temp home (`test_end_to_end.run`)
+  and assert the exit code as well as the output.
+* Pure JS helpers run under node (`tests/test_frontend_*.py`, `skipUnless`
+  node); every HTML builder gets an `EVIL` string.
+* For every new cache / store / state: missing, corrupt, old-version and
+  wrong-shape file; a failure after success (good data survives); the
+  terminal state is reached (retry → give up → final); CLI, API and MCP agree
+  on an edited session (sport changed, hidden, deleted).
+* For every POST: the `api.POST` loops cover 403 (no header, foreign Origin,
+  LAN read-only); add 400 on a bad body and the 404 / 409 / 503 paths.
+* Assert intended behaviour: work expected values out by hand or by a second
+  method, never copy them from a run of the code under test (a test that
+  pins `2019-02-31` bakes a bug in).
+
+Before a PR:
+
+- [ ] tests pass; new code paths had a failing test first; `node --check web/static/*.js`
+- [ ] Python 3.9-safe, Windows-safe paths / encodings; stdlib only; SPDX headers
+- [ ] `METRICS_VERSION` bumped if `derive()` changed; `MIGRATIONS` + `has_col` for new columns
+- [ ] network behind `--offline` / `ROLLBOOK_OFFLINE`, capped, cached, never blocking a request
+- [ ] every retry / pending state ends; non-zero exit when nothing was done
+- [ ] shared predicates used by CLI, API and MCP; edits overlay applied
+- [ ] a failed fetch / save leaves caches and stores as they were
+- [ ] `esc()` on every string; modal / loop cleanup on re-render and route change
+- [ ] new MCP fields privacy-reviewed; AGENTS.md + CHANGELOG.md updated; screenshots only from `tools/demo.py`
 
 Screenshots: `python3 tools/screenshots.py` (needs Chrome) builds the demo
 athlete in `$TMPDIR/rollbook-demo` if missing (`tools/demo.py`, ~20 s,

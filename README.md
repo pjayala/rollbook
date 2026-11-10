@@ -48,8 +48,10 @@ GPS: runs, rides, walks, skates, plus indoor rides from ROUVY or MyWhoosh.
   each direction separately (so wind shows up), and named after the streets
   and areas they cross using OpenStreetMap. Each segment has a leaderboard and
   a speed trend, and links to the opposite direction.
-- **Weather and conditions:** temperature, wind and gusts for every outdoor
-  session. On out-and-back routes, the gap between the two legs is split into
+- **Weather and conditions:** for every outdoor session, hour by hour and
+  stored in the database: temperature and feels-like, humidity, dew point,
+  rain and snow, cloud, sky (weather code), pressure, wind and gusts, plus air
+  quality (PM2.5, PM10, ozone, European AQI, from 2013). On out-and-back routes, the gap between the two legs is split into
   wind, slope and "other", giving a conditions-adjusted speed. Plus speed vs
   temperature.
 - **Power** for indoor rides (smart trainer, from the original files):
@@ -204,6 +206,7 @@ mislabel it; HUAWEI saves skating as "cycling".
 | `rollbook web --lan [--lan-write]` | also serve it to your phone over the home network, see below |
 | `rollbook db build <export.zip\|dir> [--fresh]` | import an export (incremental) |
 | `rollbook db enrich [--missing]` | best 5/10/20-min efforts |
+| `rollbook db weather [--missing] [--offline]` | hourly weather + air quality per outdoor session (`db build` runs it) |
 | `rollbook db query "SQL" [--csv]` | read-only SQL against your data |
 | `rollbook analyze <file>` | one activity: pauses, splits, out/back legs, grade |
 | `rollbook compare <a> <b> …` | side-by-side summary |
@@ -358,8 +361,9 @@ can win it.
   - **map tiles** from OpenStreetMap
   - **reverse geocoding** of segment points (OpenStreetMap Nominatim, at most
     one request per second) to name segments
-  - **historical weather** for outdoor sessions (Open-Meteo), per ~10 km
-    area and day
+  - **historical weather and air quality** for outdoor sessions
+    (Open-Meteo), per ~10 km area and day, fetched by `db build` / Import
+    (`db build --no-weather` or `web --offline` to skip)
 
   These requests reveal to those services the areas and dates involved. Start
   with `--offline` to use only what's cached.

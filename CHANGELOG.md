@@ -1,5 +1,66 @@
 # Changelog
 
+## 0.9.0 (2026-11-10)
+
+### Hardening
+
+- The dashboard no longer reads your Strava cookie to show whether one is
+  stored (it only checks the file is there), and the cookie is written
+  without a fixed temp file a planted link could redirect.
+- A damaged metrics, segments or place-name cache no longer stops
+  `rollbook web` from starting: it is ignored and rebuilt. An odd answer from
+  OpenStreetMap's place-name service no longer stops segment naming until a
+  restart; that cache is now private (0600).
+
+### Max heart rate from your sessions
+
+- The Profile page suggests a max HR: the highest heart rate you held for
+  30 s in any session of the last 3 to 36 months (you pick), with the
+  sessions it came from, the age formula for reference and a one-click "Use".
+  A recorded peak that lasted only seconds (a sensor spike) no longer sets
+  your zones.
+- Each session's heart-rate zones use the max HR that applied on its date:
+  changing it in the profile counts from that day on (the profile keeps a
+  dated history), so older sessions don't move; tick "for all past sessions
+  too" to correct it everywhere. Where no max HR was set, a
+  session uses the held 30 s peak of the months up to its date, so zones
+  follow your fitness. The headings say which max HR a session used.
+
+### Weather in the database
+
+- Weather is now **stored in the database** at import, one row per outdoor
+  session and hour (`weather` table, `v_weather` per session), instead of
+  being fetched by the dashboard while you browse. New: feels-like
+  temperature, humidity, dew point, rain / snow, cloud cover, sky (weather
+  code), pressure, and **air quality** (PM2.5, PM10, ozone, European AQI,
+  from 2013). Each hour uses the position you were at then.
+- `rollbook db weather [--missing] [--offline] [--id N]`; `db build` and
+  `strava sync` run it at the end (`--no-weather` / `web --offline` skip the
+  network). The dashboard Import fetches it in the background once the
+  import is done, so new sessions show right away. Recent days are
+  provisional and are refreshed by later imports until the reanalysis
+  settles; days Open-Meteo had nothing for are asked again weekly.
+- Enlarged panels are proper dialogs (focus, Tab, Esc), keep their close
+  button in reach while scrolling, and survive a window resize.
+- MCP: surface pressure is withheld unless `--allow-gps` (with sea-level
+  pressure it gives your area's altitude).
+- Opening a session that has no weather yet (e.g. right after upgrading)
+  fetches and stores it in the background and redraws the page; `db weather
+  --id <id>` does the same from a terminal. Not with `--offline`.
+- Session page: one Weather card (temperature, sky, wind, rain, AQI); click
+  it for the details: summary, hour-by-hour charts of temperature / feels /
+  dew point, wind and gusts with direction, rain and cloud, humidity and
+  pressure, air quality, with the session shaded, and an hourly table. Rain
+  and AQI columns in the session list. MCP: `weather` in
+  `activity`, and the tables in `query`.
+- Fixed: a malformed Open-Meteo answer stopped all weather lookups until a
+  restart; a session with a missing hour showed "loading" forever; last
+  week's values were never replaced by the final reanalysis.
+- Fixed: enlarging the compare page's Replay (or any sticky panel) only
+  dimmed the page; it now fills the window, with both tracks fitted to it.
+- The weather cache moves to a new format; the first `db weather` fetches
+  again (~530 requests for ~1900 sessions, a few minutes to half an hour).
+
 ## 0.8.0 (2026-11-02)
 
 ### Gear in compare and MCP (#10, part 3)

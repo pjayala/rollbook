@@ -16,6 +16,8 @@ import sqlite3
 import statistics
 import threading
 
+import store
+
 METRICS_VERSION = 16
 THR = 0.5  # m/s, pause threshold; must match bin/rollbook
 WINDOWS = (30, 45, 60)  # minutes; 5/10/20 already live in the DB via `db enrich`
@@ -475,6 +477,9 @@ def normalized_power(g):
     return (sum(q) / len(q)) ** 0.25
 
 
+CACHE_MAX = 512 << 20  # web_metrics.json; ~10 MB for 1900 sessions
+
+
 def derive(db, aid):
     rows, t, d = load_track(db, aid)
     out: dict = {"n": len(rows)}
@@ -584,13 +589,12 @@ class Metrics:
         self.data = {}
         self.dirty = 0
         self.progress = {"done": 0, "total": 0, "running": False}
-        try:
-            with open(self.path) as f:
-                blob = json.load(f)
-            if blob.get("version") == METRICS_VERSION:
-                self.data = blob["items"]
-        except (OSError, ValueError, KeyError):
-            pass
+        blob = store.load_object(self.path, CACHE_MAX)  # None: missing, corrupt, too big, not an object
+        items = blob.get("items") if blob and blob.get("version") == METRICS_VERSION else None
+        if isinstance(items, dict):
+            # an entry of the wrong shape is dropped (derive() redoes it); one with a bad `n` reads as stale
+            self.data = {k: v for k, v in items.items()
+                         if isinstance(k, str) and k.isdigit() and isinstance(v, dict)}
 
     def save(self):
         with self.lock:
@@ -603,12 +607,15 @@ class Metrics:
             os.replace(tmp, self.path)
             self.dirty = 0
 
-    def get_many(self, db, ids_with_n):
+    def get_many(self, db, ids_with_n, compute=True):
+        """compute=False: cached, current entries only (warm() fills the rest)."""
         res = {}
         for aid, n in ids_with_n:
             key = str(aid)
             m = self.data.get(key)
             if m is None or m.get("n") != (n or 0):
+                if not compute:
+                    continue
                 m = derive(db, aid)
                 m["n"] = n or 0
                 with self.lock:

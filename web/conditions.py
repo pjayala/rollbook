@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Pedro Ayala. Rollbook is free software, see LICENSE.
-"""Weather and, for out-and-backs, the wind / slope split of the leg speeds."""
+"""Weather and, for out-and-backs, the wind / slope split of the leg speeds.
+
+Weather comes from the DB's `weather` table (filled by `rollbook db weather`),
+passed in as weather.load()'s hours for the session."""
 
 import math
-from datetime import datetime, timedelta, timezone
 
-WX = None  # weather.Weather, set by server.start()
+import weather
 
 # Physics per sport for the slope term: speed change at constant power on a
 # small grade, dv/v = -m g s / (Crr m g + 1.5 rho CdA v^2). Running uses an
@@ -14,7 +16,7 @@ WX = None  # weather.Weather, set by server.start()
 # feels by a riverbank, so physics would overstate it ~5x).
 PHYS = {"Inline Skate": (75, 0.008, 0.35), "Ride": (85, 0.005, 0.32), "Run": None, "Walk": None}
 WIND_K_DEFAULT = {"Inline Skate": 0.4, "Ride": 0.5, "Run": 0.15, "Walk": 0.05}
-NO_WEATHER = ("Virtual Ride", "Virtual Run", "Swim", "Workout", "Weight Training", "Yoga")
+NO_WEATHER = weather.NO_WEATHER
 FITS = {}  # type -> wind coefficient, %/(km/h) per leg
 
 
@@ -34,27 +36,26 @@ def tailwind(w, brg):
     return -w["ws"] * math.cos(math.radians(w["wd"] - brg))
 
 
-def conditions(r, m):
-    """Weather and, for out-and-backs, the wind / slope split of the leg speeds."""
+def conditions(r, m, hours=None):
+    """Weather (weather.summary) and, for out-and-backs, the wind / slope split
+    of the leg speeds. None indoors or when the session has no weather rows."""
     typ = r.get("type") or ""
-    if typ in NO_WEATHER or typ.startswith("Virtual") or not m.get("ll0") or m.get("route") in ("indoor", "virtual"):
+    if not weather.eligible(typ) or not m.get("ll0") or m.get("route") in ("indoor", "virtual") or not hours:
         return None
-    try:
-        t0 = datetime.fromisoformat(r["datetime"])
-    except (TypeError, ValueError):
+    t0 = weather.start_ts(r.get("datetime"))
+    if t0 is None:
         return None
-    if t0.tzinfo is None:
-        t0 = t0.replace(tzinfo=timezone.utc)
-    lat, lon = m["ll0"]
-    mid = WX.at(lat, lon, t0 + timedelta(seconds=(m.get("dur_s") or 0) / 2))
-    if mid is None:
-        return {"pending": True}
-    c = {k: mid[k] for k in ("temp", "ws", "wd", "gust")}
+    dur = m.get("dur_s") or r.get("elapsed_s") or 0
+    c = weather.summary(hours, t0, dur)
+    if c is None or c.get("ws") is None or c.get("wd") is None:  # no wind (or no direction): no legs
+        return c
     if m.get("route") != "out-back" or not m.get("out_b10") or not m.get("back_b10"):
         return c
-    tt = m.get("t_turn") or (m.get("dur_s") or 0) / 2
-    wo = WX.at(lat, lon, t0 + timedelta(seconds=tt / 2)) or mid
-    wb = WX.at(lat, lon, t0 + timedelta(seconds=(tt + (m.get("dur_s") or tt * 2)) / 2)) or mid
+    mid = {"ws": c["ws"], "wd": c["wd"]}
+    tt = m.get("t_turn") or dur / 2
+    wo = weather.at(hours, t0 + tt / 2) or mid
+    wb = weather.at(hours, t0 + (tt + (dur or tt * 2)) / 2) or mid
+    wo, wb = (w if w.get("ws") is not None and w.get("wd") is not None else mid for w in (wo, wb))
     k = FITS.get(typ, WIND_K_DEFAULT.get(typ, 0.3))
     legs = {}
     for leg, w, brg in (("out", wo, m["bearing_out"]), ("back", wb, m["bearing_out"] + 180)):
@@ -88,4 +89,4 @@ def fit_wind(typ, rows, ms):
     if sxx <= 0:
         return None
     k = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sxx
-    return max(0.0, min(2.0, k))
+    return max(0.0, min(2.0, k)) if math.isfinite(k) else None

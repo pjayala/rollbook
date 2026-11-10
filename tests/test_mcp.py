@@ -63,6 +63,16 @@ class MCP(unittest.TestCase):
 
     # ------------------------------------------------------------ protocol
 
+    def test_non_finite_id_does_not_kill_the_server(self):
+        import io
+        inp = io.BytesIO(b'{"jsonrpc":"2.0","id":NaN,"method":"ping"}\n{"jsonrpc":"2.0","id":1e999,"method":"ping"}\n'
+                         b'{"jsonrpc":"2.0","id":7,"method":"ping"}\n')
+        out = io.BytesIO()
+        self.srv.serve(inp, out)
+        lines = [json.loads(x) for x in out.getvalue().splitlines()]
+        self.assertEqual([x.get("error", {}).get("code") for x in lines[:2]], [-32600, -32600])
+        self.assertEqual(lines[2], {"jsonrpc": "2.0", "id": 7, "result": {}})
+
     def test_initialize_negotiates_version(self):
         r = self.rpc("initialize", {"protocolVersion": "2024-11-05", "capabilities": {}})["result"]
         self.assertEqual(r["protocolVersion"], "2024-11-05")

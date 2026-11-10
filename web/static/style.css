@@ -308,9 +308,34 @@ th .star { cursor: default; }
 .expand-btn + .toolbar { padding-right: 40px; }
 .expand-backdrop { position: fixed; inset: 0; z-index: 90; background: rgba(0,0,0,.78); }
 .panel.expanded { position: fixed; inset: 24px; z-index: 100; overflow: auto; margin: 0 !important; box-shadow: 0 24px 64px rgba(0,0,0,.6); } /* taste-skill-ignore: modal panel */
-.panel.expanded > .expand-btn { border-color: var(--control); color: var(--text); }
+/* body: beats sticky panels (.panel.stick, .cmpgrid .stick come later at the same specificity) */
+body .panel.expanded { position: fixed; inset: 24px; }
+.panel.expanded > .expand-btn { border-color: var(--control); color: var(--text); position: fixed; top: 38px; right: 38px; } /* stays reachable while the panel scrolls */
 .panel.expanded .map, .panel.expanded .bigmap { height: calc(100vh - 170px); }
+.panel.expanded .cmpmap { height: calc(100vh - 256px); } /* replay controls sit under it */
 .panel.expanded .scroll { max-height: none !important; }
+
+/* ------------------------------------------------------------ weather card + details */
+.card.click { cursor: pointer; transition: background .15s; }
+.card.click:hover { background: var(--raised); }
+.card.click:focus-visible { outline: 2px solid var(--text); outline-offset: -2px; } /* inset: .cards clips overflow */
+.card.click .k { color: var(--text); }
+.wx-sky { font-size: 14px; font-weight: 400; color: var(--muted); letter-spacing: 0; margin-left: 4px; }
+.nw { white-space: nowrap; }
+.wx-stats { margin: 14px 0 18px; }
+.wx-stats .card .v { font-size: 20px; line-height: 26px; }
+.wx-charts { margin-bottom: 18px; }
+.wx-charts > .wx-chart:last-child:nth-child(odd) { grid-column: 1 / -1; } /* no empty cell */
+.wx-chart h3 { font-size: 13px; font-weight: 500; margin: 0 0 4px; }
+.wx-row { position: relative; height: 34px; color: var(--muted); font-size: 11px; }
+.wx-row > span { position: absolute; top: 4px; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 3px; line-height: 12px; white-space: nowrap; }
+.wx-row .warrow { display: block; line-height: 12px; height: 12px; }
+.wx-row small { color: var(--faint); font-size: 10px; }
+.wx-row-k { position: absolute; left: 0; top: 4px; font-weight: 400; color: var(--faint); font-size: 11px; line-height: 12px; }
+.wx-table td, .wx-table th { white-space: nowrap; }
+.wx-table tr.muted td { color: var(--faint); }
+@media (max-width: 1100px) { .wx-table .wx-3 { display: none; } }
+@media (max-width: 720px) { .wx-table .wx-2 { display: none; } .panel.expanded > .expand-btn { top: 16px; right: 16px; } }
 body.has-expanded { overflow: hidden; }
 
 .warrow { display: inline-block; font-weight: 700; color: var(--text); }
@@ -416,7 +441,7 @@ body.readonly button.star:not(.on) { display: none; }
   .pfield small { grid-column: 1; }
   .pstats { grid-template-columns: repeat(2, 1fr); }
   .bigmap { height: calc(100vh - 300px); min-height: 380px; }
-  .panel.expanded { inset: 8px; }
+  body .panel.expanded { inset: 8px; }
   .scroll { -webkit-overflow-scrolling: touch; }
 }
 
@@ -495,3 +520,7 @@ a.cmprow:hover, a.cmprow:focus-visible { background: var(--hover); }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }
 }
+
+/* ------------------------------------------------------------ profile: max-HR suggestion */
+.hrsug { display: grid; gap: 6px; margin: 4px 0 14px; padding: 12px 14px; background: var(--ground); border-radius: var(--radius-well); }
+.hrsug .btn { justify-self: start; }
