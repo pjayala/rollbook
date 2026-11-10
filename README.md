@@ -141,7 +141,7 @@ cd rollbook
 python3.15 --version                    # if missing: brew install python@3.15
 # with pyenv: .python-version pins 3.15.2 here (pyenv install 3.15.2)
 # optional native window:
-python3.15 -m venv .venv && .venv/bin/pip install pywebview
+python3.15 -m venv .venv && .venv/bin/pip install -r requirements-optional.txt
 ./rollbook app
 ```
 
@@ -169,7 +169,7 @@ git clone https://github.com/pjayala/rollbook.git
 cd rollbook
 rem optional native window (uses Edge WebView2, built into Windows 10/11):
 py -3.15 -m venv .venv
-.venv\Scripts\pip install pywebview
+.venv\Scripts\pip install -r requirements-optional.txt
 rollbook.cmd app
 ```
 

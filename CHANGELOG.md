@@ -9,7 +9,8 @@
   pick 3.15, then 3.14, unless a `.venv` exists: recreate it with
   `python3.15 -m venv .venv` if it was made with an older Python.
 - CI runs on Python 3.14 and 3.15. A `.python-version` (3.15.2) makes pyenv
-  pick it inside the repo.
+  pick it inside the repo. `requirements-optional.txt` lists the one
+  optional package (pywebview, for `rollbook app`'s native window).
 
 ## 0.9.0 (2026-11-10)
 

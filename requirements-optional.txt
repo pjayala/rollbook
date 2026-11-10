@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Optional: Rollbook itself needs only the Python standard library.
+# pywebview gives `rollbook app` a native window; without it the app opens
+# Chrome / Edge / Chromium / Brave in app mode instead.
+#   .venv/bin/pip install -r requirements-optional.txt
+# Linux also needs Qt or GTK bindings: .venv/bin/pip install "pywebview[qt]"
+pywebview>=5

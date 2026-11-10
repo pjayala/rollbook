@@ -23,7 +23,7 @@ browser session cookie, see [Strava sync](#strava-sync)).
 ```
 
 Windows: `rollbook.cmd` instead of `./rollbook` (same behaviour, state in `.\data`).
-Optional native window: `python3 -m venv .venv && .venv/bin/pip install pywebview`
+Optional native window: `python3.15 -m venv .venv && .venv/bin/pip install -r requirements-optional.txt`
 (Windows: `.venv\Scripts\pip`; Linux also needs GTK or Qt bindings, e.g.
 `pip install pywebview[qt]`). Both wrappers use `.venv`'s Python when it exists.
 
@@ -46,6 +46,7 @@ data/rollbook.db          SQLite: 1866 activities, 4.07M samples   (gitignored)
 data/cache/archives/    extracted Strava export                  (gitignored)
 exports/*.zip           raw Strava account exports, by request date (gitignored)
 LICENSE                 GPL-3.0 text
+requirements-optional.txt  pywebview, the one optional package (native app window)
 tests/                  unittest suite (parsing, logic, importer, Strava sync, app, weather, laps, FTP, MCP, LAN/TLS/QR, end-to-end API); run in CI
 tools/demo.py           synthetic demo athlete (export + DB + seeded caches), never real data
 tools/screenshots.py    regenerates docs/screenshots/*.png from the demo, headless Chrome, --offline
