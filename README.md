@@ -139,6 +139,7 @@ there is no basemap. Normally you see OpenStreetMap underneath.</sub></p>
 git clone https://github.com/pjayala/rollbook.git
 cd rollbook
 python3.15 --version                    # if missing: brew install python@3.15
+# with pyenv: .python-version pins 3.15.2 here (pyenv install 3.15.2)
 # optional native window:
 python3.15 -m venv .venv && .venv/bin/pip install pywebview
 ./rollbook app

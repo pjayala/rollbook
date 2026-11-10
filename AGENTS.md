@@ -801,7 +801,8 @@ swim, two 30-second-sampling skates) — find them via `km_diff_pct`.
 
 * Python stdlib only (pywebview optional behind an import guard). Supported:
   **3.15** (default) and **3.14** (`MIN_PYTHON` in `bin/rollbook` refuses
-  older; the wrappers prefer `.venv`, then 3.15, then 3.14). Anything in 3.14
+  older; the wrappers prefer `.venv`, then 3.15, then 3.14; `.python-version`
+  pins pyenv to 3.15.2 in the repo, bump it with the Python). Anything in 3.14
   is fine (`match`, `X | Y`, `datetime.UTC`, `tomllib`, …); nothing 3.15-only
   until 3.14 is dropped. Raise both, CI and the docs together, once a year
   as versions leave upstream support.

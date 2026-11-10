@@ -8,7 +8,8 @@
   3.9 to 3.13 are refused with a message). `./rollbook` and `rollbook.cmd`
   pick 3.15, then 3.14, unless a `.venv` exists: recreate it with
   `python3.15 -m venv .venv` if it was made with an older Python.
-- CI runs on Python 3.14 and 3.15.
+- CI runs on Python 3.14 and 3.15. A `.python-version` (3.15.2) makes pyenv
+  pick it inside the repo.
 
 ## 0.9.0 (2026-11-10)
 
