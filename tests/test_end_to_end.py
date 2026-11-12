@@ -13,6 +13,7 @@ import sys
 import threading
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from unittest import mock
 
@@ -176,6 +177,19 @@ class Api(Build):
             self.assertIsNone(acts[aid]["be21k"])
             self.assertIsNone(acts[aid]["be42k"])
         self.assertAlmostEqual(acts[1001]["be1k"], 147.0, delta=1.0)  # Outdoor_cycle.gpx, see test_parsing
+
+    def test_tracks_by_ids(self):
+        """Home feed thumbnails: tracks of chosen sessions, any sport; same tracks as by sport."""
+        by_type = self.get("/api/tracks?type=Inline%20Skate")
+        r = self.get("/api/tracks?ids=1002,1001,1001,424242")
+        self.assertEqual(sorted(r["ids"]), [1001, 1002])  # duplicate and unknown ids drop out
+        for aid, trk in zip(r["ids"], r["trk"]):
+            self.assertEqual(trk, by_type["trk"][by_type["ids"].index(aid)])
+        for bad in ("", "1,,2", "abc", "1;2", "-1", "1" * 16, ",".join(["1"] * 51)):
+            code, body = self.get_host("/api/tracks?ids=" + urllib.parse.quote(bad), f"127.0.0.1:{self.port}")
+            self.assertIn(b"error", body, bad)
+            self.assertNotIn(b"trk\": [[", body, bad)
+        self.assertIn("error", self.get("/api/tracks"))
 
     def test_activity_ids_are_strict(self):
         for path, code in (("/api/activity/abc", 400), ("/api/activity/%C2%B2", 400), ("/api/activity/" + "1" * 16, 400),

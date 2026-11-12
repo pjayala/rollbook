@@ -29,6 +29,8 @@ const f1 = v => isNum(v) ? v.toFixed(1) : "–";
 const f2 = v => isNum(v) ? v.toFixed(2) : "–";
 const f0 = v => isNum(v) ? Math.round(v).toString() : "–";
 const fkm = v => isNum(v) ? (v >= 100 ? v.toFixed(0) : v.toFixed(2)) : "–";
+// 19,276: thousands separated, for the big Home figures
+const fnum = v => isNum(v) ? Math.round(v).toLocaleString("en-US") : "–";
 function dur(s, forceH) {
   if (!isNum(s)) return "–";
   s = Math.round(s);
@@ -472,16 +474,97 @@ function sessionMap(host, series, opt = {}) {
 // ------------------------------------------------------------------ state
 
 const S = { segs: {}, segsP: {}, lastImport: null, tracks: {}, mapView: {}, types: [], type: localStorage.type || "Inline Skate", range: localStorage.range || "all", acts: {}, hrmax: null, sort: { k: "date", dir: -1 }, q: "" };
-/** Sessions of one sport; withHidden also lists hidden / deleted ones (flagged a.hidden / a.deleted). */
+// "All sports" in the sport selector: Home and Sessions show every sport;
+// Progress, Map and Segments are per sport and ask for one (viewPickSport).
+const ALL = "*";
+const isAll = () => S.type === ALL;
+/** A real sport for per-sport defaults (new gear, the gear table): the picked one, else the most used. */
+const curSport = () => isAll() ? (S.types[0] && S.types[0].type) || "" : S.type;
+/** Sessions of one sport (ALL: every sport); withHidden also lists hidden / deleted ones (flagged a.hidden / a.deleted). */
 async function loadActs(type, withHidden) {
   const key = withHidden ? type + "\u0000hidden" : type;
-  if (!S.acts[key]) S.acts[key] = (await api("activities?type=" + encodeURIComponent(type) + (withHidden ? "&hidden=1" : ""))).map(a => ({ ...a, _d: dateOf(a), _t: +dateOf(a) }));
+  const q = [type === ALL ? "" : "type=" + encodeURIComponent(type), withHidden ? "hidden=1" : ""].filter(Boolean).join("&");
+  if (!S.acts[key]) S.acts[key] = (await api("activities" + (q ? "?" + q : ""))).map(a => ({ ...a, _d: dateOf(a), _t: +dateOf(a) }));
   return S.acts[key];
 }
+// ------------------------------------------------------------------ date range
+// S.range: "all" | "<days>" (the last N days) | "ytd" | "y<YYYY>" (a calendar year)
+// | "c:<YYYY-MM-DD>:<YYYY-MM-DD>" (custom, both days included). Days are local.
+const RANGE_DAYS = { 365: "Last 12 months", 180: "Last 6 months", 90: "Last 90 days", 30: "Last 30 days" };
+const RANGE_RE = /^(all|365|180|90|30|ytd|y(\d{4})|c:(\d{4}-\d{2}-\d{2}):(\d{4}-\d{2}-\d{2}))$/;
+/** A real calendar day "YYYY-MM-DD" (no 31 Feb) as local midnight ms, else null. */
+function dayMs(s) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s || "")) return null;
+  const [y, m, d] = s.split("-").map(Number), t = new Date(y, m - 1, d);
+  return t.getFullYear() === y && t.getMonth() === m - 1 && t.getDate() === d ? +t : null;
+}
+/** The range as [lo, hi) in ms (hi Infinity = up to now and beyond), or null = all time / not a valid range. */
+function rangeSpan(r, now = Date.now()) {
+  const m = RANGE_RE.exec(String(r));
+  if (!m || r === "all") return null;
+  if (RANGE_DAYS[r]) return { lo: now - (+r) * DAY, hi: Infinity };
+  const y0 = y => +new Date(y, 0, 1);
+  if (r === "ytd") return { lo: y0(new Date(now).getFullYear()), hi: Infinity };
+  if (m[2]) return { lo: y0(+m[2]), hi: y0(+m[2] + 1) };
+  const lo = dayMs(m[3]), last = dayMs(m[4]);
+  if (lo == null || last == null || last < lo) return null;
+  const end = new Date(last); end.setDate(end.getDate() + 1);  // setDate: a day is 23 or 25 h across DST
+  return { lo, hi: +end };
+}
+/** The same length of time just before the range, for "vs previous" (null for all time / open spans' first day). */
+function prevSpan(r, now = Date.now()) {
+  const sp = rangeSpan(r, now);
+  if (!sp) return null;
+  if (/^y\d{4}$/.test(r)) { const y = +r.slice(1); return { lo: +new Date(y - 1, 0, 1), hi: sp.lo }; }
+  if (r === "ytd") {  // the same days of last year (29 Feb -> 28 Feb)
+    const t = new Date(now), y = t.getFullYear() - 1, d = Math.min(t.getDate(), new Date(y, t.getMonth() + 1, 0).getDate());
+    return { lo: +new Date(y, 0, 1), hi: +new Date(y, t.getMonth(), d + 1) };
+  }
+  if (String(r).startsWith("c:")) {  // as many local days before it (setDate: DST-safe)
+    const n = Math.round((sp.hi - sp.lo) / DAY), d = new Date(sp.lo); d.setDate(d.getDate() - n);
+    return { lo: +d, hi: sp.lo };
+  }
+  return { lo: sp.lo - (now - sp.lo), hi: sp.lo };
+}
+function rangeLabel(r, now = Date.now()) {
+  if (RANGE_DAYS[r]) return RANGE_DAYS[r];
+  if (r === "ytd") return `This year`;
+  if (/^y\d{4}$/.test(r)) return r.slice(1);
+  const sp = rangeSpan(r, now);
+  if (!sp) return "All time";
+  const e = new Date(sp.hi); e.setDate(e.getDate() - 1);
+  return `${fdate(new Date(sp.lo))} – ${fdate(e)}`;
+}
+/** "the previous 90 days", "2025", "the same days of 2025": what prevSpan is, in words. */
+function prevLabel(r, now = Date.now()) {
+  if (r === "ytd") return `the same days of ${new Date(now).getFullYear() - 1}`;
+  if (/^y\d{4}$/.test(r)) return String(+r.slice(1) - 1);
+  if (r === "365") return "the 12 months before";
+  if (r === "180") return "the 6 months before";
+  if (RANGE_DAYS[r]) return `the ${r} days before`;
+  const sp = rangeSpan(r, now);
+  return sp ? `the ${Math.round((Math.min(sp.hi, now) - sp.lo) / DAY)} days before` : "";
+}
+const inSpan = (sp, t) => !sp || (t >= sp.lo && t < sp.hi);
 function inRange(acts) {
-  if (S.range === "all") return acts;
-  const cut = Date.now() - (+S.range) * DAY;
-  return acts.filter(a => a._t >= cut);
+  const sp = rangeSpan(S.range);
+  return sp ? acts.filter(a => inSpan(sp, a._t)) : acts;
+}
+/** The top-bar range menu: the fixed choices, plus the current year / custom range when one is set. */
+function fillRange() {
+  const sel = $("#range"); if (!sel) return;
+  if (!rangeSpan(S.range) && S.range !== "all") S.range = "all";
+  const fixed = ["all", "ytd", "365", "180", "90", "30"];
+  const opts = fixed.includes(S.range) ? fixed : [...fixed, S.range];
+  sel.innerHTML = opts.map(r => `<option value="${esc(r)}">${esc(rangeLabel(r))}</option>`).join("");
+  sel.value = S.range;
+}
+/** Change the range everywhere (menu, storage) and redraw the page. */
+function setRange(r) {
+  S.range = rangeSpan(r) || r === "all" ? r : "all";
+  localStorage.range = S.range;
+  fillRange();
+  if (!/^#\/(session|compare)\//.test(location.hash)) route();
 }
 const isSkate = () => /skate/i.test(S.type);
 /** Average watts: recorded in the file, else Strava's figure for indoor rides (its outdoor one is an estimate). */
@@ -532,6 +615,7 @@ const go = id => { location.hash = "#/session/" + id; };
 const routePill = r => r ? `<span class="pill ${r === "out-back" ? "ob" : r === "loop" ? "loop" : r === "one-way" ? "ow" : ""}">${esc(r)}</span>` : "";
 
 async function viewProgress() {
+  if (isAll()) return viewPickSport("progress");
   const all = await loadActs(S.type), acts = inRange(all);
   const app = $("#app");
   if (!acts.length) { app.innerHTML = `<p class="muted">No ${esc(S.type)} sessions in this range.</p>`; return; }
@@ -1046,7 +1130,7 @@ function calendar(host, acts, opt = {}) {
   }
   if (years.length > show.length) {
     const b = document.createElement("button"); b.className = "btn"; b.textContent = `show all ${years.length} years`;
-    b.onclick = () => calendar(host, acts, { all: true }); host.appendChild(b);
+    b.onclick = () => calendar(host, acts, { ...opt, all: true }); host.appendChild(b);
   }
   const leg = document.createElement("div"); leg.className = "legend"; leg.style.marginTop = "6px";
   leg.innerHTML = `<span>less</span>` + CAL_COLORS.map((c, i) => `<span><i style="background:${c}"></i>${f0(vmax * i / CAL_COLORS.length)}+</span>`).join("") + `<span>km / day</span>`;
@@ -1060,6 +1144,7 @@ function calendar(host, acts, opt = {}) {
   host.onclick = ev => {
     const k = ev.target.dataset && ev.target.dataset.d, v = k && byDay.get(k); if (!v) return;
     hideTip();
+    if (opt.before) opt.before();
     if (v.n === 1) go(v.a[0].id); else { S.q = k; location.hash = "#/sessions"; }
   };
 }
@@ -1098,6 +1183,7 @@ function areas(tracks) {
 }
 
 async function viewMap() {
+  if (isAll()) return viewPickSport("map");
   const app = $("#app");
   app.innerHTML = `<p class="muted">Loading tracks…</p>`;
   const acts = inRange(await loadActs(S.type)), all = await loadTracks(S.type);
@@ -1106,7 +1192,7 @@ async function viewMap() {
   let mode = localStorage.mapMode || "heat", colorBy = localStorage.mapColor || "best10min_kmh", sel = [];
   const km = tracks.reduce((s, t) => s + (t.a.km || 0), 0);
   app.innerHTML = `
-    <div class="head"><div><h1>${esc(S.type)} map</h1><div class="muted">${tracks.length} sessions with GPS · ${fkm(km)} km${S.range !== "all" ? " · " + esc($("#range").selectedOptions[0].text.toLowerCase()) : ""}</div></div></div>
+    <div class="head"><div><h1>${esc(S.type)} map</h1><div class="muted">${tracks.length} sessions with GPS · ${fkm(km)} km${S.range !== "all" ? " · " + esc(rangeLabel(S.range).replace(/^(Last|This) /, m => m.toLowerCase())) : ""}</div></div></div>
     <div class="panel">
       <div class="toolbar">
         <div class="seg" id="mmode"><button data-m="heat">Heatmap</button><button data-m="lines">Sessions</button></div>
@@ -1591,8 +1677,8 @@ async function loadSegs(type, onWait) {
 
 /** Efforts in the current range; best per session, fastest first. */
 function segStats(sg) {
-  const cut = S.range === "all" ? -Infinity : Date.now() - (+S.range) * DAY;
-  const effs = sg.efforts.filter(e => e.a._t >= cut);
+  const sp = rangeSpan(S.range);
+  const effs = sg.efforts.filter(e => inSpan(sp, e.a._t));
   const per = new Map();
   for (const e of effs) { const b = per.get(e.aid); if (!b || e.el < b.el) per.set(e.aid, e); }
   const best = [...per.values()].sort((a, b) => a.el - b.el);
@@ -1630,6 +1716,7 @@ function segMap(host, segs, opt = {}) {
 }
 
 async function viewSegments() {
+  if (isAll()) return viewPickSport("segments");
   const app = $("#app");
   app.innerHTML = `<p class="muted" id="segwait">Finding segments…</p>`;
   const segs = await loadSegs(S.type, r => { const w = $("#segwait"); if (w) w.textContent = `Finding segments: ${r.phase}${r.total ? ` ${r.done}/${r.total}` : ""}…`; });
@@ -1678,6 +1765,7 @@ async function viewSegments() {
 const POP_HINT = 5;
 
 async function viewSegment(id) {
+  if (isAll()) return viewPickSport("segments");
   const app = $("#app");
   app.innerHTML = `<p class="muted" id="segwait">Loading segment…</p>`;
   const segs = await loadSegs(S.type, r => { const w = $("#segwait"); if (w) w.textContent = `Finding segments: ${r.phase}…`; });
@@ -1777,6 +1865,7 @@ async function viewSessions() {
     ["pick", `<span class="vh">Select to compare</span>`, a => `<input type="checkbox" class="pick" data-pick="${a.id}" ${pick.includes(a.id) ? "checked" : ""} aria-label="Select ${esc(a.name)} on ${esc(a.date)} to compare">`, "pickc"],
     ["fav", `<span class="star on" title="Favorite">${ICON.star}</span>`, a => starSlot("sessions", a.id)], ["date", "date", a => `${fdate(a._d)}`, "l"],
     ["name", "name", a => esc(a.name) + (a.hidden ? ` <span class="pill">${a.deleted ? "deleted" : "hidden"}</span>` : ""), "l"],
+    ...(isAll() ? [["type", "sport", a => esc(a.type), "l"]] : []),
     ...(acts.some(a => a.gear_id) ? [["gear_name", "gear", a => a.gear_id ? `<span class="${a.gear_src === "default" ? "muted" : ""}" title="${a.gear_src === "default" ? "the sport's default" : "chosen for this session"}">${esc(a.gear_name)}</span>` : `<span class="muted">–</span>`, "l"]] : []),
     ["km", "km", a => fkm(a.km)],
     ["elapsed_s", "elapsed", a => dur(a.elapsed_s, true)], ["moving_s", "moving", a => dur(a.moving_s, true)], ["pause_s", "paused", a => dur(a.pause_s)],
@@ -1798,8 +1887,8 @@ async function viewSessions() {
   let gearF = localStorage[gearKey] || "";
   if (gearF && !(gearF === "none" ? gearOpts.length : gearOpts.some(([id]) => id === gearF))) { gearF = ""; delete localStorage[gearKey]; }
   const app = $("#app");
-  app.innerHTML = `<div class="head"><div><h1>${esc(S.type)} sessions</h1><div class="muted" id="cnt"></div></div></div>
-    <div class="panel"><div class="toolbar"><input id="q" placeholder="filter: name, date, route…" value="${esc(S.q)}" style="width:260px">
+  app.innerHTML = `<div class="head"><div><h1>${isAll() ? "All sessions" : esc(S.type) + " sessions"}</h1><div class="muted" id="cnt"></div></div></div>
+    <div class="panel"><div class="toolbar"><input id="q" placeholder="${isAll() ? "filter: name, date, sport…" : "filter: name, date, route…"}" value="${esc(S.q)}" style="width:260px">
       <label class="muted small">min km <input id="mink" type="number" value="${Math.max(0, +localStorage.minKm || 0)}" style="width:70px"></label>
       ${gearOpts.length ? `<label class="muted small">gear <select id="gearf"><option value="">all</option>${gearOpts.map(([id, n]) => `<option value="${esc(id)}" ${id === gearF ? "selected" : ""}>${esc(n)}</option>`).join("")}<option value="none" ${gearF === "none" ? "selected" : ""}>none</option></select></label>` : ""}
       <label class="muted small"><input type="checkbox" id="favonly" ${localStorage.favOnly === "1" ? "checked" : ""}> Favorites only</label>
@@ -1812,7 +1901,7 @@ async function viewSessions() {
     const val = a => k === "watts" ? pwAvg(a) : k === "pace" ? (a.kmh_moving ? -a.kmh_moving : null) : k === "date" ? a._t : k === "fav" ? (isFav("sessions", a.id) ? 1 : 0) : a[k];
     const favOnly = $("#favonly").checked;
     const rows = acts.filter(a => (a.km || 0) >= mink && (!favOnly || isFav("sessions", a.id)) && gearFilterMatch(a, gearF)
-      && (!q || `${a.name} ${a.date} ${a.route} ${a.device} ${a.gear_name || ""}`.toLowerCase().includes(q)))
+      && (!q || `${a.name} ${a.date} ${a.type} ${a.route} ${a.device} ${a.gear_name || ""}`.toLowerCase().includes(q)))
       .sort((a, b) => { const x = val(a), y = val(b); if (x == null) return y == null ? 0 : 1; if (y == null) return -1; return (x > y ? 1 : x < y ? -1 : 0) * dir; });
     const nh = rows.filter(a => a.hidden).length;
     $("#cnt").textContent = `${rows.length} of ${acts.length} sessions · ${fkm(rows.reduce((s, a) => s + (a.hidden ? 0 : a.km || 0), 0))} km` + (nh ? ` · ${nh} hidden` : "");
@@ -2447,7 +2536,8 @@ async function route() {
   const seq = ++routeSeq;
   const h = location.hash.replace(/^#\/?/, "");
   const [page, arg, arg2] = h.split("/");
-  const cur = page === "session" || page === "compare" ? "sessions" : page === "segment" ? "segments" : page || "progress";
+  const cur = page === "session" || page === "compare" ? "sessions" : page === "segment" ? "segments" : page || "home";
+  document.body.dataset.page = cur;  // Home is every sport: style.css hides the sport selector there
   document.querySelectorAll("[data-nav]").forEach(a => { const on = a.dataset.nav === cur; a.classList.toggle("on", on); on ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current"); });
   hideTip();
   try {
@@ -2459,7 +2549,8 @@ async function route() {
     else if (page === "profile") await viewProfile();
     else if (page === "compare") await viewCompare(arg, arg2, seq);
     else if (page === "gear") await (arg ? viewGearOne(arg, seq) : viewGear(seq));
-    else await viewProgress();
+    else if (page === "progress") await viewProgress();
+    else await viewHome();
     const y = history.state && history.state.y;
     if (Nav.pop && y) requestAnimationFrame(() => scrollTo(0, y));  // back/forward: where you were
     else if (lastRoute !== h) scrollTo(0, 0);
@@ -2491,7 +2582,7 @@ function openImport(files) {
   if (!dlg.open) dlg.showModal();
   if (!Imp.busy) {
     $("#imp-types").innerHTML = S.types.map(t => `<option value="${esc(t.type)}">`).join("");
-    if (!$("#imp-sport").value) $("#imp-sport").value = S.type || "";
+    if (!$("#imp-sport").value) $("#imp-sport").value = isAll() ? "" : S.type || "";
   }
   if (files && files.length && !Imp.busy) addImportFiles(files);
   if (!Imp.busy) stravaStatus();
@@ -2615,10 +2706,7 @@ async function runStravaSync() {
 async function refreshData(dest) {
   S.acts = {}; S.tracks = {}; S.segs = {}; S.segsP = {}; S.lastImport = null; S.mapView = {};
   [S.types, , S.favs] = await Promise.all([api("types"), loadHrmax(), api("favorites"), loadGear(true).catch(() => null)]);
-  const sel = $("#type"), cur = S.type;
-  sel.innerHTML = S.types.map(t => `<option value="${esc(t.type)}">${esc(t.type)} (${t.n})</option>`).join("");
-  sel.value = S.types.some(t => t.type === cur) ? cur : S.types[0]?.type;
-  S.type = sel.value;
+  fillSports();
   pollStatus();
   if (dest && location.hash !== dest) location.hash = dest;  // hashchange routes
   else route();
@@ -2654,7 +2742,7 @@ async function openEdit(a) {
       const j = await postEdit({ id: String(a.id), ...body }).catch(e => { throw new Error(gearOp ? `gear saved, the rest not: ${e.message}` : e.message); });
       dlg.close();
       const type = (j.edit && j.edit.type) || a.orig_type;
-      if (type && type !== S.type && !j.edit.hidden) S.type = localStorage.type = type;  // follow the session to its sport
+      if (type && type !== S.type && !isAll() && !j.edit.hidden) S.type = localStorage.type = type;  // follow the session to its sport
       await refreshData(dest);
     } catch (err) { msg.className = "small down"; msg.textContent = "Could not save: " + err.message; }
   };
@@ -2693,6 +2781,13 @@ if (new URLSearchParams(location.search).has("app"))
   addEventListener("pagehide", () => navigator.sendBeacon(
     "/api/bye?app=" + encodeURIComponent(new URLSearchParams(location.search).get("app"))));
 
+/** The sport selector from S.types: "All sports" first; keeps the picked sport if it still exists. */
+function fillSports() {
+  const sel = $("#type"), n = S.types.reduce((s, t) => s + t.n, 0);
+  sel.innerHTML = `<option value="${ALL}">All sports (${n})</option>` + S.types.map(t => `<option value="${esc(t.type)}">${esc(t.type)} (${t.n})</option>`).join("");
+  if (!isAll() && !S.types.some(t => t.type === S.type)) S.type = S.types[0]?.type || ALL;
+  sel.value = S.type;
+}
 async function boot() {
   let st;
   [S.types, , S.favs, st] = await Promise.all([api("types"), loadHrmax(), api("favorites"), api("status").catch(() => ({})),
@@ -2701,13 +2796,16 @@ async function boot() {
   // server refuses every change, so don't offer any
   S.readonly = !!st.readonly;
   document.body.classList.toggle("readonly", S.readonly);
-  if (!S.types.some(t => t.type === S.type)) S.type = S.types[0]?.type;
   const sel = $("#type");
-  sel.innerHTML = S.types.map(t => `<option value="${esc(t.type)}">${esc(t.type)} (${t.n})</option>`).join("");
-  sel.value = S.type;
-  sel.onchange = () => { S.type = localStorage.type = sel.value; if (/^#\/(session|compare)\//.test(location.hash)) location.hash = "#/"; else if (location.hash.startsWith("#/segment/")) location.hash = "#/segments"; else route(); };
-  const rg = $("#range"); rg.value = S.range;
-  rg.onchange = () => { S.range = localStorage.range = rg.value; if (!/^#\/(session|compare)\//.test(location.hash)) route(); };
+  fillSports();
+  sel.onchange = () => {
+    S.type = localStorage.type = sel.value;
+    if (/^#\/(session|compare)\//.test(location.hash)) location.hash = isAll() ? "#/sessions" : "#/progress";
+    else if (location.hash.startsWith("#/segment/")) location.hash = "#/segments";
+    else route();
+  };
+  fillRange();
+  $("#range").onchange = e => setRange(e.target.value);
   navInit();
   sideInit();
   addEventListener("hashchange", route);

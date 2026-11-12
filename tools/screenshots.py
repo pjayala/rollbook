@@ -77,7 +77,8 @@ def main():
         segs = api("segments?type=Inline%20Skate")["segments"]
         seg = max((s for s in segs if s["full"]), key=lambda s: (len(s["efforts"]), s["m"]))
         os.makedirs(OUT, exist_ok=True)
-        shoot(chrome, profile, "progress.png", "#/", 1440, 1400)
+        shoot(chrome, profile, "home.png", "#/", 1440, 1300)
+        shoot(chrome, profile, "progress.png", "#/progress", 1440, 1400)
         shoot(chrome, profile, "session.png", f"#/session/{laps['id']}", 1440, 1440)
         shoot(chrome, profile, "segments.png", f"#/segment/{seg['id']}", 1440, 1250)
         shoot(chrome, profile, "heatmap.png", "#/map", 1440, 900)

@@ -218,7 +218,7 @@ function readSpecs(f, kind) {
 /** New or edit a part. opts.gear: fit a new one straight to that gear (and order kinds by its sport). */
 function openPartDialog(id, opts = {}) {
   const p = id ? S.gear.P.get(id) : null;
-  const og = opts.gear && S.gear.G.get(opts.gear), sport = og && og.sports[0] || S.type;
+  const og = opts.gear && S.gear.G.get(opts.gear), sport = og && og.sports[0] || curSport();
   const group = S.gear.SG.get(sport) || "other";
   const kinds = Object.entries(S.gear.kinds).sort(([, a], [, b]) => (b.group === group) - (a.group === group));
   const kind0 = p ? p.kind : kinds[0][0];
@@ -257,7 +257,7 @@ function openPartDialog(id, opts = {}) {
 function openGearDialog(id, opts = {}) {
   const g = id ? S.gear.G.get(id) : null;
   const sports = [...new Set([...S.types.map(t => t.type), ...(g ? g.sports : [])])];
-  const on = new Set(g ? g.sports : [opts.sport || S.type]);
+  const on = new Set(g ? g.sports : [opts.sport || curSport()]);
   const fields = fld("Name", `<input name="name" maxlength="120" required value="${esc(g ? g.name : "")}">`, "e.g. Powerslide 3×110, Inov-8 ParkClaw")
     + `<fieldset class="pfield"><legend>Sports</legend><div class="chips">${sports.map(s => `<label class="small"><input type="checkbox" name="sport" value="${esc(s)}" ${on.has(s) ? "checked" : ""}> ${esc(s)}</label>`).join("")}</div></fieldset>`
     + (g ? "" : fld("Default from", `<input name="default_since" type="date" value="${esc(opts.since || "")}">`, "make it the default for these sports from this day (older sessions keep theirs); empty = not the default"))
@@ -410,14 +410,14 @@ function firstRun() {
 
 /** Gear of the selected sport side by side. */
 async function compareGear(host, seq) {
-  const acts = await loadActs(S.type);
+  const sport = curSport(), acts = await loadActs(sport);
   if (seq !== routeSeq) return;
-  const M = gearMetric(S.type), rows = gearCompare(acts, M.virt);
+  const M = gearMetric(sport), rows = gearCompare(acts, M.virt);
   if (!rows.length) return;
   const u = M.unit, f = M.fmt, hr = rows.some(r => r.eff != null);
   host.hidden = false;
-  host.innerHTML = `<h2>${esc(S.type)} by gear <span class="muted">${esc(M.label.toLowerCase())}</span></h2>
-    ${rows.length < 2 ? `<p class="muted small">Only one gear for ${esc(S.type)} so far: a second one gives this table something to compare.</p>` : ""}
+  host.innerHTML = `<h2>${esc(sport)} by gear <span class="muted">${esc(M.label.toLowerCase())}</span></h2>
+    ${rows.length < 2 ? `<p class="muted small">Only one gear for ${esc(sport)} so far: a second one gives this table something to compare.</p>` : ""}
     <div class="scroll"><table><thead><tr><th class="l">gear</th><th class="l">used</th><th>sessions</th><th>km</th><th>median ${u}</th><th>best ${u}</th>${hr ? `<th title="best 10 min ÷ average HR × 100, with at least 3 sessions with heart rate">per heartbeat</th>` : ""}</tr></thead><tbody>
     ${rows.map(r => `<tr class="click" data-gid="${esc(r.id)}"><td class="l"><a href="#/gear/${esc(r.id)}">${esc(r.name)}</a></td><td class="l muted small">${esc(r.first || "")} – ${esc(r.last || "")}</td>
       <td>${r.n}</td><td>${fkm(r.km)}</td><td class="${r.nv < 5 ? "muted" : ""}">${f(r.med)}${r.nv < 5 && r.nv ? ` <span class="small">n=${r.nv}</span>` : ""}</td><td>${f(r.best)}</td>

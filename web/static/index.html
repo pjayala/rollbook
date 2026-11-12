@@ -18,7 +18,8 @@
 <aside class="side" id="side" aria-label="Rollbook">
   <a class="brand" href="#/"><img src="/icon.svg" alt="" width="28" height="28"><span>Rollbook</span></a>
   <nav class="nav" aria-label="Pages">
-    <a href="#/" data-nav="progress"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 12.5l4-4.5 3 2.5 6-7"/><path d="M11 3.5h3.5V7"/></svg><span>Progress</span></a>
+    <a href="#/" data-nav="home"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 7.2L8 2.5l6 4.7"/><path d="M3.5 6v7.5h3.25V10h2.5v3.5h3.25V6"/></svg><span>Home</span></a>
+    <a href="#/progress" data-nav="progress"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 12.5l4-4.5 3 2.5 6-7"/><path d="M11 3.5h3.5V7"/></svg><span>Progress</span></a>
     <a href="#/sessions" data-nav="sessions"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M5.5 3.5h9M5.5 8h9M5.5 12.5h9"/><circle cx="2.25" cy="3.5" r=".6"/><circle cx="2.25" cy="8" r=".6"/><circle cx="2.25" cy="12.5" r=".6"/></svg><span>Sessions</span></a>
     <a href="#/map" data-nav="map"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 3.5l4-1.5 5 2 4-1.5v10l-4 1.5-5-2-4 1.5z"/><path d="M5.5 2v10M10.5 4v10"/></svg><span>Map</span></a>
     <a href="#/segments" data-nav="segments"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="3" cy="12.5" r="1.5"/><circle cx="13" cy="3.5" r="1.5"/><path d="M4.5 12.5h5a2.5 2.5 0 000-5h-3a2.5 2.5 0 010-5h5"/></svg><span>Segments</span></a>
@@ -32,17 +33,11 @@
 <header class="top">
   <button class="iconbtn" id="side-toggle" type="button" aria-controls="side" aria-expanded="true" title="Hide sidebar (⌘\ / Ctrl+\)" aria-label="Hide sidebar"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="1.75" y="2.5" width="12.5" height="11" rx="2"/><path d="M6 2.5v11"/></svg></button>
   <div class="histnav"><button class="iconbtn" id="nav-back" title="Back (Alt+← / ⌘[)" aria-label="Back" disabled><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3L5 8l5 5"/></svg></button><button class="iconbtn" id="nav-fwd" title="Forward (Alt+→ / ⌘])" aria-label="Forward" disabled><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3l5 5-5 5"/></svg></button></div>
-  <a class="brand brand-top" href="#/" aria-label="Rollbook, progress"><img src="/icon.svg" alt="" width="28" height="28"></a>
+  <a class="brand brand-top" href="#/" aria-label="Rollbook, home"><img src="/icon.svg" alt="" width="28" height="28"></a>
   <div class="scope">
-    <label class="field"><span class="field-k">Sport</span><select id="type"></select></label>
+    <label class="field field-sport"><span class="field-k">Sport</span><select id="type"></select></label>
     <label class="field"><span class="field-k">Range</span>
-      <select id="range">
-        <option value="all">All time</option>
-        <option value="365">Last 12 months</option>
-        <option value="180">Last 6 months</option>
-        <option value="90">Last 90 days</option>
-        <option value="30">Last 30 days</option>
-      </select>
+      <select id="range"><option value="all">All time</option></select>
     </label>
   </div>
   <span id="status" class="status"></span>
@@ -94,5 +89,6 @@
 <script src="/gear.js"></script>
 <script src="/app.js"></script>
 <script src="/compare.js"></script>
+<script src="/home.js"></script>
 </body>
 </html>

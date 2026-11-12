@@ -7,7 +7,7 @@
 <p align="center">An offline training dashboard for your Strava data.<br>
 Progress, heatmaps, laps, automatic segments with leaderboards, and wind-neutral speed. It runs on your own machine.</p>
 
-<p align="center"><img src="docs/screenshots/progress.png" alt="Progress page: summary cards, calendar, form and volume charts"></p>
+<p align="center"><img src="docs/screenshots/home.png" alt="Home: every sport on one screen, distance per week by sport, recent sessions with their routes, sports to open"></p>
 
 ## Why
 
@@ -25,6 +25,15 @@ GPS: runs, rides, walks, skates, plus indoor rides from ROUVY or MyWhoosh.
 
 ## Features
 
+- **Home:** every sport on one screen: total distance and time, distance per
+  week stacked by sport over the whole history (hover a sport to see it
+  alone, click a week for that month's sessions), the latest sessions with
+  their route shapes, each sport's totals and best (open one for its
+  Progress or its list), this year against the same days last year, and an
+  all-sports calendar. Choose the period right there (this year, last
+  year, 12 months, 90 / 30 days or any from–to dates) and every figure
+  shows its change against the period before. Pick **All sports** in the sport menu to list every
+  session in one table.
 - **Progress:** calendar heatmap, volume per month, form (best 10-min and
   wind-neutral speed), endurance (best 30/60-min), efficiency (speed ÷ heart
   rate), time in heart-rate zones, personal records and a monthly summary.

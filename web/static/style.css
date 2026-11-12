@@ -215,7 +215,7 @@ svg .xhair { stroke: #8c8c8c; stroke-dasharray: 3 3; }
 
 /* ------------------------------------------------------------ calendar (signature: every skating day of the year) */
 .calrow { margin-bottom: 14px; overflow-x: auto; }
-.calhead { display: flex; gap: 12px; align-items: baseline; margin-bottom: 4px; }
+.calhead { display: flex; gap: 12px; align-items: baseline; margin-bottom: 4px; position: sticky; left: 0; width: max-content; }
 .calhead b { font-weight: 600; font-variant-numeric: tabular-nums; }
 svg.cal { display: block; width: 100%; min-width: 840px; max-width: 1200px; height: auto; }
 svg.cal .calt { fill: var(--faint); font-size: 11px; font-family: var(--font); }
@@ -367,6 +367,89 @@ tr.hiddenrow td { opacity: .5; }
 .pstat span { color: var(--muted); font-size: 12px; }
 .pstat b { font-size: 18px; font-weight: 500; font-variant-numeric: tabular-nums; } .pstat small { color: var(--faint); }
 
+/* ------------------------------------------------------------ home: every sport on one screen */
+body[data-page="home"] .field-sport { display: none; }  /* Home is all sports by definition */
+.hero { padding-top: 26px; padding-bottom: 20px; }  /* sides: var(--pad), the same text edge as the panels below */
+.hero-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.hero h1 { font-size: 28px; line-height: 34px; letter-spacing: -.02em; }
+.hero-range { display: flex; align-items: center; gap: 10px 16px; flex-wrap: wrap; margin-top: 20px; }
+.rg-custom { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
+.rg-custom[hidden] { display: none; }
+.rg-custom label { display: inline-flex; align-items: center; gap: 6px; }
+.rg-custom input { color-scheme: dark; }
+.hero-figs { display: grid; grid-template-columns: minmax(0, 2fr) repeat(3, minmax(0, 1fr)); gap: 16px 32px; margin: 26px 0 4px; align-items: end; }
+.fig { min-width: 0; }
+.fig > span { display: block; color: var(--muted); font-size: 13px; line-height: 18px; margin-bottom: 4px; }
+.fig b { display: block; font-size: 30px; line-height: 36px; font-weight: 500; letter-spacing: -.02em; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fig.lead b { font-size: clamp(48px, 4.7vw, 68px); line-height: 1.04; font-weight: 600; letter-spacing: -.04em; }
+.fig em { display: block; font-style: normal; font-size: 13px; line-height: 18px; color: var(--ink); margin-top: 4px; font-variant-numeric: tabular-nums; }
+.fig em span { color: var(--faint); }
+.fig small { font-size: 15px; color: var(--muted); font-weight: 400; letter-spacing: 0; }
+.fig.lead small { font-size: 22px; }
+.finding { margin: 20px 0 22px; color: var(--ink); }
+.finding a { color: var(--text); }
+#ribbon { width: 100%; min-height: 168px; }
+svg.ribbon { display: block; width: 100%; height: auto; overflow: visible; cursor: pointer; font-family: var(--font); }
+svg.ribbon text { fill: var(--faint); font-size: 11px; font-variant-numeric: tabular-nums; }
+svg.ribbon text.rt { text-anchor: end; }
+svg.ribbon .rg { stroke: #262626; stroke-dasharray: 3 3; }
+svg.ribbon .base { stroke: #3a3a3a; }
+svg.ribbon .hov { fill: rgba(255, 255, 255, .14); pointer-events: none; }
+svg.ribbon path { transition: opacity .15s; }
+svg.ribbon.focus path:not(.on) { opacity: .15; }
+#rib-leg { margin: 0 0 12px; font-size: 13px; }
+/* Home reads at 13 px: data, legends and column heads; 11-12 px only for axis ticks and units */
+body[data-page="home"] table.sports th { font-size: 13px; }
+body[data-page="home"] .calhead .small, body[data-page="home"] .phead .small { font-size: 13px; line-height: 18px; }
+body[data-page="home"] #cal .legend { font-size: 13px; }
+.phead { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.phead h2 { padding-right: 0; margin-bottom: 10px; }
+.feed { display: grid; gap: 2px; }
+.feed-row { display: grid; grid-template-columns: 64px minmax(0, 1fr) 72px 64px 80px; gap: 12px; align-items: center;
+  margin: 0 -8px; padding: 6px 8px; border-radius: 12px; color: var(--text); text-decoration: none; transition: background-color .1s; }
+.feed-row:hover { background: var(--hover); }
+.thumb { display: block; width: 64px; height: 44px; border-radius: 8px; background: var(--ground); }
+.thumb path { fill: none; stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round; }
+.thumb.none { display: grid; place-items: center; color: var(--faint); font-size: 11px; }
+.feed-name { display: grid; min-width: 0; }
+.feed-name b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.feed-name span { color: var(--muted); font-size: 13px; line-height: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.feed-n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.feed-n small, table.sports small { color: var(--faint); font-size: 12px; }
+i.sw { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; vertical-align: 1px; flex: none; }
+table.sports .plink { font-weight: 500; }
+table.sports tr.tot td { color: var(--text); font-weight: 500; border-top: 1px solid #2c2c2c; }
+.home-grid > .col { min-width: 0; }
+table.sports td, table.sports th { padding-top: 11px; padding-bottom: 11px; }
+.pick-sports { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(260px, 100%), 1fr)); gap: 4px 14px; }
+.pick-sports a { display: grid; grid-template-columns: auto 1fr; align-items: center; padding: 10px 12px; margin: 0 -12px; border-radius: 12px; text-decoration: none; }
+.pick-sports a:hover { background: var(--hover); }
+.pick-sports a span { grid-column: 2; font-size: 12px; }
+/* tablet: the lead figure gets its own row, the other three share the next */
+@media (max-width: 1100px) {
+  .hero-figs { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .fig.lead { grid-column: 1 / -1; }
+  .fig.lead b { font-size: 60px; }
+}
+@media (max-width: 720px) {
+  .hero { padding-top: 18px; padding-bottom: 14px; }
+  .hero h1 { font-size: 22px; line-height: 28px; }
+  .hero-figs { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px 16px; margin-top: 18px; }
+  .fig.lead { grid-column: 1 / -1; }
+  .fig.lead b { font-size: 48px; line-height: 52px; }
+  .fig b { font-size: 22px; line-height: 28px; }
+  .fig small { font-size: 12px; }
+  .fig:not(.lead) em span { display: none; }  /* the lead's note names the baseline */
+  #ribbon { min-height: 114px; }
+  .feed-row { gap: 10px; }
+  .thumb { width: 56px; height: 40px; }
+  .feed-row { grid-template-columns: 56px minmax(0, 1fr) auto; }
+  .feed-row .f-t, .feed-row .f-x { display: none; }
+  table.sports:not(.ytd) td:nth-child(n+6), table.sports:not(.ytd) th:nth-child(n+6), table.sports td:nth-child(4), table.sports th:nth-child(4) { display: none; }
+  table.ytd td:nth-child(4), table.ytd th:nth-child(4) { display: table-cell; }
+  table.ytd td:nth-child(3), table.ytd th:nth-child(3) { display: none; }
+}
+
 /* `rollbook web --lan` without --lan-write: the server refuses changes, so hide the controls */
 body.gear-ro .gear-w, body.readonly .gear-w, body.readonly #edit, body.readonly #psave, body.readonly .hiddenbar button, body.readonly .nr-x { display: none; }
 body.readonly button.star { pointer-events: none; }
@@ -394,7 +477,7 @@ body.readonly button.star:not(.on) { display: none; }
 @media (max-width: 720px) {
   :root { --side: 0px; --gutter: 16px; --topbar: 56px; --pad: 16px; --radius-card: 16px; }
   .side { top: auto; right: 0; width: auto; height: 64px; flex-direction: row; justify-content: space-around; align-items: stretch;
-    padding: 0 4px env(safe-area-inset-bottom); border-right: 0; border-top: 1px solid var(--line); }
+    padding: 0 max(8px, env(safe-area-inset-left)) env(safe-area-inset-bottom); border-right: 0; border-top: 1px solid var(--line); }
   .side .brand { display: none; }
   .nav { flex-direction: row; flex: 5; margin: 0; justify-content: space-around; }
   .nav a { position: relative; }
@@ -410,7 +493,7 @@ body.readonly button.star:not(.on) { display: none; }
   .gtl-row { grid-template-columns: 110px 1fr; gap: 8px; }
   .gtl-axis .gtl-track span:not(:first-child):not(.gtl-end) { display: none; }
   .nav a, .user { flex: 1; flex-direction: column; justify-content: center; gap: 3px; width: auto; height: auto; padding: 0; border-radius: 12px; background: transparent !important; }
-  .nav a span { display: block; font-size: 11px; line-height: 14px; }
+  .nav a span { display: block; font-size: 11px; line-height: 14px; letter-spacing: -.01em; white-space: nowrap; }
   .nav a.on { color: var(--text); }
   .nav a.on .ico { color: var(--hue); }
   .user { margin: 0; }

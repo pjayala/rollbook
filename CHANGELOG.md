@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.11.0 (2026-11-12)
+
+### Home: every sport on one screen
+
+- A new **Home** page (`#/`, first in the sidebar) shows all sessions of all
+  sports: distance (lead figure), moving time, sessions and active days for
+  the chosen range; a ribbon of km per week stacked by sport over the whole
+  history (per day for spans up to 120 days; hover a sport in the legend or
+  the Sports table to see it alone, click a week for its month's sessions);
+  the latest sessions with route thumbnails; a Sports table (sessions, km,
+  time, best 10 min or best 20-min power indoors, last session) that opens
+  each sport's Progress or session list; this year so far against the same
+  days last year; an all-sports calendar.
+- Pick the period on Home itself: All time, This year, last year, 12 months,
+  90 or 30 days, or Custom (from / to dates). The figures then show the change
+  against the period before (the same days last year for This year), and the
+  chart, recent sessions, Sports table and calendar follow it. The choice is
+  the same range as the top-bar menu, so the other pages follow too; the
+  menu gained This year and shows a year or custom range when one is set.
+- Sports share the one orange: the sport with most km in the last year gets
+  it, the next two its tint and deep shade, the rest greys.
+- **Progress** moved to `#/progress`. The sport menu has **All sports**:
+  Sessions then lists every sport with a Sport column; Progress, Map and
+  Segments, which are per sport, ask you to pick one.
+- `GET /api/tracks?ids=1,2,…` (up to 50 ids, any sport, through the edits
+  overlay) for the thumbnails.
+
 ## 0.10.0 (2026-11-10)
 
 ### Python 3.15
