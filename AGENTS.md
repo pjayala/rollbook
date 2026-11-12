@@ -75,7 +75,7 @@ web/app.py              `rollbook app`: desktop window (pywebview / Chrome-Edge 
 web/mcp_server.py       `rollbook mcp`: read-only MCP tools over stdio JSON-RPC
 web/strava_web.py       `rollbook strava`: session-cookie sync of new activities from strava.com
 opencode.json           registers `./rollbook mcp` as the `rollbook` MCP server
-web/static/             index.html / app.js / map.js / compare.js / gear.js / style.css, vanilla JS + SVG/canvas, no CDN
+web/static/             index.html / app.js / map.js / compare.js / gear.js / home.js / style.css, vanilla JS + SVG/canvas, no CDN
 web/static/icon.svg     app icon master; favicon.svg is its 16-32 px simplification
 web/static/inter-*.woff2 Inter variable font (Latin subset, OFL, Inter-OFL.txt), served locally
 assets/                 rendered icons: rollbook-{128..1024}.png, rollbook.icns, rollbook.ico
@@ -467,6 +467,36 @@ changing `derive()`.
 * **Sidebar** (`sideInit`): the button left of back/forward (or ⌘\ / Ctrl+\)
   hides it, `body.side-hidden`, saved in `localStorage.sideHidden`; charts
   redraw at the new width. Below 720 px it is the bottom bar and never hides.
+* **Home** (`web/static/home.js`, `#/`, the landing page; Progress is
+  `#/progress`): every sport at once, so the sport selector is hidden there
+  (`body[data-page=home]`). Hero range control (`homeRanges`: All time,
+  This year, last year, 12 months, 90 / 30 days, Custom with two date
+  inputs) sets the same `S.range` as the top-bar menu via `setRange()`.
+  `S.range` (app.js, `rangeSpan()` → `[lo, hi)` local ms, null = all time):
+  `all`, `<days>`, `ytd`, `y<YYYY>`, `c:<from>:<to>` (both days included;
+  anything else, 31 Feb or from > to = all time); `inRange()` and segment
+  efforts use it. Figures show the change against `prevSpan()` (same days
+  of last year for `ytd`, the year before for `y`, as many days before for
+  the rest) from the values as shown, grey. The ribbon spans the range
+  (`ribbonBuckets(…, end, from)`), the feed lists the newest sessions in it;
+  "this week · last" and "<year> so far" ignore it. Hero: lead distance figure,
+  moving time, sessions, active days, a "this week · last" finding line, and
+  the ribbon (`ribbonBuckets`: km per local-Monday week, per day when the
+  span is ≤ 120 days, stacked by sport; click → Sessions filtered by that
+  month via `S.q`). Sports are coloured by `sportOrder()` (km in the last
+  365 days, then all-time sessions) through `SPORT_SHADES` (hue, tint, deep,
+  then greys): one hue family, no rainbow. Recent feed: up to 12 newest
+  sessions, trimmed after layout to end level with the right column (6 when
+  stacked), thumbnails from one `GET /api/tracks?ids=` (≤ 50 ids, any sport,
+  edits overlay) drawn by `thumbPath`. Sports table rows link to the sport's
+  Progress / Sessions (`a[data-sport]` sets the sport, then the href routes).
+  "<year> so far" = `yearToDate()` (1 Jan → today vs the same days a year
+  earlier, 29 Feb → 28 Feb), change from the rounded km shown, grey (volume
+  has no good direction). **All sports** (`ALL = "*"` in `S.type`,
+  `isAll()`, `curSport()` for per-sport defaults): `loadActs(ALL)` asks
+  `/api/activities` without `type`; Sessions adds a Sport column; Progress,
+  Map and Segments render `viewPickSport()`. Pure helpers are tested under
+  node in `tests/test_frontend_home.py`.
 * **Compare** (`web/static/compare.js`, #16): `#/compare/<subject>/<reference>`,
   reached from **Compare…** on a session (a picker: suggestions, same route via
   `sameRoute()`, then the sport), the **Compare** action in "Same route", or two

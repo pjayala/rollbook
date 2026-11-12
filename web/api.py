@@ -209,13 +209,35 @@ def api_activity(db, q, M, aid):
     return act
 
 
+TRACK_IDS_MAX = 50  # the Home page's recent feed asks for a dozen route thumbnails
+
+
+def track_ids(v):
+    """`?ids=1,2,3` -> distinct ints, at most TRACK_IDS_MAX; ValueError on anything else."""
+    parts = str(v).split(",")
+    if not 0 < len(parts) <= TRACK_IDS_MAX or not all(ACTIVITY_ID.fullmatch(p) for p in parts):
+        raise ValueError("bad ids")
+    return list(dict.fromkeys(int(p) for p in parts))
+
+
 def api_tracks(db, q, M):
     typ = q.get("type")
-    if not typ:
+    if q.get("ids") is not None:
+        # specific sessions of any sport (the Home feed); through the edits overlay, so a
+        # hidden / deleted id simply has no track
+        try:
+            want = track_ids(q["ids"])
+        except ValueError:
+            return {"error": f"ids: up to {TRACK_IDS_MAX} activity ids, comma-separated"}
+        ids = db.execute(
+            f"SELECT id, samples FROM activities WHERE id IN ({','.join('?' * len(want))}) AND has_gps "
+            "AND parse_error IS NULL", want).fetchall()
+    elif not typ:
         return {"error": "type required"}
-    ids = db.execute(
-        "SELECT id, samples FROM activities WHERE type=? AND has_gps AND parse_error IS NULL",
-        (typ,)).fetchall()
+    else:
+        ids = db.execute(
+            "SELECT id, samples FROM activities WHERE type=? AND has_gps AND parse_error IS NULL",
+            (typ,)).fetchall()
     ms = M.get_many(db, ids)
     keep = [(aid, ms[aid]["trk"]) for aid, _ in ids if ms.get(aid, {}).get("trk")]
     return {"ids": [k for k, _ in keep], "trk": [v for _, v in keep]}

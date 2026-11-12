@@ -24,7 +24,7 @@ Commands
   rollbook login | whoami              OAuth setup / check           (API only)
 """
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 
 import argparse
 import hashlib
