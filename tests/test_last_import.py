@@ -330,9 +330,9 @@ class FrontendEscaping(unittest.TestCase):
         import re
         from test_frontend_power import _src
         m = re.search(r"^async function newRecordsPanel\(.*?^}$", _src(), re.M | re.S)
-        self.assertIsNotNone(m, "newRecordsPanel not found in app.js")
+        self.assertIsNotNone(m, "newRecordsPanel not found in web/static")
         fn = m.group(0)
-        for raw in ("r.a.name", "r.type", "r.n", "n", "fdate(when)", "fdate(r.a._d)"):
+        for raw in ("r.a.name", "r.type", "r.n", "n", "fdate(when)", "fdate(r.a._d)", "a.name", "fdate(a._d)", "sport"):
             self.assertIn("esc(%s)" % raw, fn, raw)
             self.assertNotIn("${%s}" % raw, fn, raw)
         self.assertNotIn("${r.aid}", fn)  # navigation goes through data-i + okAid, not raw ids in markup

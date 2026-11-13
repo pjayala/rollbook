@@ -50,6 +50,7 @@ requirements-optional.txt  pywebview, the one optional package (native app windo
 tests/                  unittest suite (parsing, logic, importer, Strava sync, app, weather, laps, FTP, MCP, LAN/TLS/QR, end-to-end API); run in CI
 tools/demo.py           synthetic demo athlete (export + DB + seeded caches), never real data
 tools/screenshots.py    regenerates docs/screenshots/*.png from the demo, headless Chrome, --offline
+tools/smoke.py          opens every page of the demo in headless Chrome (1440 + 390 px), fails on a script error
 CHANGELOG.md            release notes; `rollbook --version` = __version__ in bin/rollbook
 samples/*.gpx           two hand-checked rides used as regression fixtures
 web/server.py           `rollbook web`: wiring + routing (handler, start/serve), read-only DB
@@ -75,7 +76,19 @@ web/app.py              `rollbook app`: desktop window (pywebview / Chrome-Edge 
 web/mcp_server.py       `rollbook mcp`: read-only MCP tools over stdio JSON-RPC
 web/strava_web.py       `rollbook strava`: session-cookie sync of new activities from strava.com
 opencode.json           registers `./rollbook mcp` as the `rollbook` MCP server
-web/static/             index.html / app.js / map.js / compare.js / gear.js / home.js / style.css, vanilla JS + SVG/canvas, no CDN
+web/static/             index.html + style.css + classic scripts (vanilla JS + SVG/canvas, no CDN), one concern per file:
+  core.js               palette (PAL), icons, formatting, dates, api(), tooltip
+  chart.js / map.js     SVG chart engine / canvas slippy map
+  zones.js              HR zones, FTP choice, power zones
+  state.js / range.js   S, sport selector model, loaders / the date range (S.range)
+  widgets.js            cards(), routePill(), go()
+  records.js            personal records, new records after an import
+  progress.js circuits.js calendar.js   Progress page and its panels
+  sessions.js mappage.js segments.js profile.js favorites.js weather.js gear.js home.js compare.js   one page / feature each
+  session.js            session page: builds the page object P, lays out, calls the parts below
+  sessionsel.js sessioncharts.js sessionpanels.js bestspeeds.js laps.js elevation.js   its parts
+  shell.js              history, sidebar, enlarged panels, route(); import.js / edits.js dialogs
+  main.js               boot(); loaded last
 web/static/icon.svg     app icon master; favicon.svg is its 16-32 px simplification
 web/static/inter-*.woff2 Inter variable font (Latin subset, OFL, Inter-OFL.txt), served locally
 assets/                 rendered icons: rollbook-{128..1024}.png, rollbook.icns, rollbook.ico
@@ -165,6 +178,10 @@ you pay a 310 MB re-extract.
   tracks.
 * `moving_s`, `pause_s`, `best30_kmh`, `best<N>min_kmh` and everything in
   `splits` exist **only** here — Strava's export does not contain them.
+* `best30_kmh` is the best 30-**second** window (`best_window_kmh`, same rule
+  as `best<N>min_kmh`). Before `enrich_v` 2 it was 30 *samples*, 3 min at
+  6 s recording; `db enrich --missing` redoes rows with `enrich_v` NULL or
+  below `ENRICH_VERSION`, from the scaled samples like the other windows.
 * `watts_avg` / `watts_max` — power recorded in the file (FIT record field 7,
   TCX `ns3:Watts`, GPX `<power>`), mean of the readings with 0 W (coasting)
   included. On the 87 Virtual Rides: 81 within 1 W of Strava's
@@ -220,7 +237,7 @@ gradients, so `best10min_kmh` of 47–58 km/h are simulated descents.
 
 Look: dark, one neutral ground (#0a0a0a) with panels one lightness step up, no
 borders or shadows at rest; Inter with tabular figures; a sidebar (icon rail
-≤ 1100 px, bottom bar ≤ 720 px). Colour is on data only: `PAL` in app.js / the
+≤ 1100 px, bottom bar ≤ 720 px). Colour is on data only: `PAL` in core.js / the
 tokens in style.css. One hue (the wheel's orange) for the main series, white for
 its trend, greys for context, rose (`PAL.hr`) only for heart rate; speed, zones
 and the heatmap are ramps of those hues, not rainbows.
@@ -254,7 +271,7 @@ changing `derive()`.
     POST.
   * POSTs are 403 unless `--lan-write`; `/api/bye` is always 403.
     `_same_origin` compares Origin with `<scheme>://<Host>`.
-  * `/api/status` carries `readonly`; `app.js` then hides import / edit /
+  * `/api/status` carries `readonly`; `main.js` then hides import / edit /
     stars / profile save (`body.readonly`).
   * The token is in `data/lan_token` (0600), `--new-token` rotates it.
   * Cert (`web/tls.py`): self-signed leaf, no CA, in `data/tls/`
@@ -472,7 +489,7 @@ changing `derive()`.
   (`body[data-page=home]`). Hero range control (`homeRanges`: All time,
   This year, last year, 12 months, 90 / 30 days, Custom with two date
   inputs) sets the same `S.range` as the top-bar menu via `setRange()`.
-  `S.range` (app.js, `rangeSpan()` → `[lo, hi)` local ms, null = all time):
+  `S.range` (range.js, `rangeSpan()` → `[lo, hi)` local ms, null = all time):
   `all`, `<days>`, `ytd`, `y<YYYY>`, `c:<from>:<to>` (both days included;
   anything else, 31 Feb or from > to = all time); `inRange()` and segment
   efforts use it. Figures show the change against `prevSpan()` (same days
@@ -560,7 +577,7 @@ changing `derive()`.
   ids, `loadSegs` re-attaches the star (and a custom name) to the segment
   whose ends are within 80 m and length within 10%.
 * **New records after an import** (#17; `web/lastimport.py`, `newRecords()`
-  in app.js): `Importer._work` diffs raw-DB ids before/after and stores the
+  in records.js): `Importer._work` diffs raw-DB ids before/after and stores the
   new ones, oldest first, in `data/last_import.json`. A new id whose start is
   within 2 min of a removed id's start is a dedup replacement: it is counted
   in `replaced`, not announced. The job dict carries only `new_total` /
@@ -591,6 +608,10 @@ changing `derive()`.
   * `RECORD_METRICS` is shared with the records table; `groupCircuits()`
     with the Circuits panel.
   * Every name is `esc()`d; ids select only among API-returned rows.
+  * On a sport's Progress page (`opt.sport`) the panel is scoped to that
+    sport (`nrScope`): its records only, hidden when the import had none of
+    it, plus an "Imported:" list of its new sessions (`nrSessions`, newest
+    first, ≤ `NR.cap`). All sports and the Import dialog show every sport.
 * **Session edits** (**Edit** on the session page; `web/edits.py`): name,
   sport, hidden, deleted, stored as overrides in `data/edits.json` keyed by
   activity id (Strava's, or the SHA-1-of-path id of an import — both stable,
@@ -643,6 +664,21 @@ changing `derive()`.
   empty, never a startup crash). Memory changes only after the write: a
   failed save leaves the store as it was, and a deleted import's file is
   removed only once its edit is on disk.
+* **Best speeds** (session page, `#p-bw`): `derive()` stores `bw`
+  {seconds: [km/h, t0, t1]} for `SPEED_WINDOWS` (30 s … 60 min, a window
+  fits when 90% of it does; `best_window_at`, ties keep the earliest); list
+  rows carry `bw` {seconds: km/h} without times, `api_activity` the cleaned
+  triples (`clean_bw`), MCP `best_speed_kmh` {label: {kmh, start_s}}. The
+  panel draws them on a log x axis (`x = log10 s`, `bwTicks`) against the
+  sport's best of all time and of the 90 days before the session
+  (`bwContext`, other visible sessions, ≥ `BW_MIN_PEERS` each; rows cached
+  before `bw` fall back to `best<N>min_kmh` / `b30`..`b60`, never
+  `best30_kmh`), with a table (`bwTable`, rank via `bwRank` after 2-decimal
+  rounding). A point or row selects the window through `hl.highlightBy(0,
+  t0, t1, true, exact)`; `clearRowSel()` clears it. Hidden when fewer than 3
+  windows and on Virtual rides; the strip keeps a "Best 10 min" tile. Not
+  monotone by nature: a 30 min window can beat the best 20 min when the fast
+  parts sit at both ends.
 * **Best efforts** (#6, `best_effort()` in analysis.py): the fastest *elapsed*
   time over 400 m, 1 km, 5 km, 10 km, half and full marathon anywhere in a
   session (no 400 m for rides, none for virtual rides), in the metrics cache as
@@ -783,6 +819,13 @@ swim, two 30-second-sampling skates) — find them via `km_diff_pct`.
   `api.GET`, actions as `Post(fn, limit, what)` in `api.POST`. UI in
   `web/static/` (vanilla JS, no CDN, no inline script). SPDX header on new
   files.
+* **Frontend files.** Classic `<script>`s sharing one global scope, listed in
+  `index.html` in dependency order, `main.js` last (it boots). A new file gets
+  a `<script>` tag there; a top-level name is declared once across all of
+  them, and a top-level initialiser may only use names from earlier files
+  (`tests/test_frontend_modules.py` checks all three and keeps files under 750
+  lines). Tests cut functions out of `helpers.frontend_src()`, never one file
+  by path. Run `python3 tools/smoke.py` after moving code between files.
 * **One predicate, one place.** A rule like "does session X get Y" (outdoor,
   visible, eligible) is one function in the owning module, called by the CLI,
   `api.py` and `mcp_server.py` alike; never re-spelt as SQL in one place and

@@ -343,7 +343,7 @@ function wirePartButtons(root) {
   const ro = S.readonly || (S.gear && S.gear.readonly_store);  // the dialog could only fail to save
   root.querySelectorAll("[data-pedit]").forEach(b => { if (ro) b.disabled = true; else b.onclick = () => openPartDialog(b.dataset.pedit); });
 }
-const W = (html, ro = "") => `<span class="gear-w">${html}</span>${ro ? `<span class="gear-r">${ro}</span>` : ""}`;
+const gearW = (html, ro = "") => `<span class="gear-w">${html}</span>${ro ? `<span class="gear-r">${ro}</span>` : ""}`;
 
 async function viewGear(seq) {
   const app = $("#app");
@@ -380,9 +380,9 @@ async function viewGear(seq) {
     </div>
     <div class="panel"><h2>Parts <span class="muted">${parts.length}</span></h2>
       ${parts.length ? `<div class="scroll"><table class="gparts gp-main"><thead><tr><th class="l">part</th><th class="l">fitted to</th><th>km</th><th>sessions</th><th class="l">service</th><th><span class="vh">actions</span></th></tr></thead><tbody>${partRows(parts)}</tbody></table></div>`
-        : `<p class="muted">No parts yet.${W(" Add wheels to track rotation, shoes to know when to replace them.")}</p>`}</div>
+        : `<p class="muted">No parts yet.${gearW(" Add wheels to track rotation, shoes to know when to replace them.")}</p>`}</div>
     <div class="panel" id="g-cmp" hidden></div>
-    <div class="panel"><h2>Default gear per sport</h2><p class="muted small">New sessions of a sport get its default from the day it is set; older sessions keep theirs.${W(" Change one session's gear in its <b>Edit</b>.")}</p>
+    <div class="panel"><h2>Default gear per sport</h2><p class="muted small">New sessions of a sport get its default from the day it is set; older sessions keep theirs.${gearW(" Change one session's gear in its <b>Edit</b>.")}</p>
       ${sports.length ? `<div class="scroll gdefs"><table><thead><tr><th class="l">sport</th><th class="l">default</th><th><span class="vh">actions</span></th></tr></thead><tbody>${sports.map(defRow).join("")}</tbody></table></div>`
         : `<p class="muted small">Set a gear's sports to choose it as a default.</p>`}</div>`;
   if ($("#g-showret")) $("#g-showret").onchange = e => { localStorage.gearRetired = e.target.checked ? "1" : "0"; route(); };
@@ -404,7 +404,7 @@ function firstRun() {
   const rows = S.types.slice(0, 6).map(t => `<tr><td class="l"><b>${esc(t.type)}</b></td><td>${t.n} sessions</td><td>${fkm(t.km)} km</td>
     <td class="l muted small">since ${esc(t.first || "–")}</td>
     <td class="l acts gear-w"><button class="btn small" data-first="${esc(t.type)}">Add ${esc(NOUN.get(S.gear.SG.get(t.type)) || "gear")}</button></td></tr>`).join("");
-  return `<p class="muted">No gear yet.${W(" Add your skates, bike or shoes, then fit their parts (wheels, frame, boots, tyres…) to count the km on each. Made the default from the sport's first session, it covers all of them at once.",
+  return `<p class="muted">No gear yet.${gearW(" Add your skates, bike or shoes, then fit their parts (wheels, frame, boots, tyres…) to count the km on each. Made the default from the sport's first session, it covers all of them at once.",
     " Gear is set up on the computer running Rollbook.")}</p>${rows ? `<div class="scroll gdefs"><table><tbody>${rows}</tbody></table></div>` : ""}`;
 }
 
@@ -450,7 +450,7 @@ async function viewGearOne(id, seq) {
           <td class="l">${esc(m.from)}</td><td class="l">${m.to ? esc(m.to) : `<span class="muted">still on</span>`}</td><td>${fkm(pt.km_total)}</td>
           <td class="l svccell" title="${esc(svcTitle(p, pt))}">${svcCell(p, pt)}</td>
           <td class="l acts">${!m.to && m.from < today ? `<button class="linkbtn gear-w" data-off="${m.i}" aria-label="Take ${esc(p.name)} off today">Take off</button> ` : ""}${!m.to && p.service_km ? `<button class="linkbtn gear-w" data-svc="${esc(m.part)}" aria-label="Log service, ${esc(p.name)}">Log service</button> ` : ""}<button class="linkbtn gear-w" data-mdates="${m.i}" aria-label="Edit dates of ${esc(p.name)}">Edit dates</button></td></tr>`; }).join("")}</tbody></table></div>`
-        : `<p class="muted">No parts on it yet.${W(" <b>Fit a part</b> to count the km on its wheels, frame, boots…")}</p>`}
+        : `<p class="muted">No parts on it yet.${gearW(" <b>Fit a part</b> to count the km on its wheels, frame, boots…")}</p>`}
     </div>
     ${mounts.length ? `<div class="panel"><h2>Parts over time</h2>${timelineHtml(timelineRows(mounts, G.P, today))}</div>` : ""}
     <div class="grid g2 top">
@@ -462,7 +462,7 @@ async function viewGearOne(id, seq) {
       ${recent.length ? `<div class="scroll gsess"><table><thead><tr><th class="l">date</th><th class="l">name</th><th class="l">sport</th><th>km</th><th class="l"></th></tr></thead><tbody>
         ${recent.map(a => `<tr class="click" data-id="${esc(a.id)}"><td class="l">${a.date ? fdate(new Date(a.date + "T12:00:00")) : "–"}</td><td class="l"><a href="#/session/${esc(a.id)}">${esc(a.name)}</a></td><td class="l muted">${esc(a.type)}</td><td>${fkm(a.km)}</td><td class="l muted small">${a.src === "explicit" ? "chosen" : ""}</td></tr>`).join("")}</tbody></table></div>
         ${(g.sports || []).length && t.sessions > recent.length ? `<p><button class="linkbtn" id="g-all">All ${t.sessions} in Sessions</button></p>` : ""}`
-        : `<p class="muted">No session uses it yet.${W(" Make it a sport's default on the <a href=\"#/gear\">Gear</a> page, or pick it in a session's <b>Edit</b>.")}</p>`}
+        : `<p class="muted">No session uses it yet.${gearW(" Make it a sport's default on the <a href=\"#/gear\">Gear</a> page, or pick it in a session's <b>Edit</b>.")}</p>`}
     </div>`;
   $("#g-edit").onclick = () => openGearDialog(id);
   $("#m-add").onclick = () => openMountDialog(id);

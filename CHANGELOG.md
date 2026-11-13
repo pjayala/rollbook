@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.12.0 (2026-11-13)
+
+### Best speeds on the session page
+
+- The "Best 5 / 10 / 20 min", "Best 30 / 60 min" and "Top speed (30 s)" tiles
+  are replaced by a **Best speeds** panel under the map and speed chart: the
+  fastest 30 s, 1, 2, 5, 10, 20, 30, 45 and 60 min of the session as a curve
+  on a log time axis, against the sport's best of all time and of the 90 days
+  before (grey), with a table of speed, pace, distance, rank and gap to the
+  best. Click a point or a row to show that stretch on the map and charts.
+  The strip keeps one **Best 10 min** tile with its rank. Not on virtual rides
+  (simulated gradients).
+
+### Internal
+
+- `web/static/app.js` (~3000 lines) is split into one file per concern
+  (`core.js`, `chart.js`, `session.js`, `sessionpanels.js`, …, `main.js`
+  last), and the session page into a page object plus its parts. No change
+  in behaviour; the demo screenshots are pixel-identical.
+  `tools/smoke.py` opens every page of the demo in headless Chrome and fails
+  on a script error.
+- Session page selection: picking a row in one table (km, leg, lap, best
+  effort, best speed) now always clears the others; before, a pick left in
+  another table could make the next click there deselect instead of select,
+  and laps were never cleared. Hovering a segment row no longer drops the
+  current selection. Leaving a session page while it loads no longer draws
+  it over the next page.
+
+### Fixes
+
+- "Top speed (30 s)" (`best30_kmh`) was the best over 30 *samples*, not 30
+  seconds: 3 minutes at the 6-second recording used since 2025-08. It is now
+  a 30-second window. Run `./rollbook db enrich --missing` once to redo
+  existing sessions (imports and `strava sync` do it for what they add); `db enrich` records its rule version
+  in a new `enrich_v` column.
+
+- A sport's Progress page showed every sport's records from the last import
+  (Inline Skate segment PRs on Virtual Ride). It now shows only that sport's,
+  hides the panel when the import had none of it, and lists the sport's new
+  sessions, so one that set no record still shows. All sports and the Import
+  dialog still show everything.
+
 ## 0.11.0 (2026-11-12)
 
 ### Home: every sport on one screen
