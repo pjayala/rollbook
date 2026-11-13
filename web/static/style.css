@@ -362,6 +362,7 @@ tr.hiddenrow td { opacity: .5; }
 .zcol b { color: var(--text); font-weight: 500; font-size: 12px; }
 .zbar { width: 100%; height: 64px; display: flex; align-items: flex-end; border-bottom: 1px solid #333; }
 .zbar i { display: block; width: 100%; min-height: 0; border-radius: 4px 4px 0 0; }
+.bw-grid { margin-top: 4px; align-items: start; }
 .pstats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px 20px; }
 .pstat { display: grid; padding: 6px 0; }
 .pstat span { color: var(--muted); font-size: 12px; }
@@ -523,6 +524,7 @@ body.readonly button.star:not(.on) { display: none; }
   .pfield { grid-template-columns: 1fr; }
   .pfield small { grid-column: 1; }
   .pstats { grid-template-columns: repeat(2, 1fr); }
+  table.bw td:nth-child(3), table.bw th:nth-child(3), table.bw td:nth-child(4), table.bw th:nth-child(4) { display: none; }
   .bigmap { height: calc(100vh - 300px); min-height: 380px; }
   body .panel.expanded { inset: 8px; }
   .scroll { -webkit-overflow-scrolling: touch; }

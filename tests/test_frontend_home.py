@@ -15,7 +15,7 @@ NODE = shutil.which("node")
 HOME_JS = os.path.join(ROOT, "web", "static", "home.js")
 MAP_JS = os.path.join(ROOT, "web", "static", "map.js")
 # `pace` ends in a comment, so its cut runs on through `pct` (the next line)
-APP_CONSTS = ["isNum", "esc", "f0", "f1", "fkm", "fnum", "hours", "pace", "DAY", "MON", "fdate", "dayOf", "pwAvg",
+APP_CONSTS = ["isNum", "esc", "f0", "f1", "fkm", "fnum", "hours", "pace", "pct", "DAY", "MON", "fdate", "dayOf", "pwAvg",
               "RANGE_DAYS", "RANGE_RE", "inSpan", "ymd"]
 APP_FUNCS = ["dur", "dayMs", "rangeSpan", "prevSpan", "rangeLabel", "prevLabel"]
 HOME_CONSTS = ["SPORT_SHADES", "RUNLIKE", "sportShade"]
@@ -96,7 +96,7 @@ class Home(unittest.TestCase):
         r = self.js("return ribbonBuckets([], ['Run'], L('2026-11-12T10:00'), L('2026-11-10T10:00')).starts.length;")
         self.assertEqual(r, 3)  # an empty range still has its days
 
-    # ---- date ranges (app.js)
+    # ---- date ranges (range.js)
 
     def test_range_spans(self):
         r = self.js("""const now = L('2026-11-12T15:00'), f = x => x && [new Date(x.lo).toString().slice(4, 24), isFinite(x.hi) ? new Date(x.hi).toString().slice(4, 24) : 'open'];

@@ -82,7 +82,7 @@ class ReadOnly(LanBase):
             self.assertIs(json.loads(r.read())["readonly"], False)
 
     def test_everything_needs_the_token(self):
-        for path in ("/", "/api/types", "/api/activity/1001", "/tiles/osm/1/0/0.png", "/app.js"):
+        for path in ("/", "/api/types", "/api/activity/1001", "/tiles/osm/1/0/0.png", "/main.js"):
             r, body = self.req("GET", path, cookie=False)
             self.assertEqual(r.status, 403, path)
             self.assertIn(b"rollbook web --lan", body)

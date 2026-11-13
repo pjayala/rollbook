@@ -64,6 +64,41 @@ class Tracks(unittest.TestCase):
         d = [i * 5.0 if i < 600 else 3000 + (i - 600) * 7.0 for i in t]  # 18 then 25.2 km/h
         self.assertAlmostEqual(analysis.best_window(t, d, 0, len(t) - 1, 600), 25.2, places=1)
 
+    # ---- best speed per window length (`bw`, the session page's speed curve)
+
+    def test_best_window_at_position_and_ties(self):
+        t = list(range(0, 1201))
+        d = [i * 5.0 if i < 600 else 3000 + (i - 600) * 7.0 for i in t]  # 18 then 25.2 km/h
+        v, t0, t1 = analysis.best_window_at(t, d, 0, len(t) - 1, 600)
+        self.assertAlmostEqual(v, 25.2, places=6)
+        self.assertEqual((t0, t1), (600, 1200))  # the only 600 s window entirely at 25.2
+        v, t0, t1 = analysis.best_window_at(t, d, 0, len(t) - 1, 30)
+        self.assertAlmostEqual(v, 25.2, places=6)
+        self.assertEqual((t0, t1), (600, 630))  # equal windows after it: the earliest wins
+
+    def test_best_window_needs_90_percent_cover(self):
+        d = lambda t: [x * 5.0 for x in t]
+        t7 = list(range(0, 700, 7))  # a 28 s window fits 30 s (>= 27)
+        self.assertAlmostEqual(analysis.best_window_at(t7, d(t7), 0, len(t7) - 1, 30)[0], 18.0)
+        t20 = list(range(0, 700, 20))  # 20 s or 40 s: no 27-30 s window
+        self.assertIsNone(analysis.best_window_at(t20, d(t20), 0, len(t20) - 1, 30))
+
+    def test_best_windows_only_what_fits(self):
+        t = list(range(0, 400, 2)); d = [x * 5.0 for x in t]  # 6.6 min at 18 km/h
+        bw = analysis.best_windows(t, d)
+        self.assertEqual(sorted(bw, key=int), ["30", "60", "120", "300"])
+        for k, (v, t0, t1) in bw.items():
+            self.assertAlmostEqual(v, 18.0, places=3)
+            self.assertEqual(t0, 0)  # all equal: the first window that covers 90% of the span
+            self.assertTrue(int(k) * 0.9 <= t1 - t0 < int(k) * 0.9 + 2, (k, t1))
+
+    def test_clean_bw_drops_bad_entries(self):
+        good = [24.1, 10, 610]
+        self.assertEqual(analysis.clean_bw({"600": good, "30": [1, 2], "60": [float("nan"), 0, 60], "120": [True, 0, 120],
+                                            "300": [20.0, 50, 10], "999": good, "1200": "x"}), {"600": good})
+        self.assertIsNone(analysis.clean_bw([good]))
+        self.assertIsNone(analysis.clean_bw({"600": [0, 0, 600]}))
+
     # ---- best efforts by distance (#6)
 
     def test_best_effort_constant_speed(self):
