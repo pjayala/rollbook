@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Pedro Ayala. Rollbook is free software, see LICENSE.
 "use strict";
-/* Import dialog: uploads, Strava sync, refresh after the data changed. */
+/* Import dialog: uploads, Strava / intervals.icu sync, refresh after the data changed. */
 
 // ------------------------------------------------------------------ import
 
@@ -17,7 +17,7 @@ function openImport(files) {
     if (!$("#imp-sport").value) $("#imp-sport").value = isAll() ? "" : S.type || "";
   }
   if (files && files.length && !Imp.busy) addImportFiles(files);
-  if (!Imp.busy) stravaStatus();
+  if (!Imp.busy) { $("#imp-prog").hidden = true; syncStatus(); }  // a finished run's progress isn't news on reopening
 }
 function addImportFiles(list) {
   for (const f of list) if (!Imp.files.some(g => g.name === f.name && g.size === f.size)) Imp.files.push(f);
@@ -33,7 +33,7 @@ function drawImportList(state = {}) {
   $("#imp-list").querySelectorAll("[data-rm]").forEach(a => a.onclick = e => { e.preventDefault(); Imp.files.splice(+a.dataset.rm, 1); drawImportList(); });
   $("#imp-sport-row").hidden = !Imp.files.length;
   $("#imp-go").disabled = Imp.busy || !Imp.files.some(kindOf);
-  if (Imp.busy) $("#imp-strava").disabled = true;
+  if (Imp.busy) $("#import-dlg").querySelectorAll("#imp-sync, [data-sync]").forEach(b => b.disabled = true);
 }
 function upload(f, sport, onProgress) {
   return new Promise((resolve, reject) => {
@@ -73,10 +73,10 @@ async function runImport() {
   } catch (e) {
     phase.innerHTML = `<span class="down">Failed: ${esc(e.message)}</span>`;
   } finally {
-    Imp.busy = false; drawImportList(state); stravaStatus();
+    Imp.busy = false; drawImportList(state); syncStatus();
   }
 }
-/** Poll a running import job (upload or Strava sync) to the end; the bar goes from `base` % to 100 %. */
+/** Poll a running import job (upload or a sync) to the end; the bar goes from `base` % to 100 %. */
 async function finishImport(base) {
   const bar = $("#imp-bar"), phase = $("#imp-phase"), log = $("#imp-log");
   let j;
@@ -84,7 +84,7 @@ async function finishImport(base) {
     j = await api("import");
     const frac = j.total ? j.done / j.total : 0;
     const p = j.phase || "";
-    bar.style.width = (base + (p.startsWith("importing") || p.startsWith("checking Strava") ? frac * (85 - base) : j.state === "running" ? 88 - base : 100 - base)).toFixed(1) + "%";
+    bar.style.width = (base + (p.startsWith("importing") || p.startsWith("checking ") ? frac * (85 - base) : j.state === "running" ? 88 - base : 100 - base)).toFixed(1) + "%";
     phase.textContent = `${p}${j.total ? ` · ${j.done}/${j.total}` : ""}`;
     log.textContent = (j.log || []).join("\n"); log.scrollTop = log.scrollHeight;
     if (j.state !== "running") break;
@@ -98,39 +98,83 @@ async function finishImport(base) {
     throw new Error(j.error);
   }
   bar.style.width = "100%";
+  bar.classList.toggle("warn", Object.values(j.sources && typeof j.sources === "object" ? j.sources : {}).some(r => r && r.error));  // partly failed: not a plain success
   const dups = (j.log || []).filter(l => /skipped, (same session|already imported)/.test(l)).length;
-  const fetched = j.source === "strava" ? `<span class="muted">${j.fetched || 0} file${j.fetched === 1 ? "" : "s"} downloaded from Strava. </span>` : "";
-  phase.innerHTML = fetched + (j.added ? `<span class="up">${j.added} new activit${j.added === 1 ? "y" : "ies"} imported.</span>` : `<span class="muted">Done, nothing new: everything was already imported.</span>`) +
+  phase.innerHTML = syncSummary(j) + (j.added ? `<span class="up">${j.added} new activit${j.added === 1 ? "y" : "ies"} imported.</span>` : `<span class="muted">Done, nothing new: everything was already imported.</span>`) +
     (dups ? ` <span class="muted">${dups} already in Rollbook from another file (same start time and distance), skipped.</span>` : "");
   // `added` is a count: an export replacing an uploaded copy swaps ids at the same count
   if (j.added || j.changed) await refreshData();
   if (j.new_total || j.replaced) await newRecordsPanel($("#imp-records"));
   return j;
 }
-async function stravaStatus() {
-  const btn = $("#imp-strava"), st = $("#imp-strava-st");
-  try {
-    const s = await api("strava");
-    btn.disabled = Imp.busy || !s.configured || s.offline;
-    st.textContent = s.offline ? "off: rollbook runs with --offline"
-      : !s.configured ? "not set up: run ./rollbook strava auth in a terminal (log into strava.com, copy the _strava4_session cookie)"
-      : s.auth_expired ? "Strava login expired: run ./rollbook strava auth again"
-      : s.last_sync ? `last synced ${new Date(s.last_sync).toLocaleString()}` : "never synced";
-    st.className = "small " + (s.auth_expired ? "down" : "muted");
-  } catch { btn.disabled = true; st.textContent = ""; }
+/** Sync sources, in the order "Sync" runs them (Strava's copy is the watch's own file, intervals.icu fills gaps):
+ * label, how to set it up, what its downloads are (one, many). A Map: keys come from the server (job.source). */
+const SYNC = new Map([
+  ["strava", { label: "Strava", setup: "./rollbook strava auth", tip: "log into strava.com, copy the _strava4_session cookie", files: ["file downloaded", "files downloaded"] }],
+  ["intervals", { label: "intervals.icu", setup: "./rollbook intervals auth", tip: "intervals.icu Settings → Developer → API key", files: ["session Strava didn't have", "sessions Strava didn't have"] }],
+]);
+/** "YYYY-MM-DD HH:MM", local, like dates elsewhere in the app. */
+function whenLocal(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return "";
+  const p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
-async function runStravaSync() {
+/** One source's status line: {cls, text} from GET /api/<source>; offline: nothing (one line says it for all). */
+function syncLine(c, s, offline) {
+  if (!s || offline) return { cls: "muted", text: "" };
+  if (!s.configured) return { cls: "muted", text: `not set up: run ${c.setup} in a terminal`, title: c.tip, off: true };
+  if (s.auth_expired) return { cls: "down", text: `login expired: run ${c.setup} again (Sync skips it until then)`, title: c.tip };
+  return { cls: "muted", text: s.last_sync ? `last synced ${whenLocal(s.last_sync)}` : "never synced" };
+}
+/** The Sync block: one button for every set-up source, a line per source with an "only this one" link. */
+function syncHtml(st, offline) {
+  return [...SYNC].map(([k, c]) => {
+    const s = st[k], l = syncLine(c, s, offline);
+    return `<div class="imp-src-row"><span>${esc(c.label)}</span><span class="small ${l.cls}"${l.title ? ` title="${esc(l.title)}"` : ""}>${esc(l.text)}</span>
+      <span>${s && s.configured && !offline ? `<button class="linkbtn small" type="button" data-sync="${esc(k)}">only this one</button>` : ""}</span></div>`;
+  }).join("");
+}
+/** What a finished sync did, per source: files fetched (green), failures (red). j: GET /api/import. */
+function syncSummary(j) {
+  const res = j.sources && typeof j.sources === "object" ? j.sources : {};
+  return [...SYNC].filter(([k]) => Object.hasOwn(res, k)).map(([k, c]) => {
+    const r = res[k] || {};
+    if (r.error) return `<div><b>${esc(c.label)}</b>: <span class="down">${esc(r.error)}</span></div>`;
+    const n = isNum(r.fetched) ? r.fetched : 0;
+    return `<div><b>${esc(c.label)}</b>: <span class="${n ? "up" : "muted"}">${f0(n)} ${esc(c.files[n === 1 ? 0 : 1])}</span>${r.partial ? ` <span class="muted">(stopped at its time limit; sync again to continue)</span>` : ""}</div>`;
+  }).join("");
+}
+async function syncStatus() {
+  const st = {};
+  await Promise.all([...SYNC.keys()].map(async k => { try { st[k] = await api(k); } catch { st[k] = null; } }));
+  const offline = Object.values(st).some(s => s && s.offline);
+  const ready = [...SYNC].filter(([k]) => st[k] && st[k].configured && !st[k].auth_expired).map(([, c]) => c.label);
+  $("#imp-src").innerHTML = syncHtml(st, offline);
+  $("#imp-src").querySelectorAll("[data-sync]").forEach(b => { b.disabled = Imp.busy; b.onclick = () => runSync(b.dataset.sync); });
+  $("#imp-sync").disabled = Imp.busy || offline || !ready.length;
+  const msg = $("#imp-sync-st");
+  msg.textContent = offline ? "off: rollbook runs with --offline" : ready.length > 1 ? "Strava first, then what only intervals.icu has"
+    : ready.length ? `${ready[0]} only` : Object.values(st).some(s => s && s.configured) ? "log in again first (below)" : "no source set up yet";
+  msg.className = "small muted";
+}
+/** Sync one source, or k = "all": every set-up one, Strava first. */
+async function runSync(k) {
   const phase = $("#imp-phase");
-  Imp.busy = true; drawImportList(); $("#imp-strava").disabled = true;
-  $("#imp-prog").hidden = false; $("#imp-log").textContent = ""; nrCancel($("#imp-records")); phase.textContent = "contacting Strava…"; $("#imp-bar").style.width = "0";
+  phase.tabIndex = -1; phase.focus();  // the button about to be disabled had focus: keep it in the dialog, on the status
+  Imp.busy = true; drawImportList();
+  $("#imp-prog").hidden = false; $("#imp-log").textContent = ""; nrCancel($("#imp-records"));
+  phase.textContent = k === "all" ? "contacting Strava and intervals.icu…" : `contacting ${SYNC.get(k).label}…`; $("#imp-bar").style.width = "0";
   try {
-    const r = await fetch("/api/strava/sync", { method: "POST", headers: { "X-Rollbook": "1" } });
+    const r = await fetch(k === "all" ? "/api/sync" : `/api/${k}/sync`, { method: "POST", headers: { "X-Rollbook": "1" } });
     if (!r.ok) throw new Error((await r.json()).error || r.status);
     await finishImport(0);
   } catch (e) {
     phase.innerHTML = `<span class="down">Failed: ${esc(e.message)}</span>`;
   } finally {
-    Imp.busy = false; drawImportList(); stravaStatus();
+    Imp.busy = false; drawImportList();
+    await syncStatus();
+    if (document.activeElement === phase || document.activeElement === document.body) ($("#imp-sync").disabled ? phase : $("#imp-sync")).focus();
   }
 }
 /** Drop every client cache and redraw, after the DB (or its edits) changed underneath us.
@@ -149,7 +193,10 @@ function initImport() {
   $("#imp-close").onclick = () => $("#import-dlg").close();
   $("#imp-file").onchange = e => { addImportFiles(e.target.files); e.target.value = ""; };
   $("#imp-go").onclick = runImport;
-  $("#imp-strava").onclick = runStravaSync;
+  $("#imp-sync").onclick = () => runSync("all");
+  const drop = $("#imp-drop");  // a label around a hidden input: give it a keyboard way in
+  drop.tabIndex = 0;
+  drop.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); $("#imp-file").click(); } });
   $("#import-dlg").addEventListener("cancel", e => { if (Imp.busy) e.preventDefault(); });
   // drag files anywhere onto the page
   let depth = 0;

@@ -94,7 +94,7 @@ body.side-hidden #side-toggle { color: var(--text); }
 select, input { height: 32px; background: var(--surface); color: var(--text); border: 1px solid var(--control);
   border-radius: var(--radius-input); padding: 0 10px; font: inherit; font-size: 13px; }
 select { border-radius: var(--radius-control); padding: 0 12px; cursor: pointer; }
-input[type=checkbox] { height: auto; accent-color: var(--text); }
+input[type=checkbox], input[type=radio] { height: auto; padding: 0; accent-color: var(--text); }
 input[type=range] { height: auto; padding: 0; border: 0; background: none; accent-color: var(--text); }
 input::placeholder { color: var(--faint); }
 select:hover, input:hover { border-color: #555; }
@@ -122,6 +122,8 @@ select:hover, input:hover { border-color: #555; }
 .seg button:hover { color: var(--text); }
 .seg button.on { background: #3a3a3a; color: var(--text); }
 .toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+.toolbar[hidden] { display: none; }
+.gp-on { display: none; }
 .toolbar label { display: inline-flex; align-items: center; gap: 6px; }
 
 /* ------------------------------------------------------------ canvas */
@@ -288,8 +290,18 @@ dialog#import-dlg::backdrop, dialog#edit-dlg::backdrop, dialog.dlg::backdrop { b
 #imp-list { margin: 12px 0; font-size: 13px; }
 #imp-list .row { display: flex; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--rule); }
 #imp-list .row span:first-child { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pbar i.warn { background: var(--warning); }
 .pbar { height: 6px; background: var(--raised); border-radius: 3px; overflow: hidden; margin: 10px 0 8px; }
 .pbar i { display: block; height: 100%; width: 0; background: var(--hue); border-radius: 3px; transition: width .3s; }
+.imp-sync { margin-bottom: 12px; }
+.imp-sync .toolbar { margin-bottom: 6px; }
+.imp-src-row { display: grid; grid-template-columns: 110px minmax(0, 1fr) auto; gap: 2px 12px; align-items: baseline; padding: 2px 0; font-size: 13px; }
+.imp-src-row > span:nth-child(2) { min-width: 0; overflow-wrap: anywhere; }
+.implog-box summary { cursor: pointer; margin-top: 6px; }
+@media (max-width: 720px) {
+  .imp-src-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .imp-src-row > span:nth-child(2) { grid-column: 1 / -1; order: 3; }
+}
 .implog { max-height: 160px; overflow: auto; background: var(--ground); border-radius: var(--radius-well); padding: 8px 10px; font-size: 11px; color: var(--muted); white-space: pre-wrap; margin: 8px 0 0; }
 body.dragging::after { content: "Drop to import"; position: fixed; inset: 12px; z-index: 100; display: flex; align-items: center; justify-content: center;
   font-size: 22px; font-weight: 500; color: var(--text); background: rgba(10,10,10,.88); border: 2px dashed var(--hue); border-radius: 24px; pointer-events: none; }
@@ -349,7 +361,8 @@ body.has-expanded { overflow: hidden; }
 .pfield small { grid-column: 2; color: var(--faint); }
 .pfield input, .pfield select { width: 100%; }
 .pfield select { border-radius: var(--radius-input); }
-.pfield input[type=checkbox] { width: auto; vertical-align: -2px; }
+.pfield input[type=checkbox], .pfield input[type=radio] { width: auto; vertical-align: -2px; margin: 0 6px 0 0; }
+[data-share] label { display: inline-flex; align-items: baseline; gap: 0; margin: 2px 0; }
 dialog#edit-dlg { width: min(560px, 92vw); }
 .danger-zone { display: grid; gap: 10px; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--rule); }
 .hiddenbar { display: flex; align-items: center; gap: 12px; background: var(--pill-warn-bg); color: var(--pill-warn-ink); }
@@ -490,6 +503,9 @@ body.readonly button.star:not(.on) { display: none; }
   table.gp-one td:nth-child(3), table.gp-one th:nth-child(3), table.gtbl td:nth-child(3), table.gtbl th:nth-child(3),
   table.gtbl td:nth-child(5), table.gtbl th:nth-child(5) { display: none; }
   table.gparts td.l:not(.acts):not(.svccell), table.gtbl td.l { white-space: normal; }
+  table.gp-main .gp-on { display: block; }  /* the hidden "fitted to" column, under the name */
+  table.gp-main td.l:first-child { width: 100%; min-width: 150px; }  /* the part gets the room, not the narrow columns */
+  table.gp-main td.acts:empty, table.gp-main th:last-child { padding: 0; }
   fieldset.pfield > legend { float: none; width: auto; }
   .gtl-row { grid-template-columns: 110px 1fr; gap: 8px; }
   .gtl-axis .gtl-track span:not(:first-child):not(.gtl-end) { display: none; }

@@ -45,6 +45,20 @@ TYPE_MAX = 40
 OVERRIDES = ("name", "type")
 REATTACH_S = 120  # same window as the importer's / `db build`'s dedup
 REATTACH_KM = 0.05  # and the same distance tolerance
+SAME_START_S = 10  # the watch's own start time: the same session whatever the distance
+
+
+def same_session(dt_s, km_a, km_b):
+    """Are two recordings one session? Starts dt_s seconds apart. Within
+    SAME_START_S always (HUAWEI's total vs Strava's GPS km differ by up to
+    ~7%: 4 of 51 sessions in both places were over 5%); within REATTACH_S when
+    the distances agree to REATTACH_KM or one is unknown. The one rule for
+    `db build` dedup, edits / gear re-attachment and intervals.icu sync."""
+    if dt_s is None or not dt_s < REATTACH_S:
+        return False
+    if dt_s < SAME_START_S or not (_finite(km_a) and _finite(km_b)):
+        return True
+    return _km_close(km_a, km_b)
 # bookkeeping keys: an edit with only these is no edit. start / km identify the
 # session if an import replaces it under another id (see _reconcile)
 META = ("updated", "start", "km")
@@ -141,9 +155,9 @@ def reattach(sess, info, jstart, needs_km=lambda e: False, skip=lambda e: False)
     one session that replaced it, in place; note start / km on the others.
     Returns True if anything changed.
 
-    A replacement must start within REATTACH_S and, when both distances are
-    known, be within REATTACH_KM, as `db build` dedup requires; an entry with
-    needs_km(e) also needs both distances. Exactly one session without an entry
+    A replacement must be the same session (same_session: the rule `db build`
+    dedup uses); an entry with needs_km(e) also needs both distances unless the
+    starts agree to SAME_START_S. Exactly one session without an entry
     of its own may qualify, else the entry stays where it is."""
     changed = False
     for k, e in sess.items():
@@ -165,13 +179,13 @@ def reattach(sess, info, jstart, needs_km=lambda e: False, skip=lambda e: False)
         ekm = e.get("km") if _finite(e.get("km")) else None
         near = []
         for i, (_, ti, km) in info.items():
-            if i in taken or ti is None or abs(ti - t) * 86400 >= REATTACH_S or not ID_RE.fullmatch(str(i)):
+            if i in taken or ti is None or not ID_RE.fullmatch(str(i)):
                 continue
-            if ekm is not None and km is not None:
-                if not _km_close(ekm, km):
-                    continue
-            elif needs_km(e):  # e.g. hiding the wrong session would make it vanish
+            dt = abs(ti - t) * 86400
+            if not same_session(dt, ekm, km):
                 continue
+            if needs_km(e) and (ekm is None or km is None) and dt >= SAME_START_S:
+                continue  # e.g. hiding the wrong session would make it vanish
             near.append(i)
         if len(near) == 1:
             sess[str(near[0])] = sess.pop(k)

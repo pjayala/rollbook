@@ -16,6 +16,7 @@ import edits
 import gear as gearmod
 import geonames
 import profile as athlete
+import intervals_web
 import strava_web
 import weather
 from analysis import has_col
@@ -343,6 +344,10 @@ def api_strava(db, q, M):  # never the cookie itself
     return {**strava_web.status(IMPORTER.home), "offline": IMPORTER.offline}
 
 
+def api_intervals(db, q, M):  # never the key itself
+    return {**intervals_web.status(IMPORTER.home), "offline": IMPORTER.offline}
+
+
 # GET /api/<name>: fn(db, q, M) -> JSON-able (passed through clean())
 GET = {
     "types": api_types, "activities": api_activities, "status": api_status, "hrmax": api_hrmax,
@@ -353,6 +358,7 @@ GET = {
     "import": lambda db, q, M: IMPORTER.status(),
     "last_import": lambda db, q, M: api_last_import(db, LAST),
     "strava": api_strava,
+    "intervals": api_intervals,
     "gear": lambda db, q, M: GEAR.view(db),
     "weather": lambda db, q, M: api_weather_status(q),
 }
@@ -434,7 +440,22 @@ def post_strava_sync(r):
         return 400, {"error": "rollbook runs with --offline: no Strava sync"}
     if not strava_web.status(IMPORTER.home)["configured"]:
         return 400, {"error": "no Strava cookie stored: in a terminal, run ./rollbook strava auth"}
-    return IMPORTER.sync_strava()
+    return IMPORTER.sync("strava")
+
+
+def post_intervals_sync(r):
+    if IMPORTER.offline:
+        return 400, {"error": "rollbook runs with --offline: no intervals.icu sync"}
+    if not intervals_web.has_key(IMPORTER.home):
+        return 400, {"error": "no intervals.icu API key stored: in a terminal, run ./rollbook intervals auth"}
+    return IMPORTER.sync("intervals")
+
+
+def post_sync_all(r):
+    """Every configured source, Strava first (Importer.sync("all"))."""
+    if IMPORTER.offline:
+        return 400, {"error": "rollbook runs with --offline: no sync"}
+    return IMPORTER.sync("all")
 
 
 def post_gear(r):
@@ -482,6 +503,8 @@ POST = {
     "/api/import/upload": Post(post_upload, None),
     "/api/import/run": Post(post_import_run, None),
     "/api/strava/sync": Post(post_strava_sync, None),
+    "/api/intervals/sync": Post(post_intervals_sync, None),
+    "/api/sync": Post(post_sync_all, None),
     "/api/gear": Post(post_gear, what="gear"),
     "/api/weather": Post(post_weather, 4096, what="weather"),
 }

@@ -141,11 +141,44 @@ class Store(unittest.TestCase):
         other = self.op(op="gear.save", name="Other", sports=[SK])["id"]
         with self.assertRaises(ValueError):  # no install date
             self.op(op="mount.add", gear=other, part=w2)
-        with self.assertRaises(ValueError):  # a part on two gears at once
-            self.op(op="mount.add", gear=other, part=w2, **{"from": "2026-03-01"})
+        self.op(op="mount.add", gear=other, part=w2, **{"from": "2026-03-01"})  # shared: on both gears
+        with self.assertRaises(ValueError):  # but not twice on one gear at once
+            self.op(op="mount.add", gear=other, part=w2, **{"from": "2026-03-05"})
         self.op(op="mount.add", gear=other, part=w1, **{"from": "2026-02-05"})  # w1 is free again: fine
         with self.assertRaises(ValueError):
             self.op(op="mount.set", gear=gid, index=0, **{"from": "2026-02-05", "to": "2026-02-01"})
+
+    def test_move_takes_it_off_other_gear_in_one_change(self):
+        daily, w = self.skates()
+        race = self.op(op="gear.save", name="Race", sports=[SK])["id"]
+        rev = self.g.data["rev"]
+        self.op(op="mount.add", gear=race, part=w, move=True, **{"from": "2026-03-01"})
+        self.assertEqual(self.g.data["rev"], rev + 1)  # one change
+        self.assertEqual(self.g.data["gear"][daily]["parts"][0]["to"], "2026-03-01")
+        self.assertEqual(self.g.resolver().parts(daily, "2026-03-05"), [])
+        with self.assertRaises(ValueError):  # on the other gear only from a later day: can't be cut there
+            self.op(op="mount.add", gear=daily, part=w, move=True, **{"from": "2026-02-01"})
+        self.assertEqual(self.g.data["gear"][race]["parts"][0]["to"], None)  # nothing half done
+
+    def test_shared_part_counts_each_session_once(self):
+        """Same boots in a daily and a race setup: each session has one gear, so
+        the boots get every session's km exactly once."""
+        daily, w = self.skates()
+        boots = self.op(op="part.save", kind="boots", name="Boots", mount_on=daily, installed="2026-01-01")["id"]
+        race = self.op(op="gear.save", name="Race", sports=[SK])["id"]
+        rw = self.op(op="part.save", kind="wheels", name="Race wheels", mount_on=race, installed="2026-01-01")["id"]
+        self.op(op="mount.add", gear=race, part=boots, **{"from": "2026-01-01"})
+        self.op(op="assign", ids=[3], gear=race)
+        v = self.view()
+        t = v["totals"]
+        # skates in ROWS: 20 + 30 + 25 km (the undated one has no gear); session 3 on the race setup
+        self.assertEqual((t["parts"][boots]["km"], t["parts"][boots]["sessions"]), (75.0, 3))
+        self.assertEqual((t["parts"][w]["km"], t["parts"][rw]["km"]), (50.0, 25.0))
+        self.assertEqual((t["gear"][daily]["km"], t["gear"][race]["km"]), (50.0, 25.0))
+        s = gear.summary(self.g.data, t, [], "2026-03-01")
+        on = {x["name"]: sorted(p["name"] for p in x["parts"]) for x in s["gear"]}
+        self.assertEqual(on, {"Skates": ["Boots", "W1"], "Race": ["Boots", "Race wheels"]})
+        self.assertEqual(s["spare_parts"], [])
 
     def test_part_on_two_gears_adds_up(self):
         a, w = self.skates()
@@ -368,8 +401,18 @@ class Store(unittest.TestCase):
         self.skates()
         self.op(op="assign", ids=[2], gear=None)
         self.g.view(self.db)
-        self.db.execute("UPDATE main.activities SET id=5002, km=45 WHERE id=2")  # same start, other distance
+        # 30 s later and another distance: not the same session (edits.same_session)
+        self.db.execute("UPDATE main.activities SET id=5002, km=45, datetime='2026-02-05T08:00:30+00:00' WHERE id=2")
         self.assertEqual(self.g.resolver(self.db).of(5002, SK, "2026-02-05")[1], "default")
+
+    def test_choice_follows_same_start_any_distance(self):
+        # the watch's own start (< 10 s): the same session even when the km differ
+        # (HUAWEI's total vs Strava's GPS figure, up to ~7 %)
+        self.skates()
+        self.op(op="assign", ids=[2], gear=None)
+        self.g.view(self.db)
+        self.db.execute("UPDATE main.activities SET id=5002, km=33, datetime='2026-02-05T08:00:05+00:00' WHERE id=2")
+        self.assertEqual(self.g.resolver(self.db).of(5002, SK, "2026-02-05"), (None, "explicit"))
 
     def test_untrusted_file_shapes_never_crash(self):
         path = os.path.join(self.home, "gear.json")

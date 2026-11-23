@@ -75,13 +75,14 @@ FIT_EPOCH = datetime(1989, 12, 31, tzinfo=timezone.utc)
 SEMI = 2 ** 31 / 180.0
 
 
-def write_fit(path, points, big_endian=False, session_sport=None, sport_msg=None, session_fields=None):
+def write_fit(path, points, big_endian=False, session_sport=None, sport_msg=None, session_fields=None, distance=None):
     """Minimal FIT file: optional sport (12) message, records (20), session (18).
 
     points: [(datetime, lat|None, lon|None, ele|None, hr|None[, watts|None[, cadence|None]])];
     power (record field 7) / cadence (field 4) are written when any point has
     one. session_fields: {field: uint16 value} added to the session message,
-    e.g. ROUVY's power summary {20: avg, 34: NP, 36: IF*1000}. No CRC (the
+    e.g. ROUVY's power summary {20: avg, 34: NP, 36: IF*1000}. distance: one
+    odometer reading in metres per point (record field 5). No CRC (the
     reader doesn't check it). Endianness is per definition message, like real
     devices.
     """
@@ -97,8 +98,9 @@ def write_fit(path, points, big_endian=False, session_sport=None, sport_msg=None
         body += define(2, 12, [(0, 1, 0x00)]) + bytes([2, sport_msg])
     power, cad = any(len(p) > 5 for p in points), any(len(p) > 6 for p in points)
     fields = [(253, 4, 0x86), (0, 4, 0x85), (1, 4, 0x85), (2, 2, 0x84), (3, 1, 0x02)]
-    body += define(0, 20, fields + ([(7, 2, 0x84)] if power else []) + ([(4, 1, 0x02)] if cad else []))
-    for ts, lat, lon, ele, hr, *pw in points:
+    body += define(0, 20, fields + ([(7, 2, 0x84)] if power else []) + ([(4, 1, 0x02)] if cad else [])
+                   + ([(5, 4, 0x86)] if distance else []))
+    for k, (ts, lat, lon, ele, hr, *pw) in enumerate(points):
         body += bytes([0]) + struct.pack(
             e + "IiiHB",
             int((ts - FIT_EPOCH).total_seconds()),
@@ -110,6 +112,8 @@ def write_fit(path, points, big_endian=False, session_sport=None, sport_msg=None
             body += struct.pack(e + "H", 0xFFFF if not pw or pw[0] is None else pw[0])
         if cad:
             body += bytes([0xFF if len(pw) < 2 or pw[1] is None else pw[1]])
+        if distance:
+            body += struct.pack(e + "I", round(distance[k] * 100))
     if session_sport is not None or session_fields:
         sf = sorted((session_fields or {}).items())
         body += define(1, 18, [(5, 1, 0x00)] + [(k, 2, 0x84) for k, _ in sf])

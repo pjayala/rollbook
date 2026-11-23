@@ -190,5 +190,43 @@ class GearJs(unittest.TestCase):
         self.assertIn("&lt;img", html)
 
 
+    def test_part_on_several_gears_and_fit_choices(self):
+        G = {"daily": {"name": "Daily", "sports": ["Inline Skate"], "parts": [
+                 {"part": "boots", "from": "2025-08-01", "to": None}, {"part": "wh", "from": "2026-01-31", "to": None},
+                 {"part": "old", "from": "2025-08-01", "to": "2026-01-31"}, {"part": "soon", "from": "2025-08-01", "to": "2026-12-01"}]},
+             "race": {"name": EVIL, "sports": ["Inline Skate"], "parts": [{"part": "boots", "from": "2026-11-22", "to": None},
+                                                                          {"part": "bont", "from": "2026-11-22", "to": None}]},
+             "bike": {"name": "Bike", "sports": ["Ride"], "parts": []}}
+        P = {k: {"kind": kind, "name": k, "retired": r} for k, kind, r in (
+            ("boots", "boots", None), ("wh", "wheels", None), ("old", "wheels", None), ("soon", "wheels", None),
+            ("bont", "wheels", None), ("tyre", "tyre", None), ("gone", "wheels", "2026-01-01"), ("misc", "other", None))}
+        kinds = {**KINDS, "tyre": {"label": "Tyre", "group": "bike", "specs": []}, "other": {"label": "Other", "group": "other", "specs": []}}
+        SG = {"Inline Skate": "skate", "Ride": "bike"}
+        r = self.js(f"""(() => {{ const G = new Map(Object.entries({json.dumps(G)})), P = new Map(Object.entries({json.dumps(P)})),
+            SG = new Map(Object.entries({json.dumps(SG)})), K = {json.dumps(kinds)}, f = gid => {{ const c = fitChoices(P, G, SG, K, gid, '2026-11-23');
+            return [c.spare.map(x => x[0]), c.other.map(x => [x[0], x[2].map(o => o.gid)])]; }};
+            return {{ boots: partOn(G, 'boots', '2026-11-23'), old: partOn(G, 'old', '2026-11-23'), soon: partOn(G, 'soon', '2026-11-23'),
+                     race: f('race'), daily: f('daily'), bike: f('bike') }}; }})()""")
+        self.assertEqual(r["boots"], [{"gid": "daily", "index": 0, "from": "2025-08-01", "to": None},
+                                      {"gid": "race", "index": 0, "from": "2026-11-22", "to": None}])
+        self.assertEqual(r["old"], [])  # taken off: spare
+        self.assertEqual([o["gid"] for o in r["soon"]], ["daily"])  # a removal dated later: still on
+        # race: skate parts not on it (boots / bont are), spare first; never the bike tyre or a retired part
+        self.assertEqual(r["race"], [["old", "misc"], [["wh", ["daily"]], ["soon", ["daily"]]]])
+        self.assertEqual(r["daily"], [["old", "misc"], [["bont", ["race"]]]])
+        self.assertEqual(r["bike"], [["tyre", "misc"], []])
+
+    def test_shared_part_row_escapes_gear_names(self):
+        view = {"rev": 1, "kinds": KINDS, "sport_group": {"Inline Skate": "skate"}, "defaults": {}, "readonly_store": False,
+                "gear": {"g1": {"name": EVIL, "sports": ["Inline Skate"], "parts": [{"part": "p1", "from": "2026-01-01", "to": None}]},
+                         "g2": {"name": "Race", "sports": ["Inline Skate"], "parts": [{"part": "p1", "from": "2026-02-01", "to": None}]}},
+                "parts": {"p1": {"kind": "boots", "name": "Boots", "specs": {}, "services": [], "retired": None}},
+                "totals": {"gear": {}, "parts": {"p1": {"km_total": 10, "sessions": 1}}}}
+        html = self.js("partRows(['p1'])", view)
+        self.assertNotIn("<img", html)
+        self.assertIn("on &lt;img", html)  # the phone line under the name
+        self.assertEqual(html.count('href="#/gear/'), 2)  # both gears in "fitted to"
+
+
 if __name__ == "__main__":
     unittest.main()

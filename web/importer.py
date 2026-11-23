@@ -29,13 +29,28 @@ import threading
 import time
 import zipfile
 
-from strava_web import CSV_HEAD, EXIT_AUTH  # one index format for uploads and Strava sync
+import intervals_web
+import strava_web
+from strava_web import CSV_HEAD  # one index format for uploads and the syncs
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 EXPORTS = os.path.join(ROOT, "exports")
 TOOL = os.path.join(ROOT, "bin", "rollbook")
 ACT_EXT = (".fit", ".gpx", ".tcx", ".fit.gz", ".gpx.gz", ".tcx.gz")
 MAX_BYTES = 4 * 1024 ** 3
+
+
+# sync sources, in the order "Sync" runs them: Strava's copy is the watch's own file
+SOURCES = {
+    "strava": {"label": "Strava", "exit_auth": strava_web.EXIT_AUTH, "configured": strava_web.has_cookie,
+               "expired": lambda h: strava_web.status(h)["auth_expired"],
+               "auth_msg": "Strava login missing or expired: in a terminal, run ./rollbook strava auth"},
+    "intervals": {"label": "intervals.icu", "exit_auth": intervals_web.EXIT_AUTH,
+                  "exit_partial": intervals_web.EXIT_PARTIAL, "configured": intervals_web.has_key,
+                  "expired": lambda h: intervals_web.status(h)["auth_expired"],
+                  "auth_msg": "intervals.icu login expired (key not accepted): in a terminal, run ./rollbook intervals auth"},
+}
+DOWNLOAD_TIMEOUT_S = 45 * 60  # a sync's download step; intervals.icu stops itself at 30 min
 
 
 def safe_name(name):
@@ -61,7 +76,7 @@ class Importer:
         self.pending = []  # paths to build: export zips, and/or the imports dir
         self.job: dict = {"state": "idle"}
         self.on_store = None  # called with "activities/<name>" for each newly stored file
-        self.offline = False  # `web --offline`: no Strava sync, no weather fetch
+        self.offline = False  # `web --offline`: no Strava / intervals.icu sync, no weather fetch
         self.last = None  # lastimport.LastImport: what the last import added (new-records summary)
         self.on_remap = None  # called with {old id: new id} when an import replaced sessions
         self.after_import = None  # called once an import is done: fetches the weather
@@ -198,15 +213,27 @@ class Importer:
         threading.Thread(target=self._work, args=(todo,), daemon=True).start()
         return 200, self.status()
 
-    def sync_strava(self):
-        """`rollbook strava sync --no-build` in a subprocess (the cookie never
-        enters this process), then the usual build of data/imports."""
+    def configured(self):
+        """Sources "Sync" runs: a login stored (stat only: the cookie / key is never
+        read here) and not marked expired by its last run (it would only fail
+        again; "only this one" still tries, and `auth` clears the mark)."""
+        return [k for k, src in SOURCES.items() if src["configured"](self.home) and not src["expired"](self.home)]
+
+    def sync(self, source):
+        """`rollbook <source> sync --no-build` in a subprocess (the cookie / key
+        never enters this process), then the usual build of data/imports.
+        source "all": every configured source, Strava first (its copy is the
+        watch's own file; intervals.icu then only fills gaps)."""
+        names = self.configured() if source == "all" else [source]
+        if not names:
+            return 400, {"error": "nothing to sync: set up or log in again with ./rollbook strava auth / ./rollbook intervals auth"}
         with self.lock:
             if self.job.get("state") == "running":
                 return 409, self.status()
             self.job = {"state": "running", "phase": "starting", "done": 0, "total": 0, "log": [],
-                        "added": 0, "started": time.time(), "items": ["Strava"], "source": "strava"}
-        threading.Thread(target=self._work, args=([],), kwargs={"strava": True}, daemon=True).start()
+                        "added": 0, "started": time.time(), "items": [SOURCES[k]["label"] for k in names],
+                        "source": source, "sources": {}}
+        threading.Thread(target=self._work, args=([],), kwargs={"source": names}, daemon=True).start()
         return 200, self.status()
 
     def status(self):
@@ -289,12 +316,18 @@ class Importer:
         except Exception as e:  # the summary is a nicety: the import itself succeeded
             self.job.setdefault("log", []).append(f"new-records summary not saved: {e}")
 
-    def _cmd(self, args, phase):
+    def _cmd(self, args, phase, timeout=None):
+        """Run one rollbook step; its exit code. With timeout (s), a step still
+        running then is killed (exit code from the kill, so the job fails cleanly)."""
         j = self.job
         j["phase"] = phase
         env = dict(os.environ, ROLLBOOK_HOME=self.home, PYTHONUNBUFFERED="1")
         p = subprocess.Popen([sys.executable, TOOL, *args], env=env, stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT, text=True, errors="replace")
+        killer = threading.Timer(timeout, p.kill) if timeout else None
+        if killer:
+            killer.daemon = True
+            killer.start()
         for line in p.stdout:
             line = line.rstrip()
             if not line:
@@ -310,30 +343,53 @@ class Importer:
                 j["done"], j["total"] = 0, int(m.group(1))
             if line.startswith("extracting"):
                 j["phase"] = "extracting export"
-        return p.wait()
+        rc = p.wait()
+        if killer:
+            killer.cancel()
+        return rc
 
-    def _strava(self):
-        """Download step of a Strava sync; returns how many files it stored."""
-        j = self.job
-        rc = self._cmd(["strava", "sync", "--no-build"], "checking Strava for new activities")
-        if rc == EXIT_AUTH:
-            j["auth"] = True
-            raise RuntimeError("Strava login missing or expired: in a terminal, run ./rollbook strava auth")
+    def _download(self, source):
+        """Download step of one source: how many files it stored. Its outcome goes
+        to job["sources"][source] = {fetched} or {error, auth}; raises on failure."""
+        j, src = self.job, SOURCES[source]
+        start = len(j["log"])
+        rc = self._cmd([source, "sync", "--no-build"], f"checking {src['label']} for new activities",
+                       timeout=DOWNLOAD_TIMEOUT_S)
+        mine = j["log"][start:] if start <= len(j["log"]) else j["log"]  # the log is trimmed at 200 lines
+        res = j.setdefault("sources", {}).setdefault(source, {})
+        if rc == src["exit_auth"]:
+            j["auth"] = res["auth"] = True
+            res["error"] = src["auth_msg"]
+            raise RuntimeError(src["auth_msg"])
+        if rc and rc != src.get("exit_partial"):
+            res["error"] = next((x[len("error: "):] for x in reversed(mine) if x.startswith("error")),
+                                f"{src['label']} sync failed" + (" (took too long, stopped)" if rc < 0 else ""))
+            raise RuntimeError(res["error"])
+        m = next((re.match(r"downloaded (\d+)", x) for x in reversed(mine) if x.startswith("downloaded")), None)
+        res["fetched"] = int(m.group(1)) if m else 0
         if rc:
-            raise RuntimeError(next((x[len("error: "):] for x in reversed(j["log"]) if x.startswith("error")),
-                                    "Strava sync failed"))
-        m = next((re.match(r"downloaded (\d+)", x) for x in reversed(j["log"]) if x.startswith("downloaded")), None)
-        j["fetched"] = int(m.group(1)) if m else 0
-        return j["fetched"]
+            res["partial"] = True  # cut short by its time budget: the next sync continues
+        j["fetched"] = j.get("fetched", 0) + res["fetched"]
+        return res["fetched"]
 
-    def _work(self, todo, strava=False):
+    def _work(self, todo, source=None):
+        """source: list of sync sources to download from first. One failing
+        doesn't stop the next; what they stored is built. The job fails only
+        when every source failed (each one's outcome in job["sources"])."""
         j = self.job
         n = lambda s: len(s) if s is not None else 0  # noqa: E731  (None = DB unreadable)
         before = self._ids()
         starts0 = self._starts()
         try:
-            if strava and self._strava():
-                todo = [self.imports]
+            errors = []
+            for k in source or []:
+                try:
+                    if self._download(k):
+                        todo = [self.imports]
+                except RuntimeError as e:
+                    errors.append(str(e))
+            if source and len(errors) == len(source):
+                raise RuntimeError("; ".join(errors))
             for path in todo:
                 label = os.path.basename(path)
                 # weather afterwards (after_import), so new sessions show without waiting on Open-Meteo

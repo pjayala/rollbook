@@ -206,8 +206,9 @@ class Client:
                 if code == 429 or code >= 500:
                     if attempt == 4:
                         raise SyncError(f"Strava answered {code} repeatedly, try again later")
-                    ra = hdrs.get("Retry-After") if hdrs else None
-                    self.sleep(min(900, int(ra) if ra and ra.isdigit() else 30 * 2 ** attempt))
+                    ra = (hdrs.get("Retry-After") or "").strip() if hdrs else ""
+                    # ASCII digits only: "²".isdigit() is True and int() of it raises
+                    self.sleep(min(900, int(ra) if re.fullmatch(r"[0-9]{1,6}", ra) else 30 * 2 ** attempt))
                     continue
                 if code == 404:
                     return None, None, None
@@ -408,13 +409,10 @@ def sync(home, db_path, client, since=None, all_pages=False, max_new=200, dry_ru
                 result["no_file"] += 1
                 continue
             name = f"strava-{a['id']}{ext}"
-            part = os.path.join(acts_dir, f".{name}.part")
-            with open(part, "wb") as f:
-                f.write(data)
             # the CSV row first: a file without its row would be built with a
-            # path-hash id and the device's sport
+            # path-hash id and the device's sport; a row without its file is ignored
             _append_row(imports, [str(a["id"]), a["start"] or "", a["name"], a["type"], f"activities/{name}"])
-            os.replace(part, os.path.join(acts_dir, name))
+            store.write_bytes(os.path.join(acts_dir, name), data)  # unique O_EXCL|O_NOFOLLOW temp, 0600
             result["downloaded"] += 1
             log(f"  {k}/{len(new)}  {label}  ({fname or name}, {len(data) // 1024} kB)")
         return result

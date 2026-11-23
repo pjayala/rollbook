@@ -24,7 +24,7 @@ Commands
   rollbook login | whoami              OAuth setup / check           (API only)
 """
 
-__version__ = "0.12.0"
+__version__ = "0.13.0"
 
 import argparse
 import hashlib
@@ -43,7 +43,7 @@ import urllib.parse
 import urllib.request
 import webbrowser
 import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 MIN_PYTHON = (3, 14)  # supported: 3.14 and 3.15 (default); older ones are out of upstream support
 if sys.version_info < MIN_PYTHON:
@@ -691,8 +691,9 @@ def series(s):
     activities: the device odometer agrees within 1% for 96% of them versus 91%
     for filtered GPS, so the odometer wins when present. But some exported
     odometers are stuck or truncated, so if one reports less than half of what
-    the GPS track shows, GPS wins. Failing both, an integrated speed channel is
-    used (some FIT files carry speed but no distance and no fix).
+    the GPS track shows, GPS wins. So does it over a synthetic odometer (see
+    linear_odometer). Failing both, an integrated speed channel is used (some
+    FIT files carry speed but no distance and no fix).
     """
     t = s["time"]["data"]
     n = len(t)
@@ -701,8 +702,8 @@ def series(s):
     vel = s["velocity_smooth"]["data"] if "velocity_smooth" in s else None
     has_dist = True
     gps = cumulative_gps(t, ll) if ll else None
-    if dev and gps and gps[-1] > 0 and dev[-1] < 0.5 * gps[-1]:
-        dist = gps  # odometer stuck or truncated
+    if dev and gps and gps[-1] > 0 and (dev[-1] < 0.5 * gps[-1] or linear_odometer(t, dev)):
+        dist = gps  # odometer stuck, truncated or made up
     elif dev:
         dist = dev
     elif gps:
@@ -714,6 +715,20 @@ def series(s):
     ele = s["altitude"]["data"] if "altitude" in s else [0.0] * n
     hr = s["heartrate"]["data"] if "heartrate" in s else [None] * n
     return t, dist, ele, hr, ll, has_dist
+
+
+def linear_odometer(t, dev):
+    """Does the distance channel grow at one constant rate? intervals.icu
+    rebuilds HUAWEI sessions as FIT files whose distance is the total spread
+    evenly over the elapsed time (5.97 m/s on every sample of a 65 min skate):
+    no pauses, every km in the same time. A real odometer never does that."""
+    rates = sorted((dev[i] - dev[i - 1]) / (t[i] - t[i - 1]) for i in range(1, min(len(t), len(dev)))
+                   if t[i] > t[i - 1] and dev[i] is not None and dev[i - 1] is not None)
+    if len(rates) < 60:
+        return False
+    mid = rates[len(rates) // 2]
+    cut = len(rates) // 50  # 2nd-98th percentile: one odd step (the first record, a rounding) can't hide it
+    return mid > 0.5 and rates[-1 - cut] - rates[cut] <= 0.01 * mid + 0.02
 
 
 def smooth(v, w=15):
@@ -1378,6 +1393,15 @@ def read_activities_csv(root):
     return out
 
 
+def source_rank(filename, has_export_meta):
+    """Which copy of one session to keep: a Strava export row (its summary
+    columns) > any watch file (Strava sync, an upload) > an intervals.icu
+    rebuild (`rollbook intervals sync`, made-up distance channel)."""
+    if has_export_meta:
+        return 2
+    return 0 if re.match(r"intervals-\d+\.", os.path.basename(filename or "")) else 1
+
+
 def cmd_db_build(a):
     import sqlite3
 
@@ -1471,20 +1495,23 @@ def cmd_db_build(a):
                 "parse_error": None,
             })
             # Same session from another source (a single "Export Original"
-            # file vs. the activity inside a full export): same start within
-            # 2 min and distance within 5%. The copy with Strava's metadata
-            # (activities.csv numbers) wins; otherwise the newcomer is skipped.
-            dup = db.execute(
-                "SELECT id, filename, s_distance_m IS NOT NULL FROM activities "
+            # file vs. the activity inside a full export, an intervals.icu
+            # copy): edits.same_session, the rule edits / gear choices follow
+            # by. The better source wins (source_rank), on a tie the newcomer
+            # is skipped.
+            same = _web_mod("edits").same_session
+            dup = next((r[:3] for r in db.execute(
+                "SELECT id, filename, s_distance_m IS NOT NULL, km_calc, "
+                "ABS(julianday(datetime) - julianday(?)) * 86400 AS dt FROM activities "
                 "WHERE id != ? AND parse_error IS NULL AND ABS(julianday(datetime) - julianday(?)) * 86400 < 120 "
-                "AND (km_calc IS NULL OR ? IS NULL OR ABS(km_calc - ?) <= 0.05 * MAX(km_calc, ?, 0.1))",
-                (aid, row["datetime"], c["km"], c["km"], c["km"])).fetchone()
+                "ORDER BY dt", (row["datetime"], aid, row["datetime"]))
+                if same(r[4], r[3], c["km"])), None)
             if dup:
-                if row.get("s_distance_m") is not None and not dup[2]:
+                if source_rank(rel, row.get("s_distance_m") is not None) > source_rank(dup[1], dup[2]):
                     for tbl, col in (("samples", "activity_id"), ("splits", "activity_id"),
                                      ("weather", "activity_id"), ("activities", "id")):
                         db.execute(f"DELETE FROM {tbl} WHERE {col}=?", (dup[0],))
-                    print(f"  {rel}: replaces {dup[1]} (same session, now with export metadata)", file=sys.stderr)
+                    print(f"  {rel}: replaces {dup[1]} (same session, better source)", file=sys.stderr)
                 else:
                     print(f"  {rel}: skipped, same session as {dup[1]}", file=sys.stderr)
                     skipped += 1
@@ -1849,12 +1876,24 @@ def cmd_strava_status(a):
             die(f"strava.com: {e}", sw.EXIT_NET)
 
 
+def _check_sync_args(a):
+    """--since a real day (not 2026-02-31), --max not negative (new[:-1] would drop the newest)."""
+    if a.since:
+        try:
+            if not re.fullmatch(r"\d{4}-\d\d-\d\d", a.since):
+                raise ValueError
+            date.fromisoformat(a.since)
+        except ValueError:
+            die("--since wants a date, YYYY-MM-DD")
+    if a.max is not None and a.max < 0:
+        die("--max wants 0 (no limit) or more")
+
+
 def cmd_strava_sync(a):
     """List new activities on strava.com, download their original files into
     data/imports, then build + enrich like the dashboard's Import does."""
     sw = _strava_mod()
-    if a.since and not re.fullmatch(r"\d{4}-\d\d-\d\d", a.since):
-        die("--since wants YYYY-MM-DD")
+    _check_sync_args(a)
     cookie = sw.load_cookie(HOME)
     if not cookie:
         die("no Strava cookie stored. run: rollbook strava auth", sw.EXIT_AUTH)
@@ -1871,6 +1910,89 @@ def cmd_strava_sync(a):
         imports = os.path.join(HOME, "imports")
         cmd_db_build(argparse.Namespace(archive=imports, fresh=False, limit=None, samples=True))
         cmd_db_enrich(argparse.Namespace(windows="5,10,20", missing=True))
+
+
+def cmd_intervals_auth(a):
+    """Store the intervals.icu API key; read from a hidden prompt or stdin."""
+    import getpass
+
+    iv = _web_mod("intervals_web")
+    if sys.stdin.isatty():
+        print("On intervals.icu: Settings -> Developer Settings -> API key (generate one if needed).\n"
+              "Paste it here, it is not echoed. Never paste it into a chat.")
+        text = getpass.getpass("API key: ")
+    else:
+        text = sys.stdin.readline()
+    try:
+        key = iv.parse_key(text)
+    except ValueError as e:
+        die(str(e))
+    if not a.no_check:
+        try:
+            who = iv.Client(key).athlete()
+        except iv.AuthExpired as e:
+            die(f"intervals.icu didn't accept that key ({e})", iv.EXIT_AUTH)
+        except iv.SyncError as e:
+            die(f"couldn't check the key: {e} (store it anyway with --no-check)", iv.EXIT_NET)
+        print(f"ok: athlete {who['id']} {who['name']}")
+    iv.save_key(HOME, key)
+    st = iv.load_state(HOME)
+    st.pop("auth_expired", None)
+    iv.save_state(HOME, st)
+    print(f"saved to {iv.key_path(HOME)} (0600). `rollbook intervals logout` removes it.")
+
+
+def cmd_intervals_logout(a):
+    iv = _web_mod("intervals_web")
+    print("removed the stored intervals.icu key" if iv.forget_key(HOME) else "no intervals.icu key stored")
+    print("(delete or regenerate it on intervals.icu too if it may have leaked)")
+
+
+def cmd_intervals_status(a):
+    iv = _web_mod("intervals_web")
+    s = iv.status(HOME)
+    print(f"API key       : {'stored' if s['configured'] else 'none, run: rollbook intervals auth'}")
+    print(f"last sync     : {s['last_sync'] or 'never'}  {json.dumps(s['last_result']) if s['last_result'] else ''}")
+    for t, sport in sorted(s["sports"].items()):
+        print(f"sport         : {t} -> {sport}")
+    if s["configured"] and not a.offline:
+        try:
+            who = iv.Client(iv.load_key(HOME)).athlete()
+            print(f"intervals.icu : ok, athlete {who['id']} {who['name']}")
+        except iv.AuthExpired as e:
+            die(f"intervals.icu: key not accepted ({e}), run: rollbook intervals auth", iv.EXIT_AUTH)
+        except iv.SyncError as e:
+            die(f"intervals.icu: {e}", iv.EXIT_NET)
+
+
+def cmd_intervals_sync(a):
+    """Download the intervals.icu sessions Rollbook has from nowhere else into
+    data/imports, then build + enrich."""
+    iv = _web_mod("intervals_web")
+    _check_sync_args(a)
+    sports = {}
+    for m in a.sport or []:
+        t, eq, s = m.partition("=")
+        if not eq or not re.fullmatch(r"[A-Za-z][A-Za-z ]{0,39}", t.strip()) or len(s.strip()) > 40:
+            die(f"--sport wants TYPE=SPORT, e.g. Ride=\"Inline Skate\" (got {m!r})")
+        sports[t.strip()] = s.strip()
+    key = iv.load_key(HOME)
+    if not key:
+        die("no intervals.icu API key stored. run: rollbook intervals auth", iv.EXIT_AUTH)
+    try:
+        r = iv.sync(HOME, DB, iv.Client(key, delay=a.delay), since=a.since, all_=a.all, max_new=a.max,
+                    dry_run=a.dry_run, sports=sports, log=lambda s: print(s, flush=True))
+    except iv.AuthExpired as e:
+        die(f"intervals.icu key not accepted ({e}). run: rollbook intervals auth", iv.EXIT_AUTH)
+    except iv.SyncError as e:
+        die(str(e), iv.EXIT_NET)
+    print(f"downloaded {r['downloaded']}, no file {r['no_file']}", flush=True)
+    if r["downloaded"] and not a.no_build and not a.dry_run:
+        imports = os.path.join(HOME, "imports")
+        cmd_db_build(argparse.Namespace(archive=imports, fresh=False, limit=None, samples=True))
+        cmd_db_enrich(argparse.Namespace(windows="5,10,20", missing=True))
+    if r.get("cut_short"):
+        die("stopped at the time budget; run it again to continue", iv.EXIT_PARTIAL)
 
 
 def main():
@@ -1986,6 +2108,26 @@ def main():
     sy.add_argument("--no-build", action="store_true", help="download only, skip db build / enrich")
     sy.add_argument("--delay", type=float, default=1.5, help=argparse.SUPPRESS)
     sy.set_defaults(fn=cmd_strava_sync)
+
+    iv = sub.add_parser("intervals", help="sync sessions from intervals.icu that Rollbook doesn't have (API key)")
+    isub = iv.add_subparsers(dest="intervalscmd", required=True)
+    ia = isub.add_parser("auth", help="store the intervals.icu API key (hidden prompt or stdin)")
+    ia.add_argument("--no-check", action="store_true", help="don't verify it against intervals.icu")
+    ia.set_defaults(fn=cmd_intervals_auth)
+    isub.add_parser("logout", help="delete the stored key").set_defaults(fn=cmd_intervals_logout)
+    ist = isub.add_parser("status", help="key stored? last sync? sport mapping? key still accepted?")
+    ist.add_argument("--offline", action="store_true", help="don't contact intervals.icu")
+    ist.set_defaults(fn=cmd_intervals_status)
+    iy = isub.add_parser("sync", help="download sessions missing from Rollbook (Strava's copy wins), then build + enrich")
+    iy.add_argument("--since", help="YYYY-MM-DD (default: the last 365 days)")
+    iy.add_argument("--all", action="store_true", help="the whole intervals.icu history")
+    iy.add_argument("--max", type=int, default=200, help="at most N downloads per run (oldest first; default 200)")
+    iy.add_argument("--sport", action="append", metavar="TYPE=SPORT",
+                    help='remembered sport for an intervals.icu type, e.g. Ride="Inline Skate"; TYPE= forgets it')
+    iy.add_argument("--dry-run", action="store_true", help="only list what's new")
+    iy.add_argument("--no-build", action="store_true", help="download only, skip db build / enrich")
+    iy.add_argument("--delay", type=float, default=0.5, help=argparse.SUPPRESS)
+    iy.set_defaults(fn=cmd_intervals_sync)
 
     a = p.parse_args()
     a.fn(a)
