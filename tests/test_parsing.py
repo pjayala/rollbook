@@ -52,6 +52,18 @@ class Fixtures(unittest.TestCase):
             self.assertGreaterEqual(be["10k"][0], 2 * be["5k"][0])
             self.assertLessEqual(be["10k"][0], c["elapsed"])
 
+    def test_best30_is_30_seconds_not_30_samples(self):
+        """6 s recording: 30 samples are 3 min. A 30 s burst at 36 km/h in a steady
+        18 km/h session must read 36, not the 3-minute average around it."""
+        t = list(range(0, 1800, 6))
+        v = [10.0 if 600 <= x < 630 else 5.0 for x in t]  # m/s over the step starting at x
+        d = [0.0]
+        for a, b, s in zip(t, t[1:], v):
+            d.append(d[-1] + (b - a) * s)
+        self.assertAlmostEqual(rb.best_window_kmh(t, d, 30), 36.0, places=6)
+        thirty_samples = max((d[i + 30] - d[i]) / (t[i + 30] - t[i]) * 3.6 for i in range(len(t) - 30))
+        self.assertLess(thirty_samples, 22.0)  # what the old rule gave: 3 min with the burst in it
+
     def test_outdoor_cycle(self):
         c = self.check("Outdoor_cycle.gpx", "18.206", "55:02", "51:08", "3:54", 145, "25.42")
         ob = rb.outback(c)

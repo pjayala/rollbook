@@ -634,7 +634,7 @@ class ByeEndpoint(unittest.TestCase):
         self.assertEqual(self.httpd.app_pages, {"w1": 7.0})
 
     def test_only_the_app_window_sends_the_beacon(self):
-        with open(os.path.join(ROOT, "web", "static", "app.js"), encoding="utf-8") as f:
+        with open(os.path.join(ROOT, "web", "static", "main.js"), encoding="utf-8") as f:
             lines = [ln.strip() for ln in f if ln.strip()]
         i = next(i for i, ln in enumerate(lines) if "sendBeacon(" in ln)
         self.assertIn('has("app")', lines[i - 1])

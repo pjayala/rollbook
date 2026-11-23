@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Pedro Ayala. Rollbook is free software, see LICENSE.
-"""Browser newRecords() (#17): which records an import set, cut out of app.js and run under node."""
+"""Browser newRecords() (#17): which records an import set, cut out of the dashboard scripts and run under node."""
 
 import json
 import os
@@ -214,6 +214,41 @@ class NewRecords(unittest.TestCase):
         eff = [[a["id"], 400] for a in base] + [[999, 100], [1, 390]]  # 999 not in the list (hidden)
         out = self.run_js(base + [act(1, 1)], [1], {SK: [self.seg("s1", eff)]})
         self.assertEqual([(r["sgid"], r["prev"]) for r in out], [("s1", 400)])
+
+
+@unittest.skipUnless(NODE, "node not installed")
+class ProgressScope(unittest.TestCase):
+    """A sport's Progress page shows only that sport's part of the last import (an
+    import of skates and one ride must not list skate segment PRs on Virtual Ride),
+    and lists its new sessions even when none set a record."""
+
+    @classmethod
+    def setUpClass(cls):
+        src = _src()
+        cls.prelude = "\n".join([extract_const(src, "whenOf"), extract_const(src, "cmpWhen"),
+                                 extract_function(src, "nrScope"), extract_function(src, "nrSessions")])
+
+    def js(self, expr):
+        path = os.path.join(tmpdir(self), "h.js")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(self.prelude + f"\nprocess.stdout.write(JSON.stringify({expr}));\n")
+        p = subprocess.run([NODE, path], capture_output=True, encoding="utf-8", timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return json.loads(p.stdout)
+
+    NEWS = [{"id": "1", "type": SK}, {"id": "2", "type": "Virtual Ride"}, {"id": "3", "type": SK}]
+
+    def test_scope_to_one_sport(self):
+        self.assertEqual(self.js(f"nrScope({json.dumps(self.NEWS)}, 'Virtual Ride')"), [{"id": "2", "type": "Virtual Ride"}])
+        self.assertEqual(self.js(f"nrScope({json.dumps(self.NEWS)}, 'Run')"), [])
+
+    def test_all_sports_keeps_everything(self):
+        self.assertEqual(self.js(f"nrScope({json.dumps(self.NEWS)}, null)"), self.NEWS)
+
+    def test_sessions_newest_first_only_loaded(self):
+        acts = [act(1, 3), act(2, 0, type="Virtual Ride"), act(3, 1), act(9, 0)]
+        # 3 days ago, today, yesterday; 9 isn't new, 7 isn't loaded (hidden)
+        self.assertEqual(self.js(f"nrSessions({json.dumps(acts)}, [1, 2, 3, 7]).map(a => a.id)"), [2, 3, 1])
 
 
 if __name__ == "__main__":

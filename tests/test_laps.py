@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Pedro Ayala. Rollbook is free software, see LICENSE.
 """Laps (regular vs counted, odometer check, min passes), circuit grouping
-(app.js via node) and an opt-in cross-format check on the real FIT copy."""
+(circuits.js via node) and an opt-in cross-format check on the real FIT copy."""
 
 import glob
 import json
@@ -12,12 +12,11 @@ import statistics
 import subprocess
 import unittest
 
-from helpers import ROOT, load_tool, loop_rows, tmpdir
+from helpers import ROOT, frontend_src, load_tool, loop_rows, tmpdir
 
 import analysis
 
 CIRC = 2 * math.pi * 60.0  # loop_rows default radius: ~377 m
-APP_JS = os.path.join(ROOT, "web", "static", "app.js")
 REAL_FIT = sorted(glob.glob(os.path.join(ROOT, "data", "cache", "archives", "*", "activities", "21363091415.fit.gz")))
 
 
@@ -126,12 +125,12 @@ const src = fs.readFileSync(process.argv[2], "utf8").replace(/\r\n/g, "\n");
 const acts = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
 const cut = name => {  // a top-level function, up to its closing brace in column 0
   const a = src.indexOf("function " + name + "("), b = src.indexOf("\n}\n", a);
-  if (a < 0 || b < 0) throw new Error(name + "() not found in app.js");
+  if (a < 0 || b < 0) throw new Error(name + "() not found in web/static");
   return src.slice(a, b + 2);
 };
 const konst = name => {
   const m = src.match(new RegExp("^const " + name + " = .*;$", "m"));
-  if (!m) throw new Error(name + " not found in app.js");
+  if (!m) throw new Error(name + " not found in web/static");
   return m[0];
 };
 let captured = null;
@@ -153,19 +152,21 @@ class Circuits(unittest.TestCase):
     LAT, LON = 45.0, 7.0
 
     def act(self, id, km=0.4, north_m=0.0, east_m=0.0, center=True):
-        # same metres->degrees as app.js near(): 111320 m/deg, cos(lat) east
+        # same metres->degrees as circuits.js near(): 111320 m/deg, cos(lat) east
         c = [self.LAT + north_m / 111320, self.LON + east_m / (111320 * math.cos(math.radians(self.LAT)))]
         return {"id": id, "laps_n": 5, "lap_km": km, "lap_center": c if center else None,
                 "best_lap_s": 60, "best_lap_kmh": 20, "_t": 1700000000000 + id}
 
     def groups(self, acts):
         d = tmpdir(self)
-        js, data = os.path.join(d, "h.js"), os.path.join(d, "acts.json")
+        js, data, src = os.path.join(d, "h.js"), os.path.join(d, "acts.json"), os.path.join(d, "src.js")
         with open(js, "w", encoding="utf-8") as f:
             f.write(NODE_HARNESS)
+        with open(src, "w", encoding="utf-8") as f:
+            f.write(frontend_src())
         with open(data, "w", encoding="utf-8") as f:
             json.dump(acts, f)
-        p = subprocess.run([shutil.which("node"), js, APP_JS, data], capture_output=True, text=True, timeout=60)
+        p = subprocess.run([shutil.which("node"), js, src, data], capture_output=True, text=True, timeout=60)
         self.assertEqual(p.returncode, 0, p.stderr)
         return sorted(json.loads(p.stdout)["groups"])
 

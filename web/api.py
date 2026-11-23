@@ -88,6 +88,8 @@ def api_activities(db, q, M):
             r["lap_center"] = lp["center"]
             r["best_lap_s"] = min((x["elapsed"] for x in reg), default=None)
             r["best_lap_kmh"] = max((x["kmh_elapsed"] for x in reg if x["kmh_elapsed"]), default=None)
+        bw = analysis.clean_bw(m.get("bw"))  # best speed per window length, no positions
+        r["bw"] = {k: v[0] for k, v in bw.items()} if bw else None
         be = m.get("be") or {}
         for (k, _), col in zip(analysis.BEST_EFFORTS, analysis.BE_KEYS):
             r[col] = (be.get(k) or [None])[0]
@@ -191,6 +193,8 @@ def api_activity(db, q, M, aid):
     if n and idx[-1] != n - 1:
         idx.append(n - 1)
     series = [pt(i) for i in idx]
+    m = dict(m)
+    m["bw"] = analysis.clean_bw(m.get("bw"))
     act["metrics"] = m
     if act.get("type") and act["type"] not in cond.FITS:
         api_activities(db, {"type": act["type"]}, M)  # fits this sport's wind coefficient

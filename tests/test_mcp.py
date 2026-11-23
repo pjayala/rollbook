@@ -143,6 +143,10 @@ class MCP(unittest.TestCase):
         be = r["derived"]["best_efforts"]  # #6, no coordinates
         self.assertEqual(set(be), {"400", "1k", "5k", "10k"})
         self.assertGreater(be["5k"]["seconds"], 5 * be["1k"]["seconds"] - 1e-6)
+        bs = r["derived"]["best_speed_kmh"]  # best speed per window, seconds from the start only
+        self.assertEqual(set(bs), {"30s", "1m", "2m", "5m", "10m", "20m", "30m", "45m", "60m"})
+        self.assertEqual(set(bs["10m"]), {"kmh", "start_s"})
+        self.assertNotIn("bw", r["derived"])
         self.assertNotIn("splits", self.call("activity", id=1001, splits=False))
 
     def test_compare_trend_records(self):

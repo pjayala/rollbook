@@ -27,6 +27,26 @@ if WEB not in sys.path:
     sys.path.insert(0, WEB)
 
 
+STATIC = os.path.join(WEB, "static")
+
+
+def script_order():
+    """The dashboard's scripts in the order index.html loads them (names, no leading /)."""
+    import re
+    with open(os.path.join(STATIC, "index.html"), encoding="utf-8") as f:
+        return re.findall(r'<script src="/([\w-]+\.js)"></script>', f.read())
+
+
+def frontend_src():
+    """Every dashboard script, concatenated in load order: they are classic scripts
+    sharing one global scope, so a top-level name is found whichever file holds it."""
+    out = []
+    for name in script_order():
+        with open(os.path.join(STATIC, name), encoding="utf-8") as f:
+            out.append(f.read().replace("\r\n", "\n"))  # Windows autocrlf checkout
+    return "\n".join(out)
+
+
 def load_tool():
     """bin/rollbook has no .py suffix, so import it by path (once)."""
     if "rollbook_cli" in sys.modules:

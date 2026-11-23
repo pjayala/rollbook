@@ -24,7 +24,7 @@ Commands
   rollbook login | whoami              OAuth setup / check           (API only)
 """
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
 
 import argparse
 import hashlib
@@ -753,6 +753,22 @@ def clean_ele(ele, ll):
     return out
 
 
+def best_window_kmh(t, dist, span):
+    """Peak km/h over any `span`-second window: distance over elapsed time, the
+    window covering at least 90% of the span (so any sample rate works).
+    Same rule as `db enrich` and web/analysis.py best_window. None if none fits."""
+    best, lo = None, 0
+    for hi in range(len(t)):
+        while t[hi] - t[lo] > span:
+            lo += 1
+        dt = t[hi] - t[lo]
+        if dt >= span * 0.9 and dt > 0:
+            v = (dist[hi] - dist[lo]) / dt * 3.6
+            if best is None or v > best:
+                best = v
+    return best
+
+
 def climb(v, hyst=5.0):
     """Ascent of a smoothed profile counting only rises of >= hyst metres."""
     up, ref = 0.0, None
@@ -779,11 +795,9 @@ def core(s):
     sm = smooth(ele)
     up = sum(max(0.0, sm[i + 1] - sm[i]) for i in range(n - 1))
     dn = sum(max(0.0, sm[i] - sm[i + 1]) for i in range(n - 1))
-    best30 = 0.0
-    for i in range(n - 30):
-        dt = t[i + 30] - t[i]
-        if dt > 0:
-            best30 = max(best30, (dist[i + 30] - dist[i]) / dt * 3.6)
+    # a 30-second window, not 30 samples: at the 6 s recording of 2025-08 on,
+    # 30 samples were 3 minutes
+    best30 = best_window_kmh(t, dist, 30) or 0.0
     hrs = [x for x in hr if x]
     pw = [w for w in (s.get("watts") or {}).get("data") or [] if w is not None]
     cad = [x for x in (s.get("cadence") or {}).get("data") or [] if x]
@@ -1617,6 +1631,10 @@ def cmd_db_schema(a):
         print(f"\n-- {kind} {name}  ({n} rows)\n{sql};")
 
 
+# 2: best30_kmh is a 30-second window (it was 30 samples); `enrich --missing` redoes older rows
+ENRICH_VERSION = 2
+
+
 def cmd_db_enrich(a):
     """Add best-sustained-effort columns, computed from the samples table.
 
@@ -1632,13 +1650,14 @@ def cmd_db_enrich(a):
     windows = [int(w) for w in a.windows.split(",")]
     db = sqlite3.connect(DB)
     cols = {r[1] for r in db.execute("PRAGMA table_info(activities)")}
-    for w in windows:
-        c = f"best{w}min_kmh"
+    for c, typ in [(f"best{w}min_kmh", "REAL") for w in windows] + [("enrich_v", "INTEGER")]:
         if c not in cols:
-            db.execute(f"ALTER TABLE activities ADD COLUMN {c} REAL")
+            db.execute(f"ALTER TABLE activities ADD COLUMN {c} {typ}")
     db.commit()
 
-    where = " AND a.best10min_kmh IS NULL" if a.missing else ""
+    # --missing: never enriched, or by an older version of the rules
+    where = (f" AND (a.best10min_kmh IS NULL OR a.enrich_v IS NULL OR a.enrich_v < {ENRICH_VERSION})"
+             if a.missing else "")
     ids = [r[0] for r in db.execute(
         "SELECT a.id FROM activities a WHERE EXISTS "
         "(SELECT 1 FROM samples s WHERE s.activity_id=a.id)" + where)]
@@ -1657,16 +1676,11 @@ def cmd_db_enrich(a):
         scale = (km / km_calc) if (km and km_calc and km_calc > 0) else 1.0
         t = [r[0] for r in rows]
         d = [(r[1] or 0.0) * scale for r in rows]
-        sets = {}
-        for w in windows:
-            span, best, lo = w * 60, 0.0, 0
-            for hi in range(len(t)):
-                while t[hi] - t[lo] > span:
-                    lo += 1
-                dt = t[hi] - t[lo]
-                if dt >= span * 0.9:  # require near-full window
-                    best = max(best, (d[hi] - d[lo]) / dt * 3.6)
-            sets[f"best{w}min_kmh"] = best or None
+        sets = {f"best{w}min_kmh": best_window_kmh(t, d, w * 60) or None for w in windows}
+        # redone here as well: rows imported before ENRICH_VERSION 2 hold the
+        # old 30-sample figure (3 min at 6 s recording), not a 30 s window
+        sets["best30_kmh"] = best_window_kmh(t, d, 30) or None
+        sets["enrich_v"] = ENRICH_VERSION
         db.execute(
             f"UPDATE activities SET {','.join(f'{k}=?' for k in sets)} WHERE id=?",
             list(sets.values()) + [aid],

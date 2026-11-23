@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Pedro Ayala. Rollbook is free software, see LICENSE.
-"""Browser FTP choice (ftpAt) and Coggan power zones, cut out of app.js and run under node."""
+"""Browser FTP choice (ftpAt) and Coggan power zones, cut out of the dashboard scripts and run under node."""
 
 import json
 import os
@@ -9,24 +9,21 @@ import shutil
 import subprocess
 import unittest
 
-from helpers import ROOT, tmpdir
+from helpers import frontend_src, tmpdir
 
-APP_JS = os.path.join(ROOT, "web", "static", "app.js")
 NODE = shutil.which("node")
 DAY = 86400000
 T = 1790000000000  # fixed "now" (2026-09-21 UTC): deterministic, never Date.now()
 
 
-def _src():
-    with open(APP_JS, encoding="utf-8") as f:
-        return f.read().replace("\r\n", "\n")  # Windows autocrlf checkout
+_src = frontend_src  # the name the other node tests import
 
 
 def extract_const(src, name):
     """Top-level `const NAME = ...;` up to the first line ending in `;`."""
-    m = re.search(r"^const %s = .*?;$" % re.escape(name), src, re.M | re.S)
+    m = re.search(r"^const %s = .*?;[ \t]*(?://[^\n]*)?$" % re.escape(name), src, re.M | re.S)
     if not m:
-        raise AssertionError("const %s not found in app.js" % name)
+        raise AssertionError("const %s not found in web/static" % name)
     return m.group(0)
 
 
@@ -34,7 +31,7 @@ def extract_function(src, name):
     """Top-level `function NAME(...) {` up to its closing `}` in column 0."""
     m = re.search(r"^function %s\(.*?^}$" % re.escape(name), src, re.M | re.S)
     if not m:
-        raise AssertionError("function %s not found in app.js" % name)
+        raise AssertionError("function %s not found in web/static" % name)
     return m.group(0)
 
 

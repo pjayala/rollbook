@@ -18,9 +18,12 @@ import threading
 
 import store
 
-METRICS_VERSION = 16
+METRICS_VERSION = 17
 THR = 0.5  # m/s, pause threshold; must match bin/rollbook
 WINDOWS = (30, 45, 60)  # minutes; 5/10/20 already live in the DB via `db enrich`
+# s, best rolling-window speed per session ("speed curve", `bw` in the cache, with
+# where each window lies so the page can select it)
+SPEED_WINDOWS = (30, 60, 120, 300, 600, 1200, 1800, 2700, 3600)
 LEG_WINDOW = 10  # minutes, best effort per out/back leg
 MAX_DT = 60  # s, longer sample gaps do not count towards HR time
 HR_HOLD = 30  # s, HR is often on its own sparse records; carry it this long
@@ -70,11 +73,12 @@ def valid_ll(lat, lon):
 # ------------------------------------------------------------------ metrics
 
 
-def best_window(t, d, i0, i1, span):
-    """Peak km/h over any `span`-second window inside samples [i0, i1].
+def best_window_at(t, d, i0, i1, span):
+    """(km/h, t_start, t_end) of the fastest `span`-second window inside samples
+    [i0, i1], or None.
 
     Same definition as `db enrich`: distance over elapsed time, window must
-    cover at least 90% of the span.
+    cover at least 90% of the span. Ties keep the earliest window.
     """
     best, lo = None, i0
     for hi in range(i0, i1 + 1):
@@ -83,9 +87,43 @@ def best_window(t, d, i0, i1, span):
         dt = t[hi] - t[lo]
         if dt >= span * 0.9 and dt > 0:
             v = (d[hi] - d[lo]) / dt * 3.6
-            if best is None or v > best:
-                best = v
+            if best is None or v > best[0]:
+                best = (v, t[lo], t[hi])
     return best
+
+
+def best_window(t, d, i0, i1, span):
+    """Peak km/h over any `span`-second window inside samples [i0, i1] (see best_window_at)."""
+    r = best_window_at(t, d, i0, i1, span)
+    return r[0] if r else None
+
+
+BW_KEYS = tuple(str(s) for s in SPEED_WINDOWS)
+
+
+def clean_bw(v):
+    """A cached `bw` as {span: [km/h, t0, t1]} with only well-formed entries
+    (the cache file is untrusted), or None."""
+    if not isinstance(v, dict):
+        return None
+    out = {}
+    for k in BW_KEYS:
+        x = v.get(k)
+        if (isinstance(x, list) and len(x) == 3
+                and all(isinstance(y, (int, float)) and not isinstance(y, bool) and math.isfinite(y) for y in x)
+                and 0 < x[0] < 500 and x[1] <= x[2]):
+            out[k] = x
+    return out or None
+
+
+def best_windows(t, d):
+    """{str(span s): [km/h, t_start, t_end]} for every SPEED_WINDOWS span that fits."""
+    out = {}
+    for s in SPEED_WINDOWS:
+        r = best_window_at(t, d, 0, len(t) - 1, s)
+        if r and r[0] > 0:
+            out[str(s)] = [round(r[0], 3), r[1], r[2]]
+    return out
 
 
 def best_effort(t, d, D):
@@ -487,6 +525,9 @@ def derive(db, aid):
         return out
     for w in WINDOWS:
         out[f"b{w}"] = best_window(t, d, 0, len(t) - 1, w * 60)
+    bw = best_windows(t, d)
+    if bw:
+        out["bw"] = bw
 
     # HR histogram, 1-bpm bins, time-weighted
     hist = {}

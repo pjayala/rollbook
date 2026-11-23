@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Pedro Ayala. Rollbook is free software, see LICENSE.
-"""Compare two sessions (#16): the pure helpers of compare.js and app.js's sameRoute, run under node."""
+"""Compare two sessions (#16): the pure helpers of compare.js and session.js's sameRoute, run under node."""
 
 import json
 import os

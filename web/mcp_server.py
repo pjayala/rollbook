@@ -52,6 +52,8 @@ RECORD_COLS = ("best5min_kmh", "best10min_kmh", "best20min_kmh", "km",
                "moving_s", "ascent_m", "watts_avg", "f_np")
 RECORD_DERIVED = {"best30min_kmh": "b30", "best45min_kmh": "b45", "best60min_kmh": "b60",
                   "wind_neutral_kmh": "wind_neutral", "weighted_power_w": "np"}
+BW_LABELS = {"30": "30s", "60": "1m", "120": "2m", "300": "5m", "600": "10m", "1200": "20m",
+             "1800": "30m", "2700": "45m", "3600": "60m"}
 POWER_LABELS = {"5": "5s", "30": "30s", "60": "1m", "300": "5m", "1200": "20m",
                 "1800": "30m", "3600": "60m"}
 
@@ -208,6 +210,9 @@ class Rollbook:
             m["weighted_power_w"] = m.pop("np")
         if "be" in m:  # best efforts by distance: elapsed seconds and where it started (no coordinates)
             m["best_efforts"] = {k: {"seconds": v[0], "start_s": v[1], "start_km": round(v[2] / 1000, 3)} for k, v in m.pop("be").items()}
+        if "bw" in m:  # best speed per window length and where it started (seconds from the start)
+            bw = srv.clean_bw(m.pop("bw")) or {}
+            m["best_speed_kmh"] = {BW_LABELS[k]: {"kmh": round(v[0], 2), "start_s": v[1]} for k, v in bw.items()}
         for k in ("b30", "b45", "b60"):
             if k in m:
                 m[f"best{k[1:]}min_kmh"] = m.pop(k)

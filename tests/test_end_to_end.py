@@ -93,6 +93,20 @@ class Build(unittest.TestCase):
         r = run(self.home, "db", "query", "DELETE FROM activities")
         self.assertNotEqual(r.returncode, 0)
 
+    def test_enrich_missing_redoes_older_rules(self):
+        """Rows enriched before ENRICH_VERSION 2 hold the 30-sample best30_kmh: --missing redoes them."""
+        import sqlite3
+        db = sqlite3.connect(self.db)
+        good = db.execute("SELECT best30_kmh FROM activities WHERE id=1001").fetchone()[0]
+        db.execute("UPDATE activities SET best30_kmh=1.0, enrich_v=NULL WHERE id=1001")
+        db.commit(); db.close()
+        r = run(self.home, "db", "enrich", "--missing")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("for 1 activities", r.stdout)
+        self.assertEqual(self.query("SELECT ROUND(best30_kmh, 6), enrich_v FROM activities WHERE id=1001"), [[str(round(good, 6)), "2"]])
+        r = run(self.home, "db", "enrich", "--missing")
+        self.assertIn("for 0 activities", r.stdout)
+
     def test_version(self):
         r = run(self.home, "--version")
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -132,7 +146,7 @@ class Api(Build):
 
     def test_static_and_icons(self):
         self.assertIn(b"Rollbook", self.get("/"))
-        for p in ("/app.js", "/map.js", "/compare.js", "/style.css", "/favicon.svg", "/favicon.ico"):
+        for p in ("/main.js", "/core.js", "/map.js", "/compare.js", "/style.css", "/favicon.svg", "/favicon.ico"):
             self.assertTrue(self.get(p))
 
     def test_path_traversal_blocked(self):
@@ -177,6 +191,27 @@ class Api(Build):
             self.assertIsNone(acts[aid]["be21k"])
             self.assertIsNone(acts[aid]["be42k"])
         self.assertAlmostEqual(acts[1001]["be1k"], 147.0, delta=1.0)  # Outdoor_cycle.gpx, see test_parsing
+
+    def test_best_speeds_in_list_and_session(self):
+        """`bw`: speeds only in the list, with the window's times in the session; the
+        5/10/20 min windows equal `db enrich`'s columns and the 30 s one best30_kmh."""
+        import sqlite3
+        acts = {a["id"]: a for a in self.get("/api/activities?type=Inline%20Skate")}
+        db = sqlite3.connect(f"file:{self.db}?mode=ro", uri=True)
+        for aid in (1001, 1002):
+            bw = self.get(f"/api/activity/{aid}")["metrics"]["bw"]
+            # a window fits when 90% of it does: 55:02 holds 60 min, 40:40 holds 45 min (40:30)
+            fits = {"30", "60", "120", "300", "600", "1200", "1800", "2700"} | ({"3600"} if aid == 1001 else set())
+            self.assertEqual(set(bw), fits, aid)
+            self.assertEqual(acts[aid]["bw"], {k: v[0] for k, v in bw.items()})
+            for k, (v, t0, t1) in bw.items():
+                self.assertLessEqual(t1 - t0, int(k))
+                self.assertGreaterEqual(t1 - t0, int(k) * 0.9)
+            row = db.execute("SELECT best30_kmh, best5min_kmh, best10min_kmh, best20min_kmh FROM activities WHERE id=?", (aid,)).fetchone()
+            for k, col in zip(("30", "300", "600", "1200"), row):
+                self.assertAlmostEqual(bw[k][0], col, places=2, msg=(aid, k))
+            self.assertAlmostEqual(bw["1800"][0], acts[aid]["b30"], places=2)
+        db.close()
 
     def test_tracks_by_ids(self):
         """Home feed thumbnails: tracks of chosen sessions, any sport; same tracks as by sport."""
@@ -233,7 +268,7 @@ class Api(Build):
 
     def test_get_refuses_foreign_host(self):
         """DNS rebinding: evil.example resolving to 127.0.0.1 must not read the API."""
-        paths = ("/", "/app.js", "/api/status", "/api/activities?type=Inline%20Skate",
+        paths = ("/", "/main.js", "/api/status", "/api/activities?type=Inline%20Skate",
                  "/api/activity/1001", "/api/import", "/tiles/osm/1/1/1.png")
         for p in paths:
             for h in (f"evil.example:{self.port}", "evil.example", f"127.0.0.1:{self.port + 1}",
