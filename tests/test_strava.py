@@ -426,7 +426,7 @@ class ImporterJob(unittest.TestCase):
     def go(self, rc, log, ids):
         calls = []
 
-        def cmd(args, phase):
+        def cmd(args, phase, **kw):
             calls.append(list(args))
             self.imp.job["phase"] = phase
             if args[0] == "strava":
@@ -436,7 +436,7 @@ class ImporterJob(unittest.TestCase):
 
         with mock.patch.object(self.imp, "_cmd", side_effect=cmd), \
                 mock.patch.object(self.imp, "_ids", side_effect=ids):
-            self.assertEqual(self.imp.sync_strava()[0], 200)
+            self.assertEqual(self.imp.sync("strava")[0], 200)
             end = time.monotonic() + 10
             while self.imp.status()["state"] == "running" and time.monotonic() < end:
                 time.sleep(0.01)
@@ -471,7 +471,7 @@ class ImporterJob(unittest.TestCase):
 
     def test_busy(self):
         self.imp.job = {"state": "running"}
-        self.assertEqual(self.imp.sync_strava()[0], 409)
+        self.assertEqual(self.imp.sync("strava")[0], 409)
 
 
 class Api(unittest.TestCase):
@@ -525,10 +525,10 @@ class Api(unittest.TestCase):
         port = self.httpd.server_address[1]
         for h in ({}, {"X-Rollbook": "1", "Origin": "https://evil.example"}, {"X-Rollbook": "1", "Host": "evil.example"}):
             self.assertEqual(self.req("/api/strava/sync", "POST", h)[0], 403, h)
-        with mock.patch.object(api.IMPORTER, "sync_strava", return_value=(200, {"state": "running"})) as s:
+        with mock.patch.object(api.IMPORTER, "sync", return_value=(200, {"state": "running"})) as s:
             code, body = self.req("/api/strava/sync", "POST", {"X-Rollbook": "1", "Origin": f"http://127.0.0.1:{port}"})
             self.assertEqual((code, body), (200, {"state": "running"}))
-            s.assert_called_once_with()
+            s.assert_called_once_with("strava")
             sw.forget_cookie(self.home)
             code, body = self.req("/api/strava/sync", "POST", {"X-Rollbook": "1"})
             self.assertEqual(code, 400)

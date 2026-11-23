@@ -53,16 +53,17 @@
     <span class="muted small">A Strava account export (<code>export_….zip</code>), single <code>.fit</code> / <code>.gpx</code> / <code>.tcx</code> files (also <code>.gz</code>) such as an activity's <b>Export Original</b>, or a zip of those</span>
   </label>
   <div id="imp-list"></div>
-  <div class="toolbar" id="imp-strava-row">
-    <button class="btn small" id="imp-strava" title="Download new activities' original files from strava.com, then import them">Sync from Strava</button>
-    <span class="muted small" id="imp-strava-st"></span>
+  <div class="imp-sync">
+    <div class="toolbar"><button class="btn small" id="imp-sync" title="Download new sessions from Strava, then the ones only intervals.icu has, and import them">Sync</button>
+      <span class="muted small" id="imp-sync-st"></span></div>
+    <div class="imp-src" id="imp-src"></div>
   </div>
   <div class="toolbar" id="imp-sport-row" hidden>
     <label class="muted small">Sport for single files (the file's own sport is often wrong, e.g. HUAWEI saves skating as "cycling") <input id="imp-sport" list="imp-types" style="width:180px"></label>
     <datalist id="imp-types"></datalist>
   </div>
   <div id="imp-prog" hidden><div class="pbar"><i id="imp-bar"></i></div><div id="imp-phase" class="small"></div>
-    <pre id="imp-log" class="implog"></pre></div>
+    <details class="implog-box"><summary class="muted small">Details</summary><pre id="imp-log" class="implog"></pre></details></div>
   <div id="imp-records" class="imp-records" hidden></div>
   <div class="toolbar" style="justify-content:flex-end;margin:12px 0 0">
     <span class="muted small" style="margin-right:auto">Already-imported activities are skipped.</span>

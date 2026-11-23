@@ -26,7 +26,7 @@ MAX_IDS = 500     # a first import into a big DB stores none; others keep the ne
 MAX_ITEMS = 50
 MAX_ITEM_LEN = 120
 MAX_ID = 2 ** 53  # beyond this a JS number loses precision -> wrong link
-SOURCES = ("upload", "strava", "mixed")
+SOURCES = ("upload", "strava", "intervals", "all", "mixed")
 
 
 def _id_ok(x):

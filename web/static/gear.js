@@ -158,10 +158,29 @@ function gearBadge() {
   if (a) a.setAttribute("aria-label", n ? `Gear, ${b.title}` : "Gear");
 }
 const kindLabel = k => (S.gear && S.gear.kinds[k] || { label: k }).label;
-/** Where a part is now: {gid, from} of its open mount, or null (spare / retired). */
-function partOn(id) {
-  for (const [gid, g] of S.gear.G) for (const m of g.parts) if (m.part === id && !m.to) return { gid, from: m.from };
-  return null;
+/** Where a part is: [{gid, index, from, to}] of its fittings not ended by `today` (a removal dated later
+ * still counts), one per gear: a part can be in several setups. [] = spare / retired. G: Map gid -> gear. */
+function partOn(G, id, today) {
+  const out = [];
+  for (const [gid, g] of G) g.parts.forEach((m, index) => { if (m.part === id && (!m.to || m.to > today)) out.push({ gid, index, from: m.from, to: m.to }); });
+  return out;
+}
+/** Kinds a part is usually shared in, between setups (the same boots / frame with race wheels); others usually move. */
+const SHARED_KINDS = new Set(["boots", "frame"]);
+/** Parts the "Fit a part" dialog offers for gear `gid`: not retired, not on it already, of a kind its sports use
+ * (skate parts for a skate setup; any kind when it has no sports). {spare: [[pid, p]], other: [[pid, p, on]]}. */
+function fitChoices(P, G, SG, kinds, gid, today) {
+  const g = G.get(gid), groups = new Set((g.sports || []).map(s => SG.get(s)).filter(Boolean));
+  const spare = [], other = [];
+  for (const [pid, p] of P) {
+    if (p.retired) continue;
+    const grp = (kinds[p.kind] || {}).group;
+    if (groups.size && grp !== "other" && !groups.has(grp)) continue;
+    const on = partOn(G, pid, today);
+    if (on.some(o => o.gid === gid)) continue;
+    (on.length ? other : spare).push(on.length ? [pid, p, on] : [pid, p]);
+  }
+  return { spare, other };
 }
 
 // ------------------------------------------------------------------ dialogs
@@ -298,22 +317,41 @@ function openDefaultDialog(sport) {
     + fld("From", `<input name="since" type="date" required value="${isoDay()}">`, "sessions from this day get it; older ones keep theirs. Pick an early date to set it for past sessions too."),
     f => postGear({ op: "default.set", sport, gear: val(f, "gear") || null, since: val(f, "since") }));
 }
-/** Fit a spare part (index null) or change / delete one fitting. */
+/** Fit a part (index null) or change / delete one fitting. */
 function openMountDialog(gid, index) {
-  const g = S.gear.G.get(gid), m = index != null ? g.parts[index] : null;
-  const spare = [...S.gear.P.entries()].filter(([pid, p]) => !p.retired && !partOn(pid));
+  const g = S.gear.G.get(gid), m = index != null ? g.parts[index] : null, today = isoDay();
+  const { spare, other } = m ? { spare: [], other: [] } : fitChoices(S.gear.P, S.gear.G, S.gear.SG, S.gear.kinds, gid, today);
+  const onOther = new Map(other.map(([pid, , on]) => [pid, on]));
+  const opt = ([pid, p]) => `<option value="${esc(pid)}">${esc(kindLabel(p.kind))}: ${esc(p.name)}</option>`;
   const fields = (m ? fld("Part", `<span>${esc(S.gear.P.get(m.part).name)}</span>`)
-    : fld("Part", `<select name="part" required>${spare.map(([pid, p]) => `<option value="${esc(pid)}">${esc(kindLabel(p.kind))}: ${esc(p.name)}</option>`).join("")}</select>`,
-      spare.length ? "spare parts; a part on another gear must come off it first" : "no spare parts: add one with “New part…” below"))
-    + fld("Installed", `<input name="from" type="date" required value="${esc(m ? m.from : isoDay())}">`)
+    : fld("Part", `<select name="part" required><option value="">Choose a part…</option>${spare.length ? `<optgroup label="Spare">${spare.map(opt).join("")}</optgroup>` : ""}${other.length ? `<optgroup label="On other gear">${other.map(opt).join("")}</optgroup>` : ""}</select>`,
+      spare.length || other.length ? "" : "no parts to fit: add one with “New part…” below")
+      + `<fieldset class="pfield" data-share hidden><legend>Also on</legend><div><div class="small" data-share-on></div>
+        <label class="small"><input type="radio" name="share" value="move"> Move it here: take it off there on the install date</label><br>
+        <label class="small"><input type="radio" name="share" value="keep"> Keep it there too (shared: each session's km count once, on the gear it used)</label></div></fieldset>`)
+    + fld("Installed", `<input name="from" type="date" required value="${esc(m ? m.from : today)}">`)
     + fld("Removed", `<input name="to" type="date" value="${esc(m ? m.to || "" : "")}">`, "empty = still on");
   const extra = m ? danger(`<b>Delete from history</b> <span class="muted">as if it was never on this gear: its km here stop counting. To take it off, set Removed.</span>`,
     [["Delete from history", "data-mdel", "danger"]]) : `<div class="toolbar gear-w"><button class="linkbtn" type="button" data-pnew>New part…</button></div>`;
-  const dlg = gearDialog(m ? `${S.gear.P.get(m.part).name} on ${g.name}` : `Fit a part to ${g.name}`, fields, f => postGear(m
-    ? { op: "mount.set", gear: gid, index, part: m.part, from: val(f, "from"), to: val(f, "to") || null }
-    : { op: "mount.add", gear: gid, part: val(f, "part"), from: val(f, "from"), to: val(f, "to") || null }), extra);
+  const dlg = gearDialog(m ? `${S.gear.P.get(m.part).name} on ${g.name}` : `Fit a part to ${g.name}`, fields, f => {
+    if (m) return postGear({ op: "mount.set", gear: gid, index, part: m.part, from: val(f, "from"), to: val(f, "to") || null });
+    const pid = val(f, "part"), from = val(f, "from");
+    if (!pid) return Promise.reject(new Error("choose a part"));
+    const move = onOther.has(pid) && f.elements.share.value === "move";  // off the other gear on `from`, in the same change
+    return postGear({ op: "mount.add", gear: gid, part: pid, from, to: val(f, "to") || null, ...(move ? { move: true } : {}) });
+  }, extra);
   if (m) dlg.querySelector("[data-mdel]").onclick = () => confirm("Delete this fitting from the gear's history?") && dlgRun(dlg, () => postGear({ op: "mount.delete", gear: gid, index, part: m.part }));
-  else dlg.querySelector("[data-pnew]").onclick = () => { dlg.close(); openPartDialog(null, { gear: gid }); };
+  else {
+    dlg.querySelector("[data-pnew]").onclick = () => { dlg.close(); openPartDialog(null, { gear: gid }); };
+    const sel = dlg.querySelector("select[name=part]"), box = dlg.querySelector("[data-share]");
+    sel.onchange = () => {
+      const on = onOther.get(sel.value);
+      box.hidden = !on;
+      if (!on) return;
+      dlg.querySelector("[data-share-on]").textContent = on.map(o => S.gear.G.get(o.gid).name).join(", ");
+      dlg.querySelector(`input[name=share][value=${SHARED_KINDS.has(S.gear.P.get(sel.value).kind) ? "keep" : "move"}]`).checked = true;
+    };
+  }
 }
 
 // ------------------------------------------------------------------ pages
@@ -330,10 +368,12 @@ const kindName = p => `<span class="muted">${esc(kindLabel(p.kind))}</span> `;
 function partRows(ids) {
   const K = S.gear.kinds;
   return partOrder(Object.keys(K), S.gear.P, S.gear.T.parts)(ids).map(id => {
-    const p = S.gear.P.get(id), t = S.gear.T.parts.get(id) || {}, on = partOn(id);
-    const where = on ? `<a href="#/gear/${esc(on.gid)}">${esc(S.gear.G.get(on.gid).name)}</a> <span class="muted small">since ${esc(on.from)}</span>`
+    const p = S.gear.P.get(id), t = S.gear.T.parts.get(id) || {}, on = partOn(S.gear.G, id, isoDay());
+    const where = on.length ? on.map(o => `<a href="#/gear/${esc(o.gid)}">${esc(S.gear.G.get(o.gid).name)}</a> <span class="muted small">since ${esc(o.from)}</span>`).join("<br>")
       : `<span class="muted">${p.retired ? "retired " + esc(p.retired) : "spare"}</span>`;
-    return `<tr class="${p.retired ? "hiddenrow" : ""}"><td class="l">${kindName(p)}<button class="linkbtn plink" data-pedit="${esc(id)}" aria-label="Edit ${esc(p.name)}">${esc(p.name)}</button>${p.brand ? ` <span class="muted">${esc(p.brand)}</span>` : ""}<div class="muted small">${esc(specLine(K, p))}</div></td>
+    // phones drop the "fitted to" column: a shared part says where it is under its name
+    const narrow = on.length ? `<div class="muted small gp-on">on ${on.map(o => esc(S.gear.G.get(o.gid).name)).join(", ")}</div>` : "";
+    return `<tr class="${p.retired ? "hiddenrow" : ""}"><td class="l">${kindName(p)}<button class="linkbtn plink" data-pedit="${esc(id)}" aria-label="Edit ${esc(p.name)}">${esc(p.name)}</button>${p.brand ? ` <span class="muted">${esc(p.brand)}</span>` : ""}<div class="muted small">${esc(specLine(K, p))}</div>${narrow}</td>
       <td class="l">${where}</td><td>${fkm(t.km_total)}</td><td>${t.sessions || 0}</td><td class="l svccell" title="${esc(svcTitle(p, t))}">${svcCell(p, t)}</td>
       <td class="l acts">${p.service_km && !p.retired ? `<button class="linkbtn gear-w" data-svc="${esc(id)}" aria-label="Log service, ${esc(p.name)}">Log service</button>` : ""}</td></tr>`;
   }).join("");

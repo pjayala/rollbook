@@ -75,6 +75,7 @@ web/qr.py               stdlib QR encoder (byte mode, level M, v1-10) for the --
 web/app.py              `rollbook app`: desktop window (pywebview / Chrome-Edge --app / browser)
 web/mcp_server.py       `rollbook mcp`: read-only MCP tools over stdio JSON-RPC
 web/strava_web.py       `rollbook strava`: session-cookie sync of new activities from strava.com
+web/intervals_web.py    `rollbook intervals`: API-key sync of sessions missing from Rollbook, from intervals.icu
 opencode.json           registers `./rollbook mcp` as the `rollbook` MCP server
 web/static/             index.html + style.css + classic scripts (vanilla JS + SVG/canvas, no CDN), one concern per file:
   core.js               palette (PAL), icons, formatting, dates, api(), tooltip
@@ -113,6 +114,7 @@ NOTES.md                analysis findings so far
 | `list <archive>` / `trend <archive>` | bulk views straight off an archive, `-t type --since --until --by week\|month\|year` |
 | `streams <file>` | which data channels a file actually carries |
 | `strava auth\|sync\|status\|logout` | sync new activities from strava.com with the browser session cookie, see [Strava sync](#strava-sync) |
+| `intervals auth\|sync\|status\|logout` | sessions Rollbook lacks, from intervals.icu with an API key, see [intervals.icu sync](#intervalsicu-sync) |
 | `login` / `whoami` / `activities` | Strava API mode — unusable, see below |
 
 Accepts `.gpx`, `.tcx`, `.fit`, each optionally `.gz`, or a numeric Strava
@@ -539,8 +541,12 @@ changing `derive()`.
 * **Gear** (#10; `web/gear.py`, `web/static/gear.js`, `#/gear`,
   `#/gear/<id>`): parts (`KINDS`: kind → label, group, typed specs) are
   fitted to gear by dated mounts `{part, from, to}` — a part counts for a
-  session on day D when `from <= D < to` (swap day = the new part), and is on
-  at most one gear at a time. A session's gear: its explicit choice
+  session on day D when `from <= D < to` (swap day = the new part). A part
+  may be on several gears at once (the same boots in a daily and a race
+  setup; never twice on one gear): each session has one gear, so its km count
+  once per part, and `summary` / the parts table list it under every gear it
+  is on. `mount.add` with `move: true` ("Move it here") also takes it off
+  every other gear on `from`, in the same change. A session's gear: its explicit choice
   (`sessions[id]`, null = none), else its (edited) sport's default — the
   `defaults[sport]` entry with the latest `since <= date`, unless that gear was
   retired by then. Totals over the visible sessions (the `activities` view):
@@ -714,7 +720,7 @@ changing `derive()`.
 
 ## Strava sync
 
-`./rollbook strava sync` (or **Sync from Strava** in the Import dialog)
+`./rollbook strava sync` (or **Sync** / its "only this one" link in the Import dialog)
 fetches activities newer than the DB without a full export. No API, no
 password: it uses the website's own endpoints with the `_strava4_session`
 cookie of a logged-in browser, stored once by `./rollbook strava auth`
@@ -760,6 +766,63 @@ of the website, which Strava's terms don't allow; it is kept polite.
 * Endpoints are undocumented: all response parsing is `parse_list()` /
   `sniff_ext()`, tested against a local fake in `tests/test_strava.py`.
 
+## intervals.icu sync
+
+`./rollbook intervals sync` (or **Sync** in the Import dialog, which runs
+Strava first) fills gaps: sessions the HUAWEI watch sent to intervals.icu
+that Rollbook has from nowhere else (Strava refused the 2026-11-22 race).
+Official API, Basic auth `API_KEY:<key>`, key stored once by `rollbook
+intervals auth` in `data/intervals_key` (0600; never in a chat), `logout`
+deletes it.
+
+* `GET /api/v1/athlete/0/activities?oldest&newest` (one answer per range,
+  default the last 365 days, `--since`, `--all`), `GET
+  /api/v1/activity/i<n>/file` (FIT). intervals.icu **rebuilds** HUAWEI
+  sessions: the distance channel is the total spread evenly over the time;
+  `series()` falls back to GPS (`linear_odometer`: 2nd-98th percentile of
+  the per-step rate within 1%), which matched Strava's copy within 0.1% / 2 s
+  of pause on 2026-11-18.
+* **One rule for "same session"**: `edits.same_session(dt_s, km_a, km_b)`,
+  start < 10 s apart whatever the distance (HUAWEI's total vs Strava's GPS km
+  differ by up to ~7%; 4 of 51 overlaps were over 5%), else < 120 s with km
+  within 5% or unknown. `db build` dedup, edits / gear re-attachment
+  (`edits.reattach`) and `classify` all call it.
+* One source per session. Present = id `ID_BASE + n` (9e14 + n, 15 digits),
+  a stored `intervals-<n>.*`, `no_file` (404 / 410 / 422 only; a 200 that
+  isn't a track is skipped for this run), a known `strava_id`, a raw-DB
+  session (hidden / deleted included) or a deleted edit whose row is gone
+  (its `start` / `km`) that is the same session. Items intervals.icu got from
+  Strava (`source == "STRAVA"`) are left to `strava sync`. A DB that is there
+  but can't be read stops the run (`SyncError`). The rest is downloaded,
+  oldest first, `--max` per run (≥ 0), within `RUN_BUDGET_S` (30 min; then
+  exit 5, `cut_short`, the next run continues). `db build` ranks copies of
+  one session (`source_rank`): export row 2 > any watch file 1 >
+  `intervals-*` 0; the higher replaces the lower, a tie skips the newcomer.
+  So a later Strava copy replaces the intervals.icu one, edits and gear
+  choices follow; a fresh build ends the same way (`intervals-*` sorts
+  before `strava-*`).
+* Sport: `--sport TYPE=SPORT` (kept in `data/intervals_sync.json`, `{"v": 1}`,
+  `TYPE=` forgets) > learned from the overlap (sport of matched sessions,
+  edits overlay applied, ≥ 3 and ≥ 60% agreeing; HUAWEI "Ride" → Inline
+  Skate) > intervals.icu's type split. Names / types lose control characters
+  (`clean_text`). CSV row first, then the file via `store.write_bytes`.
+* HTTP: 0.5 s apart, 429/5xx back off (`retry_after`: ASCII Retry-After, ≤ 120
+  s) and retry 4×, 401/403 → `AuthExpired` (exit 3), network exit 4; the key is
+  an unredirected header, re-added on a redirect only to the same origin.
+  `ROLLBOOK_INTERVALS_BASE` (tests) only for loopback.
+* Dashboard: `GET /api/intervals` (never the key, `has_key` only stats),
+  `POST /api/intervals/sync` / `POST /api/sync` (all configured sources,
+  `Importer.sync("all")`: Strava then intervals.icu, each `rollbook <source>
+  sync --no-build` in a subprocess killed after `DOWNLOAD_TIMEOUT_S`; one
+  failing doesn't stop the other, per-source outcome in `job.sources`, the
+  job fails only when all did; a source whose last run said "login expired"
+  is skipped until `auth` clears it, "only this one" still tries). Import dialog: one **Sync** button, a line
+  per source (`syncLine`) with an "only this one" link, the summary per
+  source (`syncSummary`), the log under a closed "Details".
+* Not imported (yet): daily wellness (sleep, resting HR, steps, a few
+  VO2max / weight readings, from 2026-07-30) at
+  `/api/v1/athlete/0/wellness`; no HRV / SpO2 / stress arrive from HUAWEI.
+
 ## MCP server
 
 `./rollbook mcp` (`web/mcp_server.py`) is MCP over stdio, newline-delimited
@@ -804,6 +867,7 @@ reintroduce them.
 | GPS spikes | rejected above `MAX_MS`; null-island `(0,0)` dropped |
 | Stuck device odometers | odometer is preferred (96% within 1% of Strava vs 91% for GPS) *unless* it reads <50% of the GPS track |
 | Indoor/HR-only workouts | 20 treadmill sessions rejected outright if you demand a distance channel |
+| intervals.icu's rebuilt HUAWEI FIT: distance = total spread evenly over the elapsed time | no pauses, every km in the same time, best 10 min = average. `linear_odometer` spots one constant rate and GPS wins |
 | GT 6 Pro `-1 m` filler altitude between real readings | a single "Export Original" file (no Strava ascent to fall back on) got 4332 m of climbing on a flat 26 km skate. `clean_ele` drops the filler and interpolates; the fallback ascent is a 5 m-hysteresis climb of the smoothed profile (median 1.09× Strava's on 133 skates) |
 | FIT raw barometric altitude | +799 m of "climbing" on a flat 18 km skate. Hence `ascent_m` prefers Strava's terrain-model value |
 

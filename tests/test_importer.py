@@ -251,7 +251,7 @@ class Job(StoreBase):
         calls = []
         gate = gate or threading.Event()
 
-        def cmd(args, phase):
+        def cmd(args, phase, **kw):
             calls.append(list(args))
             self.imp.job["phase"] = phase
             if log:
@@ -462,7 +462,7 @@ class Job(StoreBase):
     def test_build_error_with_committed_rows_writes_partial(self):
         self.store()
 
-        def cmd(args, phase):
+        def cmd(args, phase, **kw):
             return 1 if args[:2] == ["db", "enrich"] else 0
         self.up("a.gpx", b"x", "Ride")
         with mock.patch.object(self.imp, "_cmd", side_effect=cmd), \

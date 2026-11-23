@@ -9,7 +9,10 @@ exports, so it lives beside it like edits.json):
                   services: [{date, action, note}], retired, notes}}
   gear      {id: {name, sports, parts: [{part, from, to}], retired, notes}}
             a part counts for a session on day D when from <= D < to (to null:
-            still on); one part is on at most one gear at a time
+            still on). A part may be on several gears at once (the same
+            boots in a daily and a race setup): each session has one gear,
+            so its km still count once per part; it can't be on one gear
+            twice at the same time
   defaults  {sport: [{gear | null, since}]}: a session of that sport with no
             choice of its own gets the gear of the latest `since` <= its date,
             unless that gear was retired by then
@@ -243,15 +246,15 @@ def validate(d):
         raise ValueError(f"at most {MAX_PARTS} parts and {MAX_GEAR} gear")
     parts = {_id(k, "part"): _part(p) for k, p in raw["parts"].items()}
     gear = {_id(k, "gear"): _gear(g, parts) for k, g in raw["gear"].items()}
-    on = {}  # part -> [(from, to)] over all gear: one place at a time
     for g in gear.values():
+        on = {}  # part -> [(from, to)] on this gear: once at a time (other gears may share it)
         for m in g["parts"]:
             on.setdefault(m["part"], []).append((m["from"], m["to"]))
-    for pid, iv in on.items():
-        iv.sort(key=lambda x: (x[0], x[1] or "9999-12-31"))
-        for (_, t0), (f1, _) in zip(iv, iv[1:]):
-            if t0 is None or f1 < t0:
-                raise ValueError(f"{parts[pid]['name']} is on two gears at once")
+        for pid, iv in on.items():
+            iv.sort(key=lambda x: (x[0], x[1] or "9999-12-31"))
+            for (_, t0), (f1, _) in zip(iv, iv[1:]):
+                if t0 is None or f1 < t0:
+                    raise ValueError(f"{parts[pid]['name']} is on {g['name']} twice at once")
     if len(raw["defaults"]) > MAX_SPORTS:
         raise ValueError(f"defaults for at most {MAX_SPORTS} sports")
     defaults = {}
@@ -432,7 +435,10 @@ def summary(data, tot, due, today, sport=None, include_retired=False):
         gid, _ = res.default_of(s, today)
         if gid:
             default_for.setdefault(gid, []).append(s)
-    on = {p: gid for gid in data["gear"] for p in res.parts(gid, today)}
+    on = {}  # part -> gears it is on today (a shared part is listed under each)
+    for gid in data["gear"]:
+        for p in res.parts(gid, today):
+            on.setdefault(p, []).append(gid)
     want = sport.lower() if isinstance(sport, str) else None
     gear = []
     for gid, g in data["gear"].items():
@@ -442,7 +448,7 @@ def summary(data, tot, due, today, sport=None, include_retired=False):
         gear.append({"id": gid, "name": g["name"], "sports": g["sports"], "retired": bool(g["retired"]),
                      "default_for": default_for.get(gid, []), "sessions": t["sessions"], "km": round(t["km"], 1),
                      "hours": round(t["moving_s"] / 3600, 1), "first": t["first"], "last": t["last"],
-                     "parts": [public_part(data["parts"][p], tot["parts"][p]) for p, gg in on.items() if gg == gid]})
+                     "parts": [public_part(data["parts"][p], tot["parts"][p]) for p, gg in on.items() if gid in gg]})
     gear.sort(key=lambda x: x["last"] or "", reverse=True)
     spare = [] if want else [public_part(p, tot["parts"][k]) for k, p in data["parts"].items()
                              if k not in on and (include_retired or not p["retired"])]
@@ -706,8 +712,12 @@ def _fit_check(g, p, to):
 
 
 def op_mount_add(d, b, _):
+    """Fit a part. move: true also takes it off every other gear on `from`, in
+    the same change (two saves could leave it off both if the second failed)."""
     g = _get(d, "gear", b.get("gear"))
     _fit_check(g, _get(d, "parts", b.get("part")), b.get("to"))
+    if b.get("move") is True:
+        _close_mounts(d, lambda gg, m: gg is not g and m["part"] == b["part"], _day(b.get("from"), "from", False))
     g["parts"].append({"part": b["part"], "from": b.get("from"), "to": b.get("to")})
     return {"id": b["gear"]}
 

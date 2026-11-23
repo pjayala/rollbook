@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.13.0 (2026-11-23)
+
+### Gear: parts shared between setups
+
+- A part can now be on several gears at once, e.g. the same boots and frame
+  in a daily setup and a race setup with other wheels. Each session uses one
+  gear, so a shared part still counts each session's km once. "Fit a part"
+  lists the gear's kind of parts only, spare ones first, then those on other
+  gear, where you choose "Move it here" or "Keep it there too"; the parts
+  table (and on phones the line under a part's name) lists every gear a part
+  is on.
+
+### intervals.icu sync
+
+- `rollbook intervals auth | sync | status | logout`, and one **Sync**
+  button in the Import dialog for every source you set up (Strava first,
+  then intervals.icu; "only this one" per source; a summary per source, one
+  failing doesn't stop the other): sessions the HUAWEI watch sent to
+  intervals.icu but Strava doesn't have (e.g. an upload Strava refused) come
+  in through intervals.icu's API, authenticated with your personal API key
+  (stored in `data/intervals_key`, 0600, like the Strava cookie).
+- Each session comes from one source only. A sync downloads only what
+  Rollbook doesn't have yet (same id, Strava id, stored file, or the same
+  session: start within 10 s whatever the distance, or within 2 min and 5%;
+  one rule now for `db build`, edits / gear choices and the sync). When
+  Strava's copy turns up later, it replaces the intervals.icu one (`db
+  build` now ranks sources: export > watch file > intervals.icu), and edits
+  and gear choices follow it.
+- HUAWEI calls skating "Ride": the sport is learned from the sessions in both
+  places (Ride → Inline Skate), or set with `--sport Ride="Inline Skate"`.
+- Distance channels that rise at one constant rate (intervals.icu's rebuilt
+  HUAWEI files: no pauses, every km in the same time) are ignored in favour
+  of GPS. No session already in the DB is affected.
+
+### Fixes
+
+- `strava sync` / `intervals sync`: `--max` below 0 and impossible
+  `--since` dates (2026-02-31) are refused; a non-ASCII `Retry-After` no
+  longer crashes a run; downloaded files are written atomically (0600, no
+  symlink following). A sync run has a time budget and the dashboard kills a
+  stuck download step, so an import is never blocked for hours.
+- Import dialog: the "Sport for single files" row no longer shows without
+  files, a finished run's progress is cleared on reopening, the drop zone
+  can be opened from the keyboard.
+
 ## 0.12.0 (2026-11-13)
 
 ### Best speeds on the session page
